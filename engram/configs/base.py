@@ -12,10 +12,10 @@ _VALID_EMBEDDER_PROVIDERS = {"gemini", "openai", "nvidia", "ollama", "simple"}
 
 
 class VectorStoreConfig(BaseModel):
-    provider: str = Field(default="qdrant")
+    provider: str = Field(default="sqlite_vec")
     config: Dict[str, Any] = Field(
         default_factory=lambda: {
-            "path": os.path.join(os.path.expanduser("~"), ".engram", "qdrant"),
+            "db_path": os.path.join(os.path.expanduser("~"), ".engram", "vectors.db"),
             "collection_name": "fadem_memories",
         }
     )

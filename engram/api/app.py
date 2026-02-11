@@ -110,7 +110,10 @@ def get_memory() -> Memory:
     if _memory is None:
         with _memory_lock:
             if _memory is None:
-                _memory = Memory()
+                # Re-use the MCP server's env-var-aware factory so the API
+                # honours ENGRAM_VECTOR_PROVIDER=sqlite_vec too.
+                from engram.mcp_server import get_memory_instance
+                _memory = get_memory_instance()
     return _memory
 
 

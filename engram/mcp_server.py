@@ -120,19 +120,36 @@ def get_memory_instance() -> Memory:
             "No API key found. Set GOOGLE_API_KEY, GEMINI_API_KEY, or OPENAI_API_KEY environment variable."
         )
 
-    # Configure vector store
-    qdrant_path = os.environ.get(
-        "FADEM_QDRANT_PATH",
-        os.path.join(os.path.expanduser("~"), ".engram", "qdrant")
-    )
-    vector_store_config = VectorStoreConfig(
-        provider="qdrant",
-        config={
-            "path": qdrant_path,
-            "collection_name": os.environ.get("FADEM_COLLECTION", "fadem_memories"),
-            "embedding_model_dims": embedding_dims,
-        }
-    )
+    # Configure vector store — honour ENGRAM_VECTOR_PROVIDER (default: sqlite_vec)
+    vector_provider = os.environ.get("ENGRAM_VECTOR_PROVIDER", "sqlite_vec")
+    collection = os.environ.get("FADEM_COLLECTION", "fadem_memories")
+
+    if vector_provider == "sqlite_vec":
+        vec_db = os.environ.get(
+            "ENGRAM_SQLITE_VEC_PATH",
+            os.path.join(os.path.expanduser("~"), ".engram", "vectors.db"),
+        )
+        vector_store_config = VectorStoreConfig(
+            provider="sqlite_vec",
+            config={
+                "db_path": vec_db,
+                "collection_name": collection,
+                "embedding_model_dims": embedding_dims,
+            },
+        )
+    else:
+        qdrant_path = os.environ.get(
+            "FADEM_QDRANT_PATH",
+            os.path.join(os.path.expanduser("~"), ".engram", "qdrant"),
+        )
+        vector_store_config = VectorStoreConfig(
+            provider=vector_provider,
+            config={
+                "path": qdrant_path,
+                "collection_name": collection,
+                "embedding_model_dims": embedding_dims,
+            },
+        )
 
     # Configure history database
     history_db_path = os.environ.get(
