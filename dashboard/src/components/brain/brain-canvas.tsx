@@ -177,7 +177,8 @@ export function BrainCanvas({ scrollProgress }: { scrollProgress: number }) {
   return (
     <Canvas
       camera={{ position: [0, 0, 8], fov: 50 }}
-      gl={{ antialias: true, alpha: true }}
+      gl={{ antialias: false, alpha: true, powerPreference: "high-performance" }}
+      dpr={[1, 1.5]}
       style={{ background: NEURAL.void }}
       frameloop="always"
     >
@@ -202,12 +203,11 @@ export function BrainCanvas({ scrollProgress }: { scrollProgress: number }) {
           minPolarAngle={Math.PI * 0.35}
         />
 
-        <EffectComposer>
+        <EffectComposer multisampling={0}>
           <Bloom
-            intensity={1.5}
-            luminanceThreshold={0.2}
-            luminanceSmoothing={0.9}
-            mipmapBlur
+            intensity={0.8}
+            luminanceThreshold={0.3}
+            luminanceSmoothing={0.5}
           />
         </EffectComposer>
       </Suspense>

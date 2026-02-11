@@ -14,7 +14,14 @@ export function ClusterCanvas() {
   const appRef = useRef<Application | null>(null);
   const { data } = useMemories({ limit: 500 });
   const { dimension, transitioning } = useClusterStore();
-  const openInspector = useInspectorStore((s) => s.open);
+  const openInspectorRef = useRef(useInspectorStore.getState().open);
+
+  // Keep ref in sync without causing redraws
+  useEffect(() => {
+    return useInspectorStore.subscribe((s) => {
+      openInspectorRef.current = s.open;
+    });
+  }, []);
 
   const memories = useMemo(() => data?.memories ?? [], [data]);
 
@@ -33,8 +40,8 @@ export function ClusterCanvas() {
       canvas,
       resizeTo: canvas.parentElement || undefined,
       backgroundColor: 0x050510,
-      antialias: true,
-      resolution: window.devicePixelRatio || 1,
+      antialias: false,
+      resolution: Math.min(window.devicePixelRatio || 1, 2),
       autoDensity: true,
     });
     appRef.current = app;
@@ -130,7 +137,7 @@ export function ClusterCanvas() {
 
       gfx.on("pointerdown", (e: FederatedPointerEvent) => {
         e.stopPropagation();
-        openInspector(memory.id);
+        openInspectorRef.current(memory.id);
       });
 
       gfx.on("pointerover", () => gfx.scale.set(1.5));
@@ -138,7 +145,7 @@ export function ClusterCanvas() {
 
       nodesContainer.addChild(gfx);
     }
-  }, [memories, dimension, openInspector]);
+  }, [memories, dimension]);
 
   useEffect(() => {
     draw();

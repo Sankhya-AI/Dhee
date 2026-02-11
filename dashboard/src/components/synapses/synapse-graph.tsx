@@ -42,8 +42,8 @@ export function SynapseGraph() {
       canvas,
       resizeTo: canvas.parentElement || undefined,
       backgroundColor: 0x050510,
-      antialias: true,
-      resolution: window.devicePixelRatio || 1,
+      antialias: false,
+      resolution: Math.min(window.devicePixelRatio || 1, 2),
       autoDensity: true,
     });
     appRef.current = app;
@@ -61,12 +61,7 @@ export function SynapseGraph() {
       return;
     }
 
-    const edgesContainer = new Container();
-    const nodesContainer = new Container();
-    app.stage.addChild(edgesContainer);
-    app.stage.addChild(nodesContainer);
-
-    // Run d3-force
+    // Build force nodes
     const forceNodes: ForceNode[] = nodes.map(n => ({
       id: n.id,
       layer: n.layer,
@@ -74,87 +69,92 @@ export function SynapseGraph() {
       label: n.label || '',
     }));
 
-    const forceEdges = edges.map(e => ({
+    const forceEdges: SimulationLinkDatum<ForceNode>[] = edges.map(e => ({
       source: e.source,
       target: e.target,
       type: e.type,
-    }));
+    })) as SimulationLinkDatum<ForceNode>[];
 
+    // Pre-run simulation to completion synchronously — no per-tick rendering
     const sim = forceSimulation<ForceNode>(forceNodes)
       .force(
         "link",
-        forceLink<ForceNode, SimulationLinkDatum<ForceNode>>(forceEdges as SimulationLinkDatum<ForceNode>[])
+        forceLink<ForceNode, SimulationLinkDatum<ForceNode>>(forceEdges)
           .id(d => d.id)
           .distance(80)
           .strength(0.2)
       )
       .force("charge", forceManyBody().strength(-100))
       .force("center", forceCenter(canvas.clientWidth / 2, canvas.clientHeight / 2))
-      .force("collide", forceCollide(15));
+      .force("collide", forceCollide(15))
+      .stop(); // Don't auto-run
 
-    sim.on("tick", () => {
-      edgesContainer.removeChildren();
-      nodesContainer.removeChildren();
+    // Run 300 ticks synchronously (no rendering in between)
+    for (let i = 0; i < 300; i++) {
+      sim.tick();
+    }
 
-      // Draw edges as synapses
-      const edgeGfx = new Graphics();
-      for (const edge of forceEdges) {
-        const s = forceNodes.find(n => n.id === (edge.source as unknown as ForceNode).id || n.id === edge.source);
-        const t = forceNodes.find(n => n.id === (edge.target as unknown as ForceNode).id || n.id === edge.target);
-        if (!s?.x || !s?.y || !t?.x || !t?.y) continue;
+    // Build node lookup map for O(1) edge resolution
+    const nodeMap = new Map(forceNodes.map(n => [n.id, n]));
 
-        const color = edge.type === "category" ? 0x7c3aed : 0x22d3ee;
-        const alpha = 0.12;
+    // Draw once — edges
+    const edgesContainer = new Container();
+    const nodesContainer = new Container();
+    app.stage.addChild(edgesContainer);
+    app.stage.addChild(nodesContainer);
 
-        edgeGfx.moveTo(s.x, s.y);
-        edgeGfx.lineTo(t.x, t.y);
-        edgeGfx.stroke({ width: 1, color, alpha });
-      }
-      edgesContainer.addChild(edgeGfx);
+    const edgeGfx = new Graphics();
+    for (const edge of forceEdges) {
+      const sourceNode = edge.source as unknown as ForceNode;
+      const targetNode = edge.target as unknown as ForceNode;
+      if (!sourceNode.x || !sourceNode.y || !targetNode.x || !targetNode.y) continue;
 
-      // Draw nodes
-      for (const node of forceNodes) {
-        if (!node.x || !node.y) continue;
+      const color = (edge as { type?: string }).type === "category" ? 0x7c3aed : 0x22d3ee;
+      edgeGfx.moveTo(sourceNode.x, sourceNode.y);
+      edgeGfx.lineTo(targetNode.x, targetNode.y);
+      edgeGfx.stroke({ width: 1, color, alpha: 0.12 });
+    }
+    edgesContainer.addChild(edgeGfx);
 
-        const radius = 4 + node.strength * 8;
-        const colorHex = node.layer === "sml" ? 0x22d3ee : 0xfbbf24;
+    // Draw once — nodes
+    for (const node of forceNodes) {
+      if (!node.x || !node.y) continue;
 
-        const gfx = new Graphics();
-        // Glow
-        gfx.circle(0, 0, radius * 2.5);
-        gfx.fill({ color: colorHex, alpha: 0.05 });
-        // Node
-        gfx.circle(0, 0, radius);
-        gfx.fill({ color: colorHex, alpha: 0.8 });
+      const radius = 4 + node.strength * 8;
+      const colorHex = node.layer === "sml" ? 0x22d3ee : 0xfbbf24;
 
-        gfx.position.set(node.x, node.y);
-        gfx.eventMode = "static";
-        gfx.cursor = "pointer";
+      const gfx = new Graphics();
+      // Glow
+      gfx.circle(0, 0, radius * 2.5);
+      gfx.fill({ color: colorHex, alpha: 0.05 });
+      // Node
+      gfx.circle(0, 0, radius);
+      gfx.fill({ color: colorHex, alpha: 0.8 });
 
-        gfx.on("pointerdown", (e: FederatedPointerEvent) => {
-          e.stopPropagation();
-          openInspector(node.id);
+      gfx.position.set(node.x, node.y);
+      gfx.eventMode = "static";
+      gfx.cursor = "pointer";
+
+      gfx.on("pointerdown", (e: FederatedPointerEvent) => {
+        e.stopPropagation();
+        openInspector(node.id);
+      });
+      gfx.on("pointerover", () => gfx.scale.set(1.4));
+      gfx.on("pointerout", () => gfx.scale.set(1));
+
+      nodesContainer.addChild(gfx);
+
+      // Label only for strong nodes
+      if (node.strength > 0.5 && node.label) {
+        const label = new Text({
+          text: node.label.slice(0, 25),
+          style: new TextStyle({ fontSize: 8, fill: 0x94a3b8, fontFamily: "system-ui" }),
         });
-        gfx.on("pointerover", () => gfx.scale.set(1.4));
-        gfx.on("pointerout", () => gfx.scale.set(1));
-
-        nodesContainer.addChild(gfx);
-
-        // Label
-        if (node.strength > 0.5 && node.label) {
-          const label = new Text({
-            text: node.label.slice(0, 25),
-            style: new TextStyle({ fontSize: 8, fill: 0x94a3b8, fontFamily: "system-ui" }),
-          });
-          label.anchor.set(0.5, 0);
-          label.position.set(node.x, node.y + radius + 4);
-          nodesContainer.addChild(label);
-        }
+        label.anchor.set(0.5, 0);
+        label.position.set(node.x, node.y + radius + 4);
+        nodesContainer.addChild(label);
       }
-    });
-
-    // Stop after 200 ticks
-    sim.alpha(1).alphaDecay(0.005);
+    }
   }, [data, openInspector]);
 
   useEffect(() => {
