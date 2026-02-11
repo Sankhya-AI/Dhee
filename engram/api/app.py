@@ -885,6 +885,30 @@ async def get_category_summary(category_id: str, regenerate: bool = Query(defaul
 # Dashboard endpoints
 # ---------------------------------------------------------------------------
 
+@app.get("/v1/conflicts")
+@app.get("/v1/conflicts/")
+async def list_conflicts(
+    user_id: Optional[str] = Query(default=None),
+    resolution: Optional[str] = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    return {"conflicts": get_memory().db.list_conflict_stash(
+        user_id=user_id, resolution=resolution, limit=limit,
+    )}
+
+
+@app.post("/v1/memories/{memory_id}/promote")
+async def promote_memory(memory_id: str):
+    result = get_memory().promote(memory_id)
+    return {"status": "promoted", "id": memory_id, **result}
+
+
+@app.post("/v1/memories/{memory_id}/demote")
+async def demote_memory(memory_id: str):
+    result = get_memory().demote(memory_id)
+    return {"status": "demoted", "id": memory_id, **result}
+
+
 @app.get("/v1/profiles")
 @app.get("/v1/profiles/")
 async def list_profiles(

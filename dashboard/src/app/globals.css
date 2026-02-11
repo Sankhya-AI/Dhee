@@ -1,0 +1,128 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-background: #050510;
+  --color-foreground: #e2e8f0;
+  --color-muted: #12122a;
+  --color-muted-foreground: #94a3b8;
+  --color-border: rgba(124, 58, 237, 0.15);
+  --color-ring: #7c3aed;
+  --color-sml: #22d3ee;
+  --color-lml: #fbbf24;
+  --color-brand: #7c3aed;
+  --color-destructive: #ef4444;
+  --color-success: #22c55e;
+  --color-episodic: #7c3aed;
+  --color-semantic: #06d6a0;
+  --color-s-fast: #ef4444;
+  --color-s-mid: #f59e0b;
+  --color-s-slow: #22c55e;
+  --color-void: #050510;
+  --color-cortex: #0a0a1a;
+  --color-synapse: #12122a;
+  --color-membrane: #1a1a3a;
+  --color-neural-glow: #7c3aed40;
+  --color-synapse-glow: #22d3ee30;
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--color-void);
+  color: var(--color-foreground);
+  font-family: var(--font-sans), system-ui, sans-serif;
+}
+
+/* Glass-morphism utility */
+.glass {
+  background: rgba(26, 26, 58, 0.6);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(124, 58, 237, 0.15);
+  border-radius: 12px;
+}
+
+.glass-subtle {
+  background: rgba(18, 18, 42, 0.5);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(124, 58, 237, 0.08);
+  border-radius: 8px;
+}
+
+/* Neural glow effects */
+.glow-episodic {
+  box-shadow: 0 0 20px rgba(124, 58, 237, 0.3), 0 0 60px rgba(124, 58, 237, 0.1);
+}
+
+.glow-semantic {
+  box-shadow: 0 0 20px rgba(6, 214, 160, 0.3), 0 0 60px rgba(6, 214, 160, 0.1);
+}
+
+.glow-sml {
+  box-shadow: 0 0 20px rgba(34, 211, 238, 0.3), 0 0 60px rgba(34, 211, 238, 0.1);
+}
+
+.glow-lml {
+  box-shadow: 0 0 20px rgba(251, 191, 36, 0.3), 0 0 60px rgba(251, 191, 36, 0.1);
+}
+
+/* Pulse animation */
+@keyframes neural-pulse {
+  0%, 100% { opacity: 0.6; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.05); }
+}
+
+.animate-neural-pulse {
+  animation: neural-pulse 3s ease-in-out infinite;
+}
+
+@keyframes breathe {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 0.8; }
+}
+
+.animate-breathe {
+  animation: breathe 4s ease-in-out infinite;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(124, 58, 237, 0.3);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(124, 58, 237, 0.5);
+}
+
+/* Recharts dark theme overrides */
+.recharts-text {
+  fill: #94a3b8 !important;
+}
+
+.recharts-cartesian-grid line {
+  stroke: rgba(124, 58, 237, 0.08) !important;
+}
+
+.recharts-tooltip-wrapper .recharts-default-tooltip {
+  background: rgba(26, 26, 58, 0.9) !important;
+  border: 1px solid rgba(124, 58, 237, 0.2) !important;
+  border-radius: 8px !important;
+  backdrop-filter: blur(8px);
+}
+
+/* Selection color */
+::selection {
+  background: rgba(124, 58, 237, 0.4);
+  color: #e2e8f0;
+}
