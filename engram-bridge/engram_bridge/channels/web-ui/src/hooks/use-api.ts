@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import type {
   Project, ProjectStatus, ProjectTag, Issue, FeedEvent, SystemInfo,
   MemoryItem, MemoryStats, MemoryCategory,
+  CoordinationAgent, CoordinationEvent, RouteResult,
 } from "@/types";
 import type { AgentInfo } from "@/types/dashboard";
 
@@ -131,6 +132,26 @@ export const api = {
   },
   memoryCategories: () => get<MemoryCategory[]>("/api/memory/categories"),
   memoryGet: (id: string) => get<MemoryItem>(`/api/memory/${id}`),
+
+  // Coordination
+  coordinationAgents: () => get<CoordinationAgent[]>("/api/coordination/agents"),
+  coordinationRegister: (name: string, data: {
+    capabilities: string[];
+    description: string;
+    agent_type: string;
+    model?: string;
+    max_concurrent?: number;
+  }) => post<CoordinationAgent>(`/api/coordination/agents/${name}/register`, data),
+  coordinationMatch: (q: string) =>
+    get<CoordinationAgent[]>(`/api/coordination/agents/match?q=${encodeURIComponent(q)}`),
+  coordinationRoute: (taskId: string, force = false) =>
+    post<Issue>(`/api/coordination/route/${taskId}`, { force }),
+  coordinationRoutePending: () =>
+    post<RouteResult>("/api/coordination/route-pending"),
+  coordinationClaim: (taskId: string, agentName: string) =>
+    post<Issue>(`/api/coordination/claim/${taskId}`, { agent_name: agentName }),
+  coordinationEvents: (limit = 50) =>
+    get<CoordinationEvent[]>(`/api/coordination/events?limit=${limit}`),
 };
 
 // ── Legacy hooks for backward compatibility with old dashboard ──

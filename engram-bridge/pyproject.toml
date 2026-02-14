@@ -17,7 +17,8 @@ dependencies = [
 [project.optional-dependencies]
 telegram = ["python-telegram-bot>=22.0"]
 web = ["fastapi>=0.104.0", "uvicorn[standard]>=0.24.0"]
-all = ["python-telegram-bot>=22.0", "fastapi>=0.104.0", "uvicorn[standard]>=0.24.0"]
+orchestrator = ["engram-orchestrator>=0.1.0"]
+all = ["python-telegram-bot>=22.0", "fastapi>=0.104.0", "uvicorn[standard]>=0.24.0", "engram-orchestrator>=0.1.0"]
 dev = ["pytest>=7.0.0", "pytest-asyncio"]
 
 [project.scripts]

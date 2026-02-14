@@ -173,6 +173,7 @@ class EngramTaskStore:
         self._tm = TaskManager(memory)
         self._user_id = user_id
         self._feed: list[dict[str, Any]] = []
+        self._bus = None  # set by Bridge.start() for coordination events
 
     def _emit(self, event: str, data: dict[str, Any]) -> None:
         entry = {"id": str(uuid.uuid4()), "event": event, "ts": datetime.now(timezone.utc).isoformat(), **data}
@@ -201,6 +202,12 @@ class EngramTaskStore:
             issue_number=data.get("issue_number"),
         )
         self._emit("task_created", {"task_id": task.get("id", ""), "title": task.get("title", "")})
+        # Publish bus event for coordination auto-routing
+        if self._bus:
+            self._bus.publish("bridge.task.created", {
+                "task_id": task.get("id", ""),
+                "title": task.get("title", ""),
+            })
         return task
 
     def get_all(self) -> list[dict[str, Any]]:
@@ -331,6 +338,7 @@ class WebChannel(BaseChannel):
         self.tasks = TaskStore()
         self._project_manager = None  # set when Engram memory is available
         self._memory = None
+        self._coordinator = None  # set by Bridge.start() when coordination enabled
 
         self.app = FastAPI(title="engram-bridge", docs_url=None, redoc_url=None)
         self._setup_routes()
@@ -882,6 +890,110 @@ class WebChannel(BaseChannel):
                 logger.exception("memory get error")
                 return JSONResponse({"error": str(exc)}, status_code=500)
 
+        # ── REST API — Coordination endpoints ──
+
+        @app.get("/api/coordination/agents")
+        async def coordination_list_agents():
+            if not channel._coordinator:
+                return JSONResponse({"error": "Coordination not enabled"}, status_code=503)
+            agents = channel._coordinator.registry.list()
+            return JSONResponse(agents)
+
+        @app.post("/api/coordination/agents/{name}/register")
+        async def coordination_register_agent(name: str, request: Request):
+            if not channel._coordinator:
+                return JSONResponse({"error": "Coordination not enabled"}, status_code=503)
+            data = await request.json()
+            result = channel._coordinator.registry.register(
+                name,
+                capabilities=data.get("capabilities", ["general"]),
+                description=data.get("description", f"{name} agent"),
+                agent_type=data.get("agent_type", "custom"),
+                model=data.get("model", ""),
+                max_concurrent=data.get("max_concurrent", 1),
+            )
+            return JSONResponse(result)
+
+        @app.get("/api/coordination/agents/match")
+        async def coordination_match_agents(q: str = Query(default="")):
+            if not channel._coordinator:
+                return JSONResponse({"error": "Coordination not enabled"}, status_code=503)
+            if not q.strip():
+                return JSONResponse([])
+            agents = channel._coordinator.registry.find_capable(q.strip(), limit=5)
+            return JSONResponse(agents)
+
+        @app.post("/api/coordination/route/{task_id}")
+        async def coordination_route_task(task_id: str, request: Request):
+            if not channel._coordinator:
+                return JSONResponse({"error": "Coordination not enabled"}, status_code=503)
+            body = {}
+            try:
+                body = await request.json()
+            except Exception:
+                pass
+            force = body.get("force", False)
+            result = channel._coordinator.router.route(task_id, force=force)
+            if result:
+                channel._broadcast_ws("task_routed", {
+                    "task_id": task_id,
+                    "agent": result.get("assigned_agent", ""),
+                })
+                return JSONResponse(result)
+            return JSONResponse({"error": "No suitable agent found"}, status_code=404)
+
+        @app.post("/api/coordination/route-pending")
+        async def coordination_route_pending():
+            if not channel._coordinator:
+                return JSONResponse({"error": "Coordination not enabled"}, status_code=503)
+            routed = channel._coordinator.router.route_pending()
+            for task in routed:
+                channel._broadcast_ws("task_routed", {
+                    "task_id": task.get("id", ""),
+                    "agent": task.get("assigned_agent", ""),
+                })
+            return JSONResponse({"routed": len(routed), "tasks": routed})
+
+        @app.post("/api/coordination/claim/{task_id}")
+        async def coordination_claim_task(task_id: str, request: Request):
+            if not channel._coordinator:
+                return JSONResponse({"error": "Coordination not enabled"}, status_code=503)
+            data = await request.json()
+            agent_name = data.get("agent_name", "")
+            if not agent_name:
+                return JSONResponse({"error": "agent_name required"}, status_code=400)
+            result = channel._coordinator.claim(task_id, agent_name)
+            if result:
+                channel._broadcast_ws("task_claimed", {
+                    "task_id": task_id,
+                    "agent": agent_name,
+                })
+                return JSONResponse(result)
+            return JSONResponse({"error": "Claim failed (already claimed or invalid status)"}, status_code=409)
+
+        @app.get("/api/coordination/events")
+        async def coordination_events(limit: int = Query(default=50)):
+            if not channel._coordinator:
+                return JSONResponse({"error": "Coordination not enabled"}, status_code=503)
+            results = channel._coordinator._memory.get_all(
+                user_id="system",
+                filters={"memory_type": "coordination_event"},
+                limit=limit,
+            )
+            items = results.get("results", []) if isinstance(results, dict) else results
+            events = []
+            for item in items:
+                md = item.get("metadata", {})
+                events.append({
+                    "id": item.get("id", ""),
+                    "type": md.get("coord_event_type", ""),
+                    "timestamp": md.get("coord_timestamp", ""),
+                    "details": md.get("coord_details", {}),
+                    "content": item.get("memory", item.get("content", "")),
+                })
+            events.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
+            return JSONResponse(events[:limit])
+
         # ── WebSocket ──
 
         @app.websocket("/ws")
@@ -916,6 +1028,30 @@ class WebChannel(BaseChannel):
                     if msg_type == "stats_request":
                         if self._on_stats_request:
                             asyncio.create_task(self._on_stats_request(user_id))
+                        continue
+
+                    # Task route: request coordination routing via WebSocket
+                    if msg_type == "task_route":
+                        task_id = data.get("task_id", "")
+                        if task_id and self._coordinator:
+                            result = self._coordinator.on_task_created({"task_id": task_id})
+                            if result and result.get("assigned_agent"):
+                                self._broadcast_ws("task_routed", {
+                                    "task_id": task_id,
+                                    "agent": result["assigned_agent"],
+                                    "title": result.get("title", ""),
+                                })
+                            else:
+                                await ws.send_json({
+                                    "type": "task_route_failed",
+                                    "task_id": task_id,
+                                    "reason": "No suitable agent found",
+                                })
+                        elif not self._coordinator:
+                            await ws.send_json({
+                                "type": "error",
+                                "content": "Coordination not enabled",
+                            })
                         continue
 
                     # Task execution: dispatch to agent via bridge

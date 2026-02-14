@@ -26,6 +26,14 @@ class WebConfig:
 
 
 @dataclass
+class CoordinationConfig:
+    enabled: bool = False
+    auto_route: bool = True
+    log_events: bool = True
+    default_capabilities: dict[str, dict] = field(default_factory=dict)
+
+
+@dataclass
 class BridgeConfig:
     telegram_token: str
     allowed_users: list[int]
@@ -35,6 +43,7 @@ class BridgeConfig:
     auto_store: bool
     channel: str = "telegram"
     web: WebConfig = field(default_factory=WebConfig)
+    coordination: CoordinationConfig = field(default_factory=CoordinationConfig)
 
     @staticmethod
     def _resolve_env(value: str) -> str:
@@ -87,6 +96,15 @@ def load_config(path: str = "~/.engram/bridge.json") -> BridgeConfig:
         auth_token=web_token,
     )
 
+    # Coordination config
+    coord_raw = raw.get("coordination", {})
+    coordination = CoordinationConfig(
+        enabled=coord_raw.get("enabled", False),
+        auto_route=coord_raw.get("auto_route", True),
+        log_events=coord_raw.get("log_events", True),
+        default_capabilities=coord_raw.get("default_capabilities", {}),
+    )
+
     return BridgeConfig(
         telegram_token=token,
         allowed_users=allowed_users,
@@ -96,4 +114,5 @@ def load_config(path: str = "~/.engram/bridge.json") -> BridgeConfig:
         auto_store=mem.get("auto_store", True),
         channel=raw.get("channel", "telegram"),
         web=web,
+        coordination=coordination,
     )

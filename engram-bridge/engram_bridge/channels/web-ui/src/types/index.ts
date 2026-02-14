@@ -175,6 +175,36 @@ export interface MemoryStats {
   echo_enabled: boolean;
 }
 
+// ── Coordination types ──
+
+export interface CoordinationAgent {
+  id: string;
+  name: string;
+  type: string;
+  model: string;
+  description: string;
+  capabilities: string[];
+  max_concurrent: number;
+  status: "available" | "busy" | "offline";
+  active_tasks: string[];
+  registered_at: string;
+  last_seen: string;
+  similarity?: number;
+}
+
+export interface CoordinationEvent {
+  id: string;
+  type: string;
+  timestamp: string;
+  details: Record<string, unknown>;
+  content: string;
+}
+
+export interface RouteResult {
+  routed: number;
+  tasks: Issue[];
+}
+
 // ── Filter/sort types ──
 
 export interface KanbanFilters {

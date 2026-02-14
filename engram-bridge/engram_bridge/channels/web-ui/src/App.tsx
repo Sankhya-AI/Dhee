@@ -10,6 +10,7 @@ import { BoardView } from "@/views/BoardView";
 import { TaskChatView } from "@/views/TaskChatView";
 import { MemoryView } from "@/views/MemoryView";
 import { TodoView } from "@/views/TodoView";
+import { CoordinationView } from "@/views/CoordinationView";
 import { CommandBar } from "@/components/dialogs/CommandBar";
 import { SettingsDialog } from "@/components/dialogs/SettingsDialog";
 import { IssuePanel } from "@/components/issue/IssuePanel";
@@ -34,6 +35,7 @@ function AppInner() {
           <Route path="/board" element={<BoardView />} />
           <Route path="/task/:taskId" element={<TaskChatView />} />
           <Route path="/memory" element={<MemoryView />} />
+          <Route path="/coordination" element={<CoordinationView />} />
         </Routes>
 
         {/* Command palette */}

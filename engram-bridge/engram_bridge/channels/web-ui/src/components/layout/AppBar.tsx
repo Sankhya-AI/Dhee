@@ -7,6 +7,7 @@ import {
   ListTodo,
   LayoutDashboard,
   Database,
+  Network,
   ChevronDown,
   Settings,
 } from "lucide-react";
@@ -25,6 +26,7 @@ const NAV_TABS = [
   { path: "/todos", label: "Todos", icon: ListTodo },
   { path: "/board", label: "Board", icon: LayoutDashboard },
   { path: "/memory", label: "Memory", icon: Database },
+  { path: "/coordination", label: "Agents", icon: Network },
 ] as const;
 
 export function AppBar({ onOpenSettings }: Props) {

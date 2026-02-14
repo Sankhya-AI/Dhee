@@ -54,6 +54,9 @@ class Bridge:
         # Channel
         self.channel: BaseChannel | None = None
 
+        # Coordination layer (lazy init when enabled)
+        self._coordinator = None
+
         # Per-user sessions
         self._sessions: dict[int, UserSession] = {}
 
@@ -127,14 +130,23 @@ class Bridge:
 
         for name, acfg in self.config.agents.items():
             status_info = active_agents.get(name)
-            agents.append({
+            info = {
                 "name": name,
                 "type": acfg.type,
                 "model": acfg.model,
                 "status": "active" if status_info and status_info["running"] else
                           "idle" if status_info else "offline",
                 "repo": status_info["repo"] if status_info else None,
-            })
+            }
+            # Enrich with coordination registry data
+            if self._coordinator:
+                reg_info = self._coordinator.registry.get(name)
+                if reg_info:
+                    info["capabilities"] = reg_info.get("capabilities", [])
+                    info["max_concurrent"] = reg_info.get("max_concurrent", 1)
+                    info["active_tasks"] = reg_info.get("active_tasks", [])
+                    info["coordination_status"] = reg_info.get("status", "")
+            agents.append(info)
         return agents
 
     # ── Agent Factory ──
@@ -176,10 +188,27 @@ class Bridge:
                 try:
                     from engram_bridge.channels.web import EngramTaskStore
                     wc.tasks = EngramTaskStore(mem, user_id="bridge")
+                    wc.tasks._bus = self.bus  # wire bus for coordination events
                     wc.set_memory(mem)
                     logger.info("Using EngramTaskStore (persistent tasks) + ProjectManager")
                 except Exception as e:
                     logger.warning("Failed to init EngramTaskStore, using ephemeral: %s", e)
+            # Initialize coordination layer if enabled
+            if self.config.coordination.enabled and mem:
+                try:
+                    from engram_orchestrator import Coordinator
+                    self._coordinator = Coordinator(mem, self.bus, self.config.coordination)
+                    self._coordinator.register_from_config(
+                        self.config.agents,
+                        caps_map=self.config.coordination.default_capabilities or None,
+                    )
+                    self._coordinator.start()
+                    wc._coordinator = self._coordinator
+                    logger.info("Coordination layer enabled")
+                except Exception as e:
+                    logger.warning("Failed to init coordination layer: %s", e)
+                    self._coordinator = None
+
             self.channel = wc
         else:
             from engram_bridge.channels.telegram import TelegramChannel
@@ -203,6 +232,10 @@ class Bridge:
                 )
                 await session.agent.stop()
         self._sessions.clear()
+
+        if self._coordinator:
+            self._coordinator.stop()
+            self._coordinator = None
 
         if self.channel:
             await self.channel.stop()
@@ -369,6 +402,9 @@ class Bridge:
             agent=agent, repo=repo, agent_session_id=session_id
         )
 
+        if self._coordinator:
+            self._coordinator.registry.update_status(agent_name, "available")
+
         self.bus.publish("bridge.agent.started", {
             "user_id": msg.user_id, "agent": agent_name, "repo": repo,
         })
@@ -471,6 +507,8 @@ class Bridge:
                 status="stopped",
                 task_summary="User stopped session",
             )
+            if self._coordinator:
+                self._coordinator.registry.update_status(session.agent.name, "offline")
             await session.agent.stop()
             del self._sessions[msg.user_id]
             await self.channel.send_text(msg.chat_id, "Session stopped. State saved.")
