@@ -1,10 +1,10 @@
 import { useLocation, useNavigate } from "react-router-dom";
 import {
-  Brain,
   Wifi,
   WifiOff,
   Loader2,
   MessageSquare,
+  ListTodo,
   LayoutDashboard,
   Database,
   ChevronDown,
@@ -22,6 +22,7 @@ interface Props {
 
 const NAV_TABS = [
   { path: "/", label: "Chat", icon: MessageSquare },
+  { path: "/todos", label: "Todos", icon: ListTodo },
   { path: "/board", label: "Board", icon: LayoutDashboard },
   { path: "/memory", label: "Memory", icon: Database },
 ] as const;
@@ -53,12 +54,18 @@ export function AppBar({ onOpenSettings }: Props) {
     <header className="flex items-center justify-between px-4 py-2.5 border-b border-border bg-background">
       <div className="flex items-center gap-4">
         {/* Logo */}
-        <div className="flex items-center gap-2.5">
-          <div className="w-7 h-7 rounded-lg flex items-center justify-center bg-primary">
-            <Brain className="h-4 w-4 text-primary-foreground" />
-          </div>
-          <h1 className="text-sm font-semibold tracking-tight">engram</h1>
-        </div>
+        <a
+          href="/"
+          onClick={(e) => { e.preventDefault(); navigate("/"); }}
+          className="flex items-center hover:opacity-80 transition-opacity"
+        >
+          <span
+            className="engram-gradient-text font-bold tracking-[-0.025em]"
+            style={{ fontSize: "1.35rem", lineHeight: "1.5rem", fontFamily: "'Space Grotesk', sans-serif" }}
+          >
+            engram
+          </span>
+        </a>
 
         {/* Project selector */}
         {currentProject && (

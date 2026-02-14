@@ -796,12 +796,22 @@ class WebChannel(BaseChannel):
 
         # ── REST API — Memory endpoints ──
 
+        _MEM_USER = "default"  # scope all memory queries to the default user
+
+        def _clean_memory(m: dict) -> dict:
+            """Strip embedding vectors and normalise fields for the frontend."""
+            out = {k: v for k, v in m.items() if k != "embedding"}
+            md = out.get("metadata") or {}
+            out.setdefault("echo_depth", md.get("echo_depth", "none"))
+            out.setdefault("echo_encodings", md.get("echo_encodings"))
+            return out
+
         @app.get("/api/memory/stats")
         async def memory_stats():
             if channel._memory is None:
                 return JSONResponse({"error": "Memory not configured"}, status_code=503)
             try:
-                stats = channel._memory.get_stats()
+                stats = channel._memory.get_stats(user_id=_MEM_USER)
                 return JSONResponse(stats)
             except Exception as exc:
                 logger.exception("memory stats error")
@@ -814,9 +824,9 @@ class WebChannel(BaseChannel):
             if not q.strip():
                 return JSONResponse([])
             try:
-                result = channel._memory.search(q.strip(), limit=limit)
+                result = channel._memory.search(q.strip(), user_id=_MEM_USER, limit=limit)
                 items = result.get("results", [])
-                return JSONResponse(items)
+                return JSONResponse([_clean_memory(m) for m in items])
             except Exception as exc:
                 logger.exception("memory search error")
                 return JSONResponse({"error": str(exc)}, status_code=500)
@@ -830,7 +840,8 @@ class WebChannel(BaseChannel):
             if channel._memory is None:
                 return JSONResponse({"error": "Memory not configured"}, status_code=503)
             try:
-                memories = channel._memory.get_all()
+                result = channel._memory.get_all(user_id=_MEM_USER, limit=limit)
+                memories = result.get("results", []) if isinstance(result, dict) else result
                 # Apply optional filters
                 if layer:
                     memories = [m for m in memories if m.get("layer") == layer]
@@ -842,7 +853,7 @@ class WebChannel(BaseChannel):
                     ]
                 # Return newest first, limited
                 memories.sort(key=lambda m: m.get("updated_at", m.get("created_at", "")), reverse=True)
-                return JSONResponse(memories[:limit])
+                return JSONResponse([_clean_memory(m) for m in memories[:limit]])
             except Exception as exc:
                 logger.exception("memory all error")
                 return JSONResponse({"error": str(exc)}, status_code=500)
@@ -866,7 +877,7 @@ class WebChannel(BaseChannel):
                 mem = channel._memory.get(memory_id)
                 if not mem:
                     return JSONResponse({"error": "Not found"}, status_code=404)
-                return JSONResponse(mem)
+                return JSONResponse(_clean_memory(mem))
             except Exception as exc:
                 logger.exception("memory get error")
                 return JSONResponse({"error": str(exc)}, status_code=500)

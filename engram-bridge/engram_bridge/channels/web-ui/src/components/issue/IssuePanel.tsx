@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import { X, Trash2, Plus, Send } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { X, Trash2, Plus, Send, MessageSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -33,6 +34,7 @@ export function IssuePanel({ issue, createMode, defaultStatusId, onClose, onIssu
   const [newAssignee, setNewAssignee] = useState("");
   const [saving, setSaving] = useState(false);
 
+  const navigate = useNavigate();
   const titleRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -149,6 +151,18 @@ export function IssuePanel({ issue, createMode, defaultStatusId, onClose, onIssu
             )}
           </div>
           <div className="flex items-center gap-1">
+            {!createMode && issue && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => { onClose(); navigate(`/task/${issue.id}`); }}
+                className="h-7 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground"
+                title="Open task chat"
+              >
+                <MessageSquare className="h-3.5 w-3.5" />
+                Chat
+              </Button>
+            )}
             {!createMode && issue && (
               <Button variant="ghost" size="sm" onClick={handleDelete} className="h-7 w-7 p-0 text-destructive hover:text-destructive">
                 <Trash2 className="h-3.5 w-3.5" />

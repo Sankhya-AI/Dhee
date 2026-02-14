@@ -9,6 +9,7 @@ import { ChatView } from "@/views/ChatView";
 import { BoardView } from "@/views/BoardView";
 import { TaskChatView } from "@/views/TaskChatView";
 import { MemoryView } from "@/views/MemoryView";
+import { TodoView } from "@/views/TodoView";
 import { CommandBar } from "@/components/dialogs/CommandBar";
 import { SettingsDialog } from "@/components/dialogs/SettingsDialog";
 import { IssuePanel } from "@/components/issue/IssuePanel";
@@ -29,6 +30,7 @@ function AppInner() {
 
         <Routes>
           <Route path="/" element={<ChatView />} />
+          <Route path="/todos" element={<TodoView />} />
           <Route path="/board" element={<BoardView />} />
           <Route path="/task/:taskId" element={<TaskChatView />} />
           <Route path="/memory" element={<MemoryView />} />

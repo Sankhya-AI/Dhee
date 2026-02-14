@@ -1,3 +1,4 @@
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&display=swap");
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
@@ -114,3 +115,15 @@
 .thinking-dot:nth-child(1) { animation: pulse-dots 1.4s infinite 0s; }
 .thinking-dot:nth-child(2) { animation: pulse-dots 1.4s infinite 0.2s; }
 .thinking-dot:nth-child(3) { animation: pulse-dots 1.4s infinite 0.4s; }
+
+/* Engram brand gradient (matches landing page) */
+.engram-gradient-text {
+  background: linear-gradient(135deg, #e8722a 0%, #e85d45 30%, #d4607a 60%, #ff8a2b 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.engram-gradient-bg {
+  background: linear-gradient(135deg, #e8722a 0%, #e85d45 30%, #d4607a 60%, #ff8a2b 100%);
+}

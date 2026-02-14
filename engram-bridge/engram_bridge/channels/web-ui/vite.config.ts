@@ -10,4 +10,10 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  server: {
+    proxy: {
+      "/api": "http://127.0.0.1:8200",
+      "/ws": { target: "ws://127.0.0.1:8200", ws: true },
+    },
+  },
 })
