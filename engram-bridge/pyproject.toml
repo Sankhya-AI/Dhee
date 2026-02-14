@@ -11,7 +11,7 @@ requires-python = ">=3.10"
 license = {text = "MIT"}
 dependencies = [
     "engram-bus>=0.1.0",
-    "engram>=0.4.0",
+    "engram-memory>=0.4.0",
 ]
 
 [project.optional-dependencies]
