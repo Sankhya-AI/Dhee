@@ -116,10 +116,10 @@ class Engram:
             )
         else:
             vector_config = VectorStoreConfig(
-                provider="qdrant",
+                provider="sqlite_vec",
                 config={
                     "collection_name": collection_name,
-                    "path": str(self._data_dir / "qdrant"),
+                    "path": str(self._data_dir / "sqlite_vec.db"),
                     "embedding_model_dims": embedding_dims,
                 },
             )
@@ -320,7 +320,12 @@ class Engram:
         Returns:
             Dict with decayed, forgotten, promoted counts
         """
-        return self._memory.apply_decay(user_id=user_id, agent_id=agent_id)
+        scope = {}
+        if user_id:
+            scope["user_id"] = user_id
+        if agent_id:
+            scope["agent_id"] = agent_id
+        return self._memory.apply_decay(scope=scope if scope else None)
 
     def stats(
         self,

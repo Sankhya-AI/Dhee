@@ -757,16 +757,6 @@
       "method": "deterministic_static"
     },
     {
-      "source_path": "engram/vector_stores/async_qdrant.py",
-      "source_sha256": "4b4607a557e8829aeb011563302a4279fb32d18902ea3b0abb33626d3cf128df",
-      "output_pdf": "files/engram__vector_stores__async_qdrant.py.pdf",
-      "line_count": 210,
-      "page_count": 5,
-      "generated_at": "2026-02-11T10:07:54+00:00",
-      "doc_depth": "deep",
-      "method": "deterministic_static"
-    },
-    {
       "source_path": "engram/vector_stores/base.py",
       "source_sha256": "c9e547779d919349429709b13f63380c84977f40ce1d82fec95446cc16461757",
       "output_pdf": "files/engram__vector_stores__base.py.pdf",
@@ -782,16 +772,6 @@
       "output_pdf": "files/engram__vector_stores__memory.py.pdf",
       "line_count": 101,
       "page_count": 4,
-      "generated_at": "2026-02-11T10:07:54+00:00",
-      "doc_depth": "deep",
-      "method": "deterministic_static"
-    },
-    {
-      "source_path": "engram/vector_stores/qdrant.py",
-      "source_sha256": "77d119d541c4fd8a36e74530ccacd6f10157f837421b78976086f83ddf35b5a5",
-      "output_pdf": "files/engram__vector_stores__qdrant.py.pdf",
-      "line_count": 227,
-      "page_count": 5,
       "generated_at": "2026-02-11T10:07:54+00:00",
       "doc_depth": "deep",
       "method": "deterministic_static"

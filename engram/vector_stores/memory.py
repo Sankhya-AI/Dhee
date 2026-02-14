@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import math
 import threading
 import uuid
 from typing import Any, Dict, List, Optional
 
 from engram.memory.utils import matches_filters
+from engram.utils.math import cosine_similarity, cosine_similarity_batch
 from engram.vector_stores.base import MemoryResult, VectorStoreBase
 
 
@@ -32,25 +32,26 @@ class InMemoryVectorStore(VectorStoreBase):
             for vector_id, vector, payload in zip(ids, vectors, payloads):
                 self._store[vector_id] = {"vector": vector, "payload": payload}
 
-    def _cosine_similarity(self, a: List[float], b: List[float]) -> float:
-        if not a or not b:
-            return 0.0
-        dot = sum(x * y for x, y in zip(a, b))
-        norm_a = math.sqrt(sum(x * x for x in a))
-        norm_b = math.sqrt(sum(y * y for y in b))
-        if norm_a == 0.0 or norm_b == 0.0:
-            return 0.0
-        return dot / (norm_a * norm_b)
-
     def search(self, query: Optional[str], vectors: List[float], limit: int = 5, filters: Optional[Dict[str, Any]] = None) -> List[MemoryResult]:
-        results: List[MemoryResult] = []
         with self._lock:
             snapshot = list(self._store.items())
+
+        # Separate filtering from scoring so we can batch-score
+        filtered: List[tuple] = []
         for vector_id, record in snapshot:
             payload = record.get("payload", {})
             if filters and not matches_filters(payload, filters):
                 continue
-            score = self._cosine_similarity(vectors, record.get("vector", []))
+            filtered.append((vector_id, record, payload))
+
+        if not filtered:
+            return []
+
+        store_vectors = [rec.get("vector", []) for _, rec, _ in filtered]
+        scores = cosine_similarity_batch(vectors, store_vectors)
+
+        results: List[MemoryResult] = []
+        for (vector_id, _, payload), score in zip(filtered, scores):
             results.append(MemoryResult(id=vector_id, score=score, payload=payload))
 
         results.sort(key=lambda x: x.score, reverse=True)

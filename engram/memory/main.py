@@ -3,18 +3,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, date, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 
 from engram.configs.base import MemoryConfig
-from engram.core.acceptance import (
-    detect_explicit_intent,
-    detect_sensitive_categories,
-    is_ephemeral,
-    looks_high_confidence,
-)
 from engram.core.decay import calculate_decayed_strength, should_forget, should_promote
 from engram.core.conflict import resolve_conflict
 from engram.core.distillation import ReplayDistiller
@@ -34,9 +30,6 @@ from engram.core.category import CategoryProcessor, CategoryMatch
 from engram.core.graph import KnowledgeGraph
 from engram.core.scene import SceneProcessor
 from engram.core.profile import ProfileProcessor
-from engram.core.handoff import HandoffProcessor
-from engram.core.kernel import PersonalMemoryKernel
-from engram.core.policy import feature_enabled
 from engram.db.sqlite import SQLiteManager
 from engram.exceptions import FadeMemValidationError
 from engram.memory.base import MemoryBase
@@ -48,11 +41,155 @@ from engram.memory.utils import (
     parse_messages,
     strip_code_fences,
 )
+from engram.memory.parallel import ParallelExecutor
 from engram.observability import metrics
 from engram.utils.factory import EmbedderFactory, LLMFactory, VectorStoreFactory
 from engram.utils.prompts import AGENT_MEMORY_EXTRACTION_PROMPT, MEMORY_EXTRACTION_PROMPT
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Inline helpers (formerly in deleted core/acceptance and core/policy modules)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ExplicitIntent:
+    action: Optional[str]
+    content: str
+
+
+_REMEMBER_PATTERNS = [
+    r"^\s*(?:please\s+)?remember\b(?: that)?\s*[:,-]?\s*(.+)$",
+    r"\b(?:don't|do not)\s+forget\b(?: to)?\s*[:,-]?\s*(.+)$",
+    r"\bmake sure to remember\b(?: that)?\s*[:,-]?\s*(.+)$",
+]
+
+_FORGET_PATTERNS = [
+    r"^\s*(?:forget|delete|remove|erase)\b(?: about| that)?\s*[:,-]?\s*(.+)$",
+    r"^\s*(?:don't|do not)\s+remember\b(?: that)?\s*[:,-]?\s*(.+)$",
+]
+
+
+def detect_explicit_intent(text: str) -> ExplicitIntent:
+    cleaned = text.strip()
+    for pattern in _REMEMBER_PATTERNS:
+        match = re.search(pattern, cleaned, flags=re.IGNORECASE)
+        if match:
+            content = match.group(1).strip()
+            return ExplicitIntent(action="remember", content=content or cleaned)
+    for pattern in _FORGET_PATTERNS:
+        match = re.search(pattern, cleaned, flags=re.IGNORECASE)
+        if match:
+            content = match.group(1).strip()
+            return ExplicitIntent(action="forget", content=content or "")
+    return ExplicitIntent(action=None, content=cleaned)
+
+
+_EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
+_PHONE_RE = re.compile(r"\b(?:\+?\d{1,3}[\s-]?)?(?:\(?\d{3}\)?[\s-]?)\d{3}[\s-]?\d{4}\b")
+_SSN_RE = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
+_ADDRESS_RE = re.compile(
+    r"\b\d{1,5}\s+\w+(?:\s+\w+){0,4}\s+(?:street|st|avenue|ave|road|rd|boulevard|blvd|lane|ln|drive|dr|court|ct)\b",
+    re.IGNORECASE,
+)
+_NAME_HINT_RE = re.compile(
+    r"\b(?:my name is|call me|i am|i'm)\s+([A-Za-z][A-Za-z'\\-]+(?:\s+[A-Za-z][A-Za-z'\\-]+)?)\b",
+    re.IGNORECASE,
+)
+_ID_HINT_RE = re.compile(
+    r"\b(passport|driver'?s license|license number|id number|social security|ssn)\b",
+    re.IGNORECASE,
+)
+_HEALTH_HINT_RE = re.compile(
+    r"\b(diagnosed|diagnosis|medication|prescription|doctor|clinic|therapy|symptom|allergy|allergic|sick|illness|disease|mental health|depression|anxiety|adhd|diabetes|asthma|blood pressure|migraine)\b",
+    re.IGNORECASE,
+)
+_FINANCE_HINT_RE = re.compile(
+    r"\b(bank|account number|routing|iban|swift|credit card|debit card|cvv|salary|income|mortgage|loan|tax|tax id|payment|billing|invoice)\b",
+    re.IGNORECASE,
+)
+_EPHEMERAL_HINT_RE = re.compile(
+    r"\b(today|tomorrow|tonight|this morning|this afternoon|this evening|this week|next week|later|in \d+\s*(?:minutes|hours|days)|remind me|schedule|book|call|email|send|buy|pick up|meeting|appointment|todo|to-do|task|for now|currently|at the moment)\b",
+    re.IGNORECASE,
+)
+_PREFERENCE_HINT_RE = re.compile(
+    r"\b(prefer|favorite|always|never|like to|love|hate|avoid|must|can't|cannot)\b",
+    re.IGNORECASE,
+)
+_ROUTINE_HINT_RE = re.compile(
+    r"\b(every day|every morning|every night|every week|weekly|monthly|on weekends|each week|every weekday)\b",
+    re.IGNORECASE,
+)
+_GOAL_HINT_RE = re.compile(
+    r"\b(my goal is|i want to|i plan to|i'm working on|i am working on|long[- ]term)\b",
+    re.IGNORECASE,
+)
+
+
+def detect_sensitive_categories(text: str) -> List[str]:
+    reasons: List[str] = []
+    if _EMAIL_RE.search(text):
+        reasons.append("email")
+    if _PHONE_RE.search(text):
+        reasons.append("phone")
+    if _SSN_RE.search(text):
+        reasons.append("ssn")
+    if _ADDRESS_RE.search(text):
+        reasons.append("address")
+    if _ID_HINT_RE.search(text):
+        reasons.append("id")
+    name_match = _NAME_HINT_RE.search(text)
+    if name_match:
+        candidate = name_match.group(1).strip()
+        if candidate and candidate[0].isupper():
+            reasons.append("name")
+    if _HEALTH_HINT_RE.search(text):
+        reasons.append("health")
+    if _FINANCE_HINT_RE.search(text):
+        reasons.append("finance")
+    return sorted(set(reasons))
+
+
+def is_ephemeral(text: str) -> bool:
+    return _EPHEMERAL_HINT_RE.search(text) is not None
+
+
+def looks_high_confidence(content: str, metadata: Optional[Dict[str, object]] = None) -> bool:
+    metadata = metadata or {}
+    confidence = _coerce_float(metadata.get("confidence"))
+    importance = _coerce_float(metadata.get("importance"))
+    if confidence is not None and confidence >= 0.7:
+        return True
+    if importance is not None and importance >= 0.7:
+        return True
+    if metadata.get("confirmed") or metadata.get("user_confirmed"):
+        return True
+    if _PREFERENCE_HINT_RE.search(content):
+        return True
+    if _ROUTINE_HINT_RE.search(content):
+        return True
+    if _GOAL_HINT_RE.search(content):
+        return True
+    return False
+
+
+def _coerce_float(value: object) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def feature_enabled(name: str, default: bool = True) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+# ---------------------------------------------------------------------------
 
 SHAREABLE_CATEGORY_IDS = {
     "preferences",
@@ -183,58 +320,19 @@ class Memory(MemoryBase):
         else:
             self.profile_processor = None
 
-        # Initialize HandoffProcessor
-        self.handoff_config = self.config.handoff
-        if self.handoff_config.enable_handoff:
-            self.handoff_processor = HandoffProcessor(
-                db=self.db,
-                memory=self,
-                embedder=self.embedder,
-                llm=self.llm,
-                config={
-                    "auto_enrich": self.handoff_config.auto_enrich,
-                    "max_sessions": self.handoff_config.max_sessions_per_user,
-                    "handoff_backend": self.handoff_config.handoff_backend,
-                    "strict_handoff_auth": self.handoff_config.strict_handoff_auth,
-                    "allow_auto_trusted_bootstrap": self.handoff_config.allow_auto_trusted_bootstrap,
-                    "auto_session_bus": self.handoff_config.auto_session_bus,
-                    "lane_inactivity_minutes": self.handoff_config.lane_inactivity_minutes,
-                    "max_lanes_per_user": self.handoff_config.max_lanes_per_user,
-                    "max_checkpoints_per_lane": self.handoff_config.max_checkpoints_per_lane,
-                    "resume_statuses": self.handoff_config.resume_statuses,
-                    "auto_trusted_agents": self.handoff_config.auto_trusted_agents,
-                },
+        # Parallel executor for I/O-bound LLM/embedding calls
+        self.parallel_config = getattr(self.config, "parallel", None)
+        self._executor: Optional[ParallelExecutor] = None
+        if self.parallel_config and self.parallel_config.enable_parallel:
+            self._executor = ParallelExecutor(
+                max_workers=self.parallel_config.max_workers
             )
-        else:
-            self.handoff_processor = None
-
-        # v2 Personal Memory Kernel orchestration layer.
-        self.kernel = PersonalMemoryKernel(self)
-
-        # Active memory store (lazy initialized)
-        self._active_store = None
-
-    @property
-    def active(self):
-        """Lazy-initialized Active Memory store for signal bus."""
-        if self._active_store is None and self.config.active.enabled:
-            from engram.core.active_memory import ActiveMemoryStore
-            self._active_store = ActiveMemoryStore(self.config.active)
-        return self._active_store
-
-    def consolidate_active(self) -> Dict[str, Any]:
-        """Run one consolidation cycle: promote important active signals to passive memory."""
-        if not self.active:
-            return {"skipped": True, "reason": "active memory disabled"}
-        from engram.core.consolidation import ConsolidationEngine
-        engine = ConsolidationEngine(self.active, self, self.config.active)
-        return engine.run_cycle()
 
     def close(self) -> None:
         """Release all resources held by the Memory instance."""
-        if hasattr(self, '_active_store') and self._active_store is not None:
-            self._active_store.close()
-            self._active_store = None
+        if hasattr(self, '_executor') and self._executor is not None:
+            self._executor.shutdown()
+            self._executor = None
         if hasattr(self, 'vector_store') and self.vector_store is not None:
             self.vector_store.close()
         if hasattr(self, 'db') and self.db is not None:
@@ -334,6 +432,306 @@ class Memory(MemoryBase):
             self._persist_categories()
 
         return {"results": results}
+
+    def add_batch(
+        self,
+        items: List[Dict[str, Any]],
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        app_id: Optional[str] = None,
+        metadata: Dict[str, Any] = None,
+        filters: Dict[str, Any] = None,
+        initial_strength: float = 1.0,
+        echo_depth: Optional[str] = None,
+        **common_kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Add multiple memories in a batch, minimizing LLM/embedding/DB calls.
+
+        Each item in *items* is a dict with at least a ``content`` key (or
+        ``messages``). Items may also carry per-item ``user_id``, ``metadata``,
+        ``categories``, etc.
+
+        Batch optimization is only used when ``config.batch.enable_batch`` is
+        True. Otherwise this is equivalent to calling ``add()`` in a loop.
+
+        Returns ``{"results": [...]}``.
+        """
+        batch_config = getattr(self.config, "batch", None)
+        use_batch = batch_config and batch_config.enable_batch
+
+        if not use_batch or not items:
+            # Fallback: sequential add per item
+            all_results = []
+            for item in items:
+                content = item.get("content") or item.get("messages", "")
+                item_meta = dict(metadata or {})
+                item_meta.update(item.get("metadata") or {})
+                result = self.add(
+                    messages=content,
+                    user_id=item.get("user_id") or user_id,
+                    agent_id=item.get("agent_id") or agent_id,
+                    run_id=item.get("run_id") or run_id,
+                    app_id=item.get("app_id") or app_id,
+                    metadata=item_meta,
+                    filters=filters,
+                    categories=item.get("categories"),
+                    initial_strength=initial_strength,
+                    echo_depth=echo_depth,
+                    infer=False,
+                    **common_kwargs,
+                )
+                all_results.extend(result.get("results", []))
+            return {"results": all_results}
+
+        max_batch = batch_config.max_batch_size
+
+        # Split into sub-batches if needed
+        all_results: List[Dict[str, Any]] = []
+        for start in range(0, len(items), max_batch):
+            chunk = items[start : start + max_batch]
+            chunk_results = self._process_memory_batch(
+                chunk,
+                user_id=user_id,
+                agent_id=agent_id,
+                run_id=run_id,
+                app_id=app_id,
+                metadata=metadata,
+                filters=filters,
+                initial_strength=initial_strength,
+                echo_depth=echo_depth,
+                batch_config=batch_config,
+                **common_kwargs,
+            )
+            all_results.extend(chunk_results)
+
+        # Persist categories after full batch
+        if self.category_processor:
+            self._persist_categories()
+
+        return {"results": all_results}
+
+    def _process_memory_batch(
+        self,
+        items: List[Dict[str, Any]],
+        *,
+        user_id: Optional[str],
+        agent_id: Optional[str],
+        run_id: Optional[str],
+        app_id: Optional[str],
+        metadata: Optional[Dict[str, Any]],
+        filters: Optional[Dict[str, Any]],
+        initial_strength: float,
+        echo_depth: Optional[str],
+        batch_config,
+        **common_kwargs: Any,
+    ) -> List[Dict[str, Any]]:
+        """Process a batch of memory items with batched echo/embed/DB."""
+
+        # Extract contents
+        contents = []
+        item_metadata_list = []
+        for item in items:
+            content = item.get("content") or item.get("messages", "")
+            if isinstance(content, list):
+                # Flatten message list to string
+                content = " ".join(
+                    m.get("content", "") for m in content if isinstance(m, dict)
+                )
+            contents.append(str(content).strip())
+            item_meta = dict(metadata or {})
+            item_meta.update(item.get("metadata") or {})
+            item_metadata_list.append(item_meta)
+
+        # 1. Batch echo encoding
+        echo_results = [None] * len(contents)
+        if self.echo_processor and self.echo_config.enable_echo and batch_config.batch_echo:
+            try:
+                depth_override = EchoDepth(echo_depth) if echo_depth else None
+                echo_results = self.echo_processor.process_batch(
+                    contents, depth=depth_override
+                )
+            except Exception as e:
+                logger.warning("Batch echo failed, processing individually: %s", e)
+                for i, c in enumerate(contents):
+                    if c:
+                        try:
+                            depth_override = EchoDepth(echo_depth) if echo_depth else None
+                            echo_results[i] = self.echo_processor.process(c, depth=depth_override)
+                        except Exception:
+                            pass
+
+        # 2. Batch category detection
+        category_results = [None] * len(contents)
+        if (
+            self.category_processor
+            and self.category_config.auto_categorize
+            and batch_config.batch_category
+        ):
+            try:
+                category_results = self.category_processor.detect_categories_batch(
+                    contents,
+                    use_llm=self.category_config.use_llm_categorization,
+                )
+            except Exception as e:
+                logger.warning("Batch category failed: %s", e)
+
+        # 3. Batch embeddings
+        primary_texts = []
+        for i, content in enumerate(contents):
+            echo_result = echo_results[i]
+            primary_texts.append(self._select_primary_text(content, echo_result))
+
+        if batch_config.batch_embed:
+            try:
+                embeddings = self.embedder.embed_batch(primary_texts, memory_action="add")
+            except Exception as e:
+                logger.warning("Batch embed failed, falling back to sequential: %s", e)
+                embeddings = [
+                    self.embedder.embed(t, memory_action="add") for t in primary_texts
+                ]
+        else:
+            embeddings = [
+                self.embedder.embed(t, memory_action="add") for t in primary_texts
+            ]
+
+        # 4. Build memory records and batch-insert into DB
+        processed_metadata_base, effective_filters = build_filters_and_metadata(
+            user_id=user_id,
+            agent_id=agent_id,
+            run_id=run_id,
+            input_metadata=metadata,
+            input_filters=filters,
+        )
+        if app_id:
+            processed_metadata_base["app_id"] = app_id
+
+        now = datetime.now(timezone.utc).isoformat()
+        memory_records = []
+        vector_batch = []  # (vectors, payloads, ids)
+        results = []
+
+        for i, content in enumerate(contents):
+            if not content:
+                continue
+
+            memory_id = str(uuid.uuid4())
+            mem_metadata = dict(processed_metadata_base)
+            mem_metadata.update(item_metadata_list[i])
+
+            echo_result = echo_results[i]
+            effective_strength = initial_strength
+            mem_categories = list(items[i].get("categories") or [])
+
+            if echo_result:
+                effective_strength = initial_strength * echo_result.strength_multiplier
+                mem_metadata.update(echo_result.to_metadata())
+                if not mem_categories and echo_result.category:
+                    mem_categories = [echo_result.category]
+
+            cat_match = category_results[i]
+            if cat_match and not mem_categories:
+                mem_categories = [cat_match.category_id]
+                mem_metadata["category_confidence"] = cat_match.confidence
+                mem_metadata["category_auto"] = True
+
+            embedding = embeddings[i]
+            namespace_value = str(mem_metadata.get("namespace", "default") or "default").strip() or "default"
+
+            memory_type = self._classify_memory_type(mem_metadata, mem_metadata.get("role", "user"))
+
+            s_fast_val = s_mid_val = s_slow_val = None
+            if self.distillation_config and self.distillation_config.enable_multi_trace:
+                s_fast_val, s_mid_val, s_slow_val = initialize_traces(effective_strength, is_new=True)
+
+            memory_data = {
+                "id": memory_id,
+                "memory": content,
+                "user_id": items[i].get("user_id") or user_id,
+                "agent_id": agent_id,
+                "run_id": run_id,
+                "app_id": app_id,
+                "metadata": mem_metadata,
+                "categories": mem_categories,
+                "immutable": items[i].get("immutable", False),
+                "expiration_date": items[i].get("expiration_date"),
+                "created_at": now,
+                "updated_at": now,
+                "layer": "sml",
+                "strength": effective_strength,
+                "access_count": 0,
+                "last_accessed": now,
+                "embedding": embedding,
+                "confidentiality_scope": "work",
+                "source_type": "mcp",
+                "source_app": items[i].get("source_app"),
+                "source_event_id": mem_metadata.get("source_event_id"),
+                "decay_lambda": self.fadem_config.sml_decay_rate,
+                "status": "active",
+                "importance": mem_metadata.get("importance", 0.5),
+                "sensitivity": mem_metadata.get("sensitivity", "normal"),
+                "namespace": namespace_value,
+                "memory_type": memory_type,
+                "s_fast": s_fast_val,
+                "s_mid": s_mid_val,
+                "s_slow": s_slow_val,
+            }
+            memory_records.append(memory_data)
+
+            # Build vector index entries
+            vectors, payloads, vector_ids = self._build_index_vectors(
+                memory_id=memory_id,
+                content=content,
+                primary_text=primary_texts[i],
+                embedding=embedding,
+                echo_result=echo_result,
+                metadata=mem_metadata,
+                categories=mem_categories,
+                user_id=items[i].get("user_id") or user_id,
+                agent_id=agent_id,
+                run_id=run_id,
+                app_id=app_id,
+            )
+            if vectors:
+                vector_batch.append((vectors, payloads, vector_ids))
+
+            results.append({
+                "id": memory_id,
+                "memory": content,
+                "event": "ADD",
+                "layer": "sml",
+                "strength": effective_strength,
+                "echo_depth": echo_result.echo_depth.value if echo_result else None,
+                "categories": mem_categories,
+                "namespace": namespace_value,
+                "memory_type": memory_type,
+            })
+
+        # 4a. Batch DB insert
+        if memory_records:
+            try:
+                self.db.add_memories_batch(memory_records)
+            except Exception as e:
+                logger.error("Batch DB insert failed, falling back to sequential: %s", e)
+                for record in memory_records:
+                    self.db.add_memory(record)
+
+        # 4b. Batch vector insert
+        for vectors, payloads, vector_ids in vector_batch:
+            try:
+                self.vector_store.insert(vectors=vectors, payloads=payloads, ids=vector_ids)
+            except Exception as e:
+                logger.error("Vector insert failed in batch: %s", e)
+
+        # Post-store hooks
+        for i, record in enumerate(memory_records):
+            if self.category_processor and record.get("categories"):
+                for cat_id in record["categories"]:
+                    self.category_processor.update_category_stats(
+                        cat_id, record["strength"], is_addition=True
+                    )
+
+        return results
 
     def _resolve_memory_metadata(
         self,
@@ -481,7 +879,8 @@ class Memory(MemoryBase):
                 "memory": content,
             }
 
-        if not explicit_remember and is_ephemeral(content):
+        is_task_or_note = (mem_metadata or {}).get("memory_type") in ("task", "note")
+        if not explicit_remember and not is_task_or_note and is_ephemeral(content):
             return {
                 "event": "SKIP",
                 "reason": "ephemeral",
@@ -507,25 +906,72 @@ class Memory(MemoryBase):
         policy_repeated = False
         low_confidence = False
 
-        # CategoryMem: Auto-categorize if not provided
-        if (
+        # Determine if we should auto-categorize
+        _should_categorize = (
             self.category_processor
             and self.category_config.auto_categorize
             and not mem_categories
-        ):
-            category_match = self.category_processor.detect_category(
-                content,
-                metadata=mem_metadata,
-                use_llm=self.category_config.use_llm_categorization,
-            )
+        )
+
+        # Site 1: Parallel echo encoding + category detection
+        _use_parallel = (
+            self._executor is not None
+            and self.parallel_config
+            and self.parallel_config.parallel_add
+            and _should_categorize
+            and self.echo_processor
+            and self.echo_config.enable_echo
+        )
+
+        if _use_parallel:
+            # Run echo and category detection in parallel (both only read content)
+            def _do_echo():
+                depth_override = EchoDepth(echo_depth) if echo_depth else None
+                return self.echo_processor.process(content, depth=depth_override)
+
+            def _do_category():
+                return self.category_processor.detect_category(
+                    content,
+                    metadata=mem_metadata,
+                    use_llm=self.category_config.use_llm_categorization,
+                )
+
+            echo_result_p, category_match = self._executor.run_parallel([
+                (_do_echo, ()),
+                (_do_category, ()),
+            ])
+
+            # Apply echo result
+            effective_strength = initial_strength * echo_result_p.strength_multiplier
+            mem_metadata.update(echo_result_p.to_metadata())
+            if not mem_categories and echo_result_p.category:
+                mem_categories = [echo_result_p.category]
+
+            # Apply category result
             mem_categories = [category_match.category_id]
             mem_metadata["category_confidence"] = category_match.confidence
             mem_metadata["category_auto"] = True
 
-        # Encode memory (echo + embedding).
-        echo_result, effective_strength, mem_categories, embedding = self._encode_memory(
-            content, echo_depth, mem_categories, mem_metadata, initial_strength,
-        )
+            # Generate embedding (depends on echo result, must be serial)
+            primary_text = self._select_primary_text(content, echo_result_p)
+            embedding = self.embedder.embed(primary_text, memory_action="add")
+            echo_result = echo_result_p
+        else:
+            # Sequential path (original behavior)
+            if _should_categorize:
+                category_match = self.category_processor.detect_category(
+                    content,
+                    metadata=mem_metadata,
+                    use_llm=self.category_config.use_llm_categorization,
+                )
+                mem_categories = [category_match.category_id]
+                mem_metadata["category_confidence"] = category_match.confidence
+                mem_metadata["category_auto"] = True
+
+            # Encode memory (echo + embedding).
+            echo_result, effective_strength, mem_categories, embedding = self._encode_memory(
+                content, echo_depth, mem_categories, mem_metadata, initial_strength,
+            )
 
         nearest, similarity = self._nearest_memory(embedding, store_filters)
         repeated_threshold = max(self.fadem_config.conflict_similarity_threshold - 0.05, 0.7)
@@ -995,8 +1441,20 @@ class Memory(MemoryBase):
             self.db.update_strength_bulk(strength_updates)
         for mid in promotion_ids:
             self._check_promotion(mid)
-        for mid in reecho_ids:
-            self._reecho_memory(mid)
+        # Site 2: Parallel re-echo
+        if (
+            reecho_ids
+            and self._executor is not None
+            and self.parallel_config
+            and self.parallel_config.parallel_reecho
+            and len(reecho_ids) > 1
+        ):
+            self._executor.run_parallel([
+                (self._reecho_memory, (mid,)) for mid in reecho_ids
+            ])
+        else:
+            for mid in reecho_ids:
+                self._reecho_memory(mid)
         if agent_id:
             for mid in subscriber_ids:
                 self.db.add_memory_subscriber(mid, f"agent:{agent_id}", ref_type="weak")
@@ -1267,11 +1725,6 @@ class Memory(MemoryBase):
             return {"decayed": 0, "forgotten": 0, "promoted": 0}
 
         stale_refs_removed = 0
-        if feature_enabled("ENGRAM_V2_REF_GC", default=True):
-            try:
-                stale_refs_removed = int(self.kernel.ref_manager.cleanup_stale_refs())
-            except Exception:
-                stale_refs_removed = 0
 
         memories = self.db.get_all_memories(
             user_id=scope.get("user_id") if scope else None,
@@ -1288,7 +1741,20 @@ class Memory(MemoryBase):
             if memory.get("immutable"):
                 continue
 
-            ref_aware = feature_enabled("ENGRAM_V2_REF_AWARE_DECAY", default=True)
+            # Task-aware decay: active tasks don't decay
+            if memory.get("memory_type") == "task":
+                _md = memory.get("metadata") or {}
+                if isinstance(_md, str):
+                    import json as _json
+                    try:
+                        _md = _json.loads(_md)
+                    except (ValueError, TypeError):
+                        _md = {}
+                _ts = _md.get("task_status", "inbox")
+                if _ts in ("inbox", "assigned", "active", "review", "blocked"):
+                    continue  # skip decay for active tasks
+
+            ref_aware = feature_enabled("ENGRAM_V2_REF_AWARE_DECAY", default=False)
             ref_state = {"strong": 0, "weak": 0}
             if ref_aware:
                 ref_state = self.db.get_memory_refcount(memory["id"])
@@ -1368,7 +1834,19 @@ class Memory(MemoryBase):
         if self.distillation_config:
             user_id = scope.get("user_id") if scope else None
 
-            if self.distillation_config.enable_interference_pruning:
+            _do_interference = self.distillation_config.enable_interference_pruning
+            _do_redundancy = self.distillation_config.enable_redundancy_collapse
+
+            # Site 3: Parallel interference + redundancy during apply_decay
+            _use_parallel_decay = (
+                self._executor is not None
+                and self.parallel_config
+                and self.parallel_config.parallel_decay
+                and _do_interference
+                and _do_redundancy
+            )
+
+            if _use_parallel_decay:
                 pruner = InterferencePruner(
                     db=self.db,
                     config=self.distillation_config,
@@ -1377,16 +1855,42 @@ class Memory(MemoryBase):
                     search_fn=self.vector_store.search,
                     llm=self.llm,
                 )
-                interference_stats = pruner.run(memories, user_id=user_id)
-
-            if self.distillation_config.enable_redundancy_collapse:
                 collapser = RedundancyCollapser(
                     db=self.db,
                     config=self.distillation_config,
                     fuse_fn=self.fuse_memories,
                     search_fn=self.vector_store.search,
                 )
-                redundancy_stats = collapser.run(memories, user_id=user_id)
+                def _run_pruner():
+                    return pruner.run(memories, user_id=user_id)
+
+                def _run_collapser():
+                    return collapser.run(memories, user_id=user_id)
+
+                interference_stats, redundancy_stats = self._executor.run_parallel([
+                    (_run_pruner, ()),
+                    (_run_collapser, ()),
+                ])
+            else:
+                if _do_interference:
+                    pruner = InterferencePruner(
+                        db=self.db,
+                        config=self.distillation_config,
+                        fadem_config=self.fadem_config,
+                        resolve_conflict_fn=resolve_conflict,
+                        search_fn=self.vector_store.search,
+                        llm=self.llm,
+                    )
+                    interference_stats = pruner.run(memories, user_id=user_id)
+
+                if _do_redundancy:
+                    collapser = RedundancyCollapser(
+                        db=self.db,
+                        config=self.distillation_config,
+                        fuse_fn=self.fuse_memories,
+                        search_fn=self.vector_store.search,
+                    )
+                    redundancy_stats = collapser.run(memories, user_id=user_id)
 
             if self.distillation_config.enable_homeostasis and user_id:
                 normalizer = HomeostaticNormalizer(
@@ -1464,280 +1968,6 @@ class Memory(MemoryBase):
     def demote(self, memory_id: str) -> Dict[str, Any]:
         return {"success": self.db.update_memory(memory_id, {"layer": "sml"})}
 
-    # v2 kernel facade methods
-    def create_session(
-        self,
-        *,
-        user_id: str,
-        agent_id: Optional[str] = None,
-        allowed_confidentiality_scopes: Optional[List[str]] = None,
-        capabilities: Optional[List[str]] = None,
-        namespaces: Optional[List[str]] = None,
-        ttl_minutes: int = 24 * 60,
-    ) -> Dict[str, Any]:
-        return self.kernel.create_session(
-            user_id=user_id,
-            agent_id=agent_id,
-            allowed_confidentiality_scopes=allowed_confidentiality_scopes,
-            capabilities=capabilities,
-            namespaces=namespaces,
-            ttl_minutes=ttl_minutes,
-        )
-
-    def search_with_context(
-        self,
-        *,
-        query: str,
-        user_id: str,
-        agent_id: Optional[str] = None,
-        token: Optional[str] = None,
-        limit: int = 10,
-        categories: Optional[List[str]] = None,
-    ) -> Dict[str, Any]:
-        return self.kernel.search(
-            query=query,
-            user_id=user_id,
-            agent_id=agent_id,
-            token=token,
-            limit=limit,
-            categories=categories,
-        )
-
-    def propose_write(
-        self,
-        *,
-        content: str,
-        user_id: str,
-        agent_id: Optional[str] = None,
-        token: Optional[str] = None,
-        categories: Optional[List[str]] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-        scope: str = "work",
-        namespace: Optional[str] = None,
-        mode: str = "staging",
-        infer: bool = False,
-        source_app: Optional[str] = None,
-        source_type: str = "mcp",
-        source_event_id: Optional[str] = None,
-        trusted_direct: bool = False,
-    ) -> Dict[str, Any]:
-        return self.kernel.propose_write(
-            content=content,
-            user_id=user_id,
-            agent_id=agent_id,
-            token=token,
-            categories=categories,
-            metadata=metadata,
-            scope=scope,
-            namespace=namespace,
-            mode=mode,
-            infer=infer,
-            source_app=source_app,
-            source_type=source_type,
-            source_event_id=source_event_id,
-            trusted_direct=trusted_direct,
-        )
-
-    def list_pending_commits(
-        self,
-        user_id: Optional[str] = None,
-        status: Optional[str] = None,
-        limit: int = 100,
-        token: Optional[str] = None,
-        agent_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        return self.kernel.list_pending_commits(
-            user_id=user_id,
-            status=status,
-            limit=limit,
-            token=token,
-            agent_id=agent_id,
-        )
-
-    def approve_commit(
-        self,
-        commit_id: str,
-        token: Optional[str] = None,
-        agent_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        return self.kernel.approve_commit(commit_id=commit_id, token=token, agent_id=agent_id)
-
-    def reject_commit(
-        self,
-        commit_id: str,
-        reason: Optional[str] = None,
-        token: Optional[str] = None,
-        agent_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        return self.kernel.reject_commit(commit_id=commit_id, reason=reason, token=token, agent_id=agent_id)
-
-    def resolve_conflict(
-        self,
-        stash_id: str,
-        resolution: str,
-        token: Optional[str] = None,
-        agent_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        return self.kernel.resolve_conflict(stash_id=stash_id, resolution=resolution, token=token, agent_id=agent_id)
-
-    def get_daily_digest(
-        self,
-        user_id: str,
-        date_str: str,
-        token: Optional[str] = None,
-        agent_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        return self.kernel.get_daily_digest(
-            user_id=user_id,
-            date_str=date_str,
-            token=token,
-            agent_id=agent_id,
-        )
-
-    def run_sleep_cycle(
-        self,
-        user_id: Optional[str] = None,
-        date_str: Optional[str] = None,
-        apply_decay: bool = True,
-        cleanup_stale_refs: bool = True,
-        token: Optional[str] = None,
-        agent_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        return self.kernel.run_sleep_cycle(
-            user_id=user_id,
-            date_str=date_str,
-            apply_decay=apply_decay,
-            cleanup_stale_refs=cleanup_stale_refs,
-            token=token,
-            agent_id=agent_id,
-        )
-
-    def get_agent_trust(
-        self,
-        user_id: str,
-        agent_id: str,
-        token: Optional[str] = None,
-        requester_agent_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        return self.kernel.get_agent_trust(
-            user_id=user_id,
-            agent_id=agent_id,
-            token=token,
-            requester_agent_id=requester_agent_id,
-        )
-
-    def list_namespaces(
-        self,
-        user_id: Optional[str] = None,
-        token: Optional[str] = None,
-        agent_id: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
-        return self.kernel.list_namespaces(user_id=user_id, token=token, agent_id=agent_id)
-
-    def declare_namespace(
-        self,
-        *,
-        user_id: str,
-        namespace: str,
-        description: Optional[str] = None,
-        token: Optional[str] = None,
-        agent_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        return self.kernel.declare_namespace(
-            user_id=user_id,
-            namespace=namespace,
-            description=description,
-            token=token,
-            agent_id=agent_id,
-        )
-
-    def grant_namespace_permission(
-        self,
-        *,
-        user_id: str,
-        namespace: str,
-        agent_id: str,
-        capability: str = "read",
-        expires_at: Optional[str] = None,
-        token: Optional[str] = None,
-        requester_agent_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        return self.kernel.grant_namespace_permission(
-            user_id=user_id,
-            namespace=namespace,
-            agent_id=agent_id,
-            capability=capability,
-            expires_at=expires_at,
-            token=token,
-            requester_agent_id=requester_agent_id,
-        )
-
-    def upsert_agent_policy(
-        self,
-        *,
-        user_id: str,
-        agent_id: str,
-        allowed_confidentiality_scopes: Optional[List[str]] = None,
-        allowed_capabilities: Optional[List[str]] = None,
-        allowed_namespaces: Optional[List[str]] = None,
-        token: Optional[str] = None,
-        requester_agent_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        return self.kernel.upsert_agent_policy(
-            user_id=user_id,
-            agent_id=agent_id,
-            allowed_confidentiality_scopes=allowed_confidentiality_scopes,
-            allowed_capabilities=allowed_capabilities,
-            allowed_namespaces=allowed_namespaces,
-            token=token,
-            requester_agent_id=requester_agent_id,
-        )
-
-    def get_agent_policy(
-        self,
-        *,
-        user_id: str,
-        agent_id: str,
-        include_wildcard: bool = True,
-        token: Optional[str] = None,
-        requester_agent_id: Optional[str] = None,
-    ) -> Optional[Dict[str, Any]]:
-        return self.kernel.get_agent_policy(
-            user_id=user_id,
-            agent_id=agent_id,
-            include_wildcard=include_wildcard,
-            token=token,
-            requester_agent_id=requester_agent_id,
-        )
-
-    def list_agent_policies(
-        self,
-        *,
-        user_id: Optional[str] = None,
-        token: Optional[str] = None,
-        requester_agent_id: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
-        return self.kernel.list_agent_policies(
-            user_id=user_id,
-            token=token,
-            requester_agent_id=requester_agent_id,
-        )
-
-    def delete_agent_policy(
-        self,
-        *,
-        user_id: str,
-        agent_id: str,
-        token: Optional[str] = None,
-        requester_agent_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        return self.kernel.delete_agent_policy(
-            user_id=user_id,
-            agent_id=agent_id,
-            token=token,
-            requester_agent_id=requester_agent_id,
-        )
-
     # Internal helpers
     def _extract_memories(
         self,
@@ -1805,7 +2035,8 @@ class Memory(MemoryBase):
 
         # Explicit override from metadata
         explicit = metadata.get("memory_type")
-        if explicit in ("episodic", "semantic"):
+        if explicit in ("episodic", "semantic", "task", "note", "procedural",
+                       "project", "project_status", "project_tag"):
             return explicit
 
         # Distilled content is always semantic
@@ -2664,190 +2895,6 @@ class Memory(MemoryBase):
     def get_profile_memories(self, profile_id: str) -> List[Dict[str, Any]]:
         """Get memories linked to a profile."""
         return self.db.get_profile_memories(profile_id)
-
-    # =========================================================================
-    # Handoff Session Methods
-    # =========================================================================
-
-    def save_session_digest(
-        self,
-        user_id: str,
-        agent_id: str,
-        digest: Dict[str, Any],
-        token: Optional[str] = None,
-        requester_agent_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Save a session digest for cross-agent handoff."""
-        return self.kernel.save_session_digest(
-            user_id=user_id,
-            agent_id=agent_id,
-            digest=digest,
-            token=token,
-            requester_agent_id=requester_agent_id,
-        )
-
-    def get_last_session(
-        self,
-        user_id: str,
-        agent_id: Optional[str] = None,
-        repo: Optional[str] = None,
-        statuses: Optional[List[str]] = None,
-        token: Optional[str] = None,
-        requester_agent_id: Optional[str] = None,
-    ) -> Optional[Dict[str, Any]]:
-        """Get the most recent session, optionally filtered by agent/repo.
-
-        Returns the full handoff context including linked memories.
-        """
-        return self.kernel.get_last_session(
-            user_id=user_id,
-            agent_id=agent_id,
-            repo=repo,
-            statuses=statuses,
-            token=token,
-            requester_agent_id=requester_agent_id,
-        )
-
-    def list_sessions(
-        self,
-        user_id: str,
-        agent_id: Optional[str] = None,
-        repo: Optional[str] = None,
-        status: Optional[str] = None,
-        statuses: Optional[List[str]] = None,
-        limit: int = 20,
-        token: Optional[str] = None,
-        requester_agent_id: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
-        """List handoff sessions with optional filters."""
-        return self.kernel.list_sessions(
-            user_id=user_id,
-            agent_id=agent_id,
-            repo=repo,
-            status=status,
-            statuses=statuses,
-            limit=limit,
-            token=token,
-            requester_agent_id=requester_agent_id,
-        )
-
-    def auto_resume_context(
-        self,
-        *,
-        user_id: str,
-        agent_id: Optional[str],
-        repo_path: Optional[str] = None,
-        branch: Optional[str] = None,
-        lane_type: str = "general",
-        objective: Optional[str] = None,
-        agent_role: Optional[str] = None,
-        namespace: str = "default",
-        statuses: Optional[List[str]] = None,
-        auto_create: bool = True,
-        token: Optional[str] = None,
-        requester_agent_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        return self.kernel.auto_resume_context(
-            user_id=user_id,
-            agent_id=agent_id,
-            repo_path=repo_path,
-            branch=branch,
-            lane_type=lane_type,
-            objective=objective,
-            agent_role=agent_role,
-            namespace=namespace,
-            statuses=statuses,
-            auto_create=auto_create,
-            token=token,
-            requester_agent_id=requester_agent_id,
-        )
-
-    def auto_checkpoint(
-        self,
-        *,
-        user_id: str,
-        agent_id: str,
-        payload: Dict[str, Any],
-        event_type: str = "tool_complete",
-        repo_path: Optional[str] = None,
-        branch: Optional[str] = None,
-        lane_id: Optional[str] = None,
-        lane_type: str = "general",
-        objective: Optional[str] = None,
-        agent_role: Optional[str] = None,
-        namespace: str = "default",
-        confidentiality_scope: str = "work",
-        expected_version: Optional[int] = None,
-        token: Optional[str] = None,
-        requester_agent_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        return self.kernel.auto_checkpoint(
-            user_id=user_id,
-            agent_id=agent_id,
-            payload=payload,
-            event_type=event_type,
-            repo_path=repo_path,
-            branch=branch,
-            lane_id=lane_id,
-            lane_type=lane_type,
-            objective=objective,
-            agent_role=agent_role,
-            namespace=namespace,
-            confidentiality_scope=confidentiality_scope,
-            expected_version=expected_version,
-            token=token,
-            requester_agent_id=requester_agent_id,
-        )
-
-    def finalize_lane(
-        self,
-        *,
-        user_id: str,
-        agent_id: str,
-        lane_id: str,
-        status: str = "paused",
-        payload: Optional[Dict[str, Any]] = None,
-        repo_path: Optional[str] = None,
-        branch: Optional[str] = None,
-        agent_role: Optional[str] = None,
-        namespace: str = "default",
-        token: Optional[str] = None,
-        requester_agent_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        return self.kernel.finalize_lane(
-            user_id=user_id,
-            agent_id=agent_id,
-            lane_id=lane_id,
-            status=status,
-            payload=payload,
-            repo_path=repo_path,
-            branch=branch,
-            agent_role=agent_role,
-            namespace=namespace,
-            token=token,
-            requester_agent_id=requester_agent_id,
-        )
-
-    def list_handoff_lanes(
-        self,
-        *,
-        user_id: str,
-        repo_path: Optional[str] = None,
-        status: Optional[str] = None,
-        statuses: Optional[List[str]] = None,
-        limit: int = 20,
-        token: Optional[str] = None,
-        requester_agent_id: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
-        return self.kernel.list_handoff_lanes(
-            user_id=user_id,
-            repo_path=repo_path,
-            status=status,
-            statuses=statuses,
-            limit=limit,
-            token=token,
-            requester_agent_id=requester_agent_id,
-        )
 
     # =========================================================================
     # Dashboard / Visualization Methods

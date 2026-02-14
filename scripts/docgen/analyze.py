@@ -496,7 +496,7 @@ def _side_effect_hints(imports: List[Dict[str, Any]], tree: ast.AST) -> Dict[str
     tokens = modules + calls
 
     buckets = {
-        "database": ["sqlite", "qdrant", "database", "db", "cursor", "execute", "commit", "rollback"],
+        "database": ["sqlite", "database", "db", "cursor", "execute", "commit", "rollback"],
         "network": ["http", "request", "socket", "openai", "gemini", "ollama", "client", "api"],
         "filesystem": ["open", "path", "mkdir", "write", "unlink", "rename", "shutil", "glob"],
         "logging": ["logging", "logger", "print"],
@@ -580,7 +580,7 @@ def _config_runtime_implications(keys: List[str]) -> List[str]:
         implications.append("Port settings determine network exposure and service wiring.")
     if any("api" in key or "key" in key or "token" in key for key in lowered):
         implications.append("Credential-related keys require secret management and redaction discipline.")
-    if any("database" in key or "sqlite" in key or "qdrant" in key for key in lowered):
+    if any("database" in key or "sqlite" in key for key in lowered):
         implications.append("Storage-related keys alter persistence topology and migration expectations.")
 
     return implications
@@ -590,7 +590,7 @@ def _integration_hints_from_keys(keys: List[str]) -> List[str]:
     integrations: List[str] = []
     lowered = [key.lower() for key in keys]
 
-    for provider in ["openai", "gemini", "ollama", "qdrant", "fastapi", "docker", "mcp"]:
+    for provider in ["openai", "gemini", "ollama", "fastapi", "docker", "mcp"]:
         if any(provider in key for key in lowered):
             integrations.append(f"Contains configuration surface for {provider} integration.")
 
@@ -646,7 +646,7 @@ def _docker_integrations(instructions: List[Dict[str, Any]]) -> List[str]:
     integrations: List[str] = []
     values = "\n".join(item["value"] for item in instructions).lower()
 
-    for token in ["python", "uvicorn", "fastapi", "qdrant", "sqlite", "engram"]:
+    for token in ["python", "uvicorn", "fastapi", "sqlite", "engram"]:
         if token in values:
             integrations.append(f"Docker build/runtime references {token} components.")
 

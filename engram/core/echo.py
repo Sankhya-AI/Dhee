@@ -22,7 +22,7 @@ try:
 except ImportError:  # pragma: no cover - fallback for older pydantic
     ConfigDict = None
 
-from engram.utils.prompts import ECHO_PROCESSING_PROMPT
+from engram.utils.prompts import BATCH_ECHO_PROCESSING_PROMPT, ECHO_PROCESSING_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -447,6 +447,105 @@ class EchoProcessor:
         if "questions" not in normalized and "question_form" in normalized:
             normalized["questions"] = normalized.get("question_form")
         return normalized
+
+    def process_batch(
+        self,
+        contents: List[str],
+        depth: Optional[EchoDepth] = None,
+    ) -> List[EchoResult]:
+        """Batch-process multiple contents through echo encoding.
+
+        Sends a single LLM call with all memories. Falls back to sequential
+        per-item processing on parse failure.
+        """
+        if not contents:
+            return []
+        if len(contents) == 1:
+            return [self.process(contents[0], depth=depth)]
+
+        # Determine depths
+        target_depth = depth or self.default_depth
+        if target_depth == EchoDepth.SHALLOW:
+            # Shallow is LLM-free, just do it sequentially
+            return [self._shallow_echo(c) for c in contents]
+
+        depth_instructions = (
+            "Generate: paraphrases, keywords, category. Skip: implications, questions."
+            if target_depth == EchoDepth.MEDIUM
+            else "Generate ALL fields: paraphrases, keywords, implications, questions, category."
+        )
+
+        memories_block = "\n".join(
+            f"{i+1}. {c[:500]}" for i, c in enumerate(contents)
+        )
+
+        prompt = BATCH_ECHO_PROCESSING_PROMPT.format(
+            memories_block=memories_block,
+            depth=target_depth.value,
+            depth_instructions=depth_instructions,
+            count=len(contents),
+        )
+
+        try:
+            response = self.llm.generate(prompt)
+            return self._parse_batch_echo_response(response, contents, target_depth)
+        except Exception as e:
+            logger.warning("Batch echo failed, falling back to sequential: %s", e)
+            return [self.process(c, depth=target_depth) for c in contents]
+
+    def _parse_batch_echo_response(
+        self, response: str, contents: List[str], target_depth: EchoDepth
+    ) -> List[EchoResult]:
+        """Parse batch LLM response. Falls back per-item on partial failure."""
+        json_str = self._extract_json_blob(response)
+        try:
+            data = json.loads(json_str)
+        except json.JSONDecodeError:
+            repaired = self._repair_json(json_str)
+            data = json.loads(repaired)
+
+        results_list = data.get("results", [])
+        if not isinstance(results_list, list):
+            raise ValueError("Batch response 'results' is not a list")
+
+        # Index parsed results
+        parsed_by_index = {}
+        for item in results_list:
+            idx = item.get("index", -1)
+            if 0 <= idx < len(contents):
+                parsed_by_index[idx] = item
+
+        results: List[EchoResult] = []
+        multiplier = self.STRENGTH_MULTIPLIERS.get(target_depth, 1.0)
+
+        for i, content in enumerate(contents):
+            if i in parsed_by_index:
+                item = parsed_by_index[i]
+                try:
+                    echo_out = EchoOutput.model_validate(item)
+                    question_form = echo_out.question_form
+                    if not question_form and echo_out.questions:
+                        question_form = echo_out.questions[0]
+
+                    results.append(EchoResult(
+                        raw=content,
+                        paraphrases=echo_out.paraphrases,
+                        keywords=echo_out.keywords,
+                        implications=echo_out.implications if target_depth == EchoDepth.DEEP else [],
+                        questions=echo_out.questions if target_depth == EchoDepth.DEEP else [],
+                        question_form=question_form,
+                        category=echo_out.category,
+                        importance=echo_out.importance,
+                        echo_depth=target_depth,
+                        strength_multiplier=multiplier,
+                    ))
+                    continue
+                except Exception:
+                    pass
+            # Fallback: process this item sequentially
+            results.append(self.process(content, depth=target_depth))
+
+        return results
 
     def reecho(self, memory: Dict[str, Any]) -> EchoResult:
         """

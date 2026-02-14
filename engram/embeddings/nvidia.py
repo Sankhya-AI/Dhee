@@ -33,14 +33,16 @@ class NvidiaEmbedder(BaseEmbedder):
         self.client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
         self.model = self.config.get("model", "nvidia/nv-embed-v1")
 
+    def _extra_body(self, memory_action: Optional[str] = None) -> dict:
+        """Build extra_body for E5/embedqa models."""
+        if "e5" in self.model or "embedqa" in self.model:
+            input_type = "query" if memory_action in ("search", "forget") else "passage"
+            return {"input_type": input_type, "truncate": "NONE"}
+        return {}
+
     def embed(self, text: str, memory_action: Optional[str] = None) -> List[float]:
         try:
-            extra_body = {}
-            # nv-embed-v1 does not use input_type; older E5 models do
-            if "e5" in self.model or "embedqa" in self.model:
-                input_type = "query" if memory_action in ("search", "forget") else "passage"
-                extra_body = {"input_type": input_type, "truncate": "NONE"}
-
+            extra_body = self._extra_body(memory_action)
             response = self.client.embeddings.create(
                 input=[text],
                 model=self.model,
@@ -53,3 +55,27 @@ class NvidiaEmbedder(BaseEmbedder):
             raise RuntimeError(
                 f"NVIDIA embedding failed (model={self.model}): {exc}"
             ) from exc
+
+    def embed_batch(
+        self, texts: List[str], memory_action: Optional[str] = None
+    ) -> List[List[float]]:
+        """Native batch embedding — single API call for N texts."""
+        if not texts:
+            return []
+        if len(texts) == 1:
+            return [self.embed(texts[0], memory_action=memory_action)]
+        try:
+            extra_body = self._extra_body(memory_action)
+            response = self.client.embeddings.create(
+                input=texts,
+                model=self.model,
+                encoding_format="float",
+                **({"extra_body": extra_body} if extra_body else {}),
+            )
+            sorted_data = sorted(response.data, key=lambda d: d.index)
+            return [d.embedding for d in sorted_data]
+        except Exception as exc:
+            logger.warning(
+                "NVIDIA batch embedding failed, falling back to sequential: %s", exc
+            )
+            return [self.embed(t, memory_action=memory_action) for t in texts]

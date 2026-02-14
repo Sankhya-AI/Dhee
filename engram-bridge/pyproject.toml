@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "engram-bridge"
+version = "0.1.0"
+description = "Channel adapters for Engram — talk to coding agents from Telegram, Discord, and more"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = [
+    "engram-bus>=0.1.0",
+    "engram>=0.4.0",
+]
+
+[project.optional-dependencies]
+telegram = ["python-telegram-bot>=22.0"]
+web = ["fastapi>=0.104.0", "uvicorn[standard]>=0.24.0"]
+all = ["python-telegram-bot>=22.0", "fastapi>=0.104.0", "uvicorn[standard]>=0.24.0"]
+dev = ["pytest>=7.0.0", "pytest-asyncio"]
+
+[project.scripts]
+engram-bridge = "engram_bridge.bridge:main"
+
+[tool.setuptools.packages.find]
+include = ["engram_bridge*"]
+
+[tool.setuptools.package-data]
+"engram_bridge.channels" = ["web-ui/dist/**/*"]

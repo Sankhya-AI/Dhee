@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "engram-enterprise"
+version = "0.1.0"
+description = "Enterprise governance layer for Engram memory — kernel, policies, handoff orchestration, async, API, CLI"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "Engram Team"}
+]
+keywords = ["memory-layer", "governance", "enterprise", "ai", "agents"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+]
+
+dependencies = [
+    "engram-bus>=0.1.0",
+    "engram-memory>=0.5.0",
+]
+
+[project.optional-dependencies]
+api = ["fastapi>=0.100.0", "uvicorn>=0.20.0"]
+async = ["aiosqlite>=0.17.0"]
+all = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+    "aiosqlite>=0.17.0",
+]
+dev = [
+    "pytest>=7.0.0",
+]
+
+[project.scripts]
+engram = "engram_enterprise.main_cli:main"
+engram-api = "engram_enterprise.api.server:main"
+
+[project.urls]
+Homepage = "https://github.com/Ashish-dwi99/Engram"
+Repository = "https://github.com/Ashish-dwi99/Engram"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["engram_enterprise*"]

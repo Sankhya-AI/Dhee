@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Engram - Bio-Inspired Memory for AI Agents</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;1,400;1,600&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="header-container">
+            <div class="logo">
+                <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+                    <circle cx="16" cy="16" r="14" stroke="white" stroke-width="2"/>
+                    <path d="M10 16C10 12.6863 12.6863 10 16 10C19.3137 10 22 12.6863 22 16" stroke="white" stroke-width="2"/>
+                    <circle cx="16" cy="16" r="3" fill="white"/>
+                </svg>
+                <span>Engram</span>
+            </div>
+            <nav class="nav">
+                <a href="#features">Features</a>
+                <a href="#architecture">Architecture</a>
+                <a href="https://github.com/Engram-AI/Engram" target="_blank">GitHub</a>
+                <a href="#docs">Docs</a>
+            </nav>
+            <div class="header-actions">
+                <a href="#install" class="btn-primary">Get Started</a>
+            </div>
+        </div>
+    </header>
+
+    <!-- Hero Section -->
+    <section class="hero">
+        <div class="grid-background"></div>
+        <div class="hero-content">
+            <div class="hero-text">
+                <h1>Memory That<br><em>Forgets Like You Do</em></h1>
+                <a href="#install" class="btn-cta">
+                    Start Integration
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                        <path d="M6 12L10 8L6 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    </svg>
+                </a>
+                <p class="hero-description">
+                    Bio-inspired memory layer for AI agents.<br>
+                    Ebbinghaus decay, echo encoding, dynamic categories.<br>
+                    Native MCP for Claude, Cursor, and Codex.
+                </p>
+            </div>
+        </div>
+        <canvas id="ribbon-canvas"></canvas>
+    </section>
+
+    <!-- Features Section -->
+    <section class="features" id="features">
+        <div class="features-header">
+            <h2>How Engram manages<br>your agent's memory</h2>
+            <p class="features-subtitle">
+                Three bio-inspired layers working together to store what matters,<br>
+                forget what doesn't, and organize knowledge dynamically.
+            </p>
+        </div>
+        <div class="features-grid">
+            <!-- FadeMem Card -->
+            <div class="feature-card">
+                <div class="feature-icon">
+                    <canvas id="icon-decay" width="120" height="120"></canvas>
+                </div>
+                <h3>FadeMem</h3>
+                <p>Human-like forgetting with Ebbinghaus decay curves. Dual-layer SML/LML with automatic promotion. ~45% storage reduction.</p>
+                <a href="#fadem" class="feature-link">Learn more</a>
+            </div>
+            <!-- EchoMem Card -->
+            <div class="feature-card">
+                <div class="feature-icon">
+                    <canvas id="icon-echo" width="120" height="120"></canvas>
+                </div>
+                <h3>EchoMem</h3>
+                <p>Multi-modal encoding with 5 retrieval paths: paraphrase, keywords, implications, question-form, and temporal markers.</p>
+                <a href="#echomem" class="feature-link">Learn more</a>
+            </div>
+            <!-- CategoryMem Card -->
+            <div class="feature-card">
+                <div class="feature-icon">
+                    <canvas id="icon-category" width="120" height="120"></canvas>
+                </div>
+                <h3>CategoryMem</h3>
+                <p>Dynamic hierarchical categories that evolve with your data. Auto-discovered, self-organizing, with category decay.</p>
+                <a href="#categorymem" class="feature-link">Learn more</a>
+            </div>
+        </div>
+    </section>
+
+    <!-- Comparison Section -->
+    <section class="comparison" id="architecture">
+        <h2>Why Engram?</h2>
+        <div class="comparison-table">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Feature</th>
+                        <th>Traditional</th>
+                        <th>Engram</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Forgetting</td>
+                        <td>Manual deletion</td>
+                        <td class="highlight">Bio-inspired decay</td>
+                    </tr>
+                    <tr>
+                        <td>Encoding</td>
+                        <td>Single vector</td>
+                        <td class="highlight">5 retrieval modes</td>
+                    </tr>
+                    <tr>
+                        <td>Categories</td>
+                        <td>Static tags</td>
+                        <td class="highlight">Dynamic & evolving</td>
+                    </tr>
+                    <tr>
+                        <td>Storage</td>
+                        <td>Store everything</td>
+                        <td class="highlight">~45% reduction</td>
+                    </tr>
+                    <tr>
+                        <td>Search</td>
+                        <td>Semantic only</td>
+                        <td class="highlight">Hybrid semantic + keyword</td>
+                    </tr>
+                    <tr>
+                        <td>Knowledge Graph</td>
+                        <td>Optional addon</td>
+                        <td class="highlight">Built-in</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <!-- Install Section -->
+    <section class="install" id="install">
+        <h2>Get Started in 3 Lines</h2>
+        <div class="code-block">
+            <div class="code-header">
+                <span class="dot red"></span>
+                <span class="dot yellow"></span>
+                <span class="dot green"></span>
+                <span class="code-title">Terminal</span>
+            </div>
+            <pre><code><span class="comment"># Clone and install</span>
+git clone https://github.com/Engram-AI/Engram.git
+pip install -e "./Engram[all]"
+
+<span class="comment"># Configure MCP for Claude Code / Cursor</span>
+engram-install
+
+<span class="comment"># Or use as Python library</span>
+<span class="keyword">from</span> engram <span class="keyword">import</span> Memory
+
+memory = Memory(user_id=<span class="string">"agent-1"</span>)
+memory.add(<span class="string">"User prefers Python over JavaScript"</span>)
+results = memory.search(<span class="string">"What programming language?"</span>)</code></pre>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="footer-content">
+            <div class="footer-logo">
+                <svg width="24" height="24" viewBox="0 0 32 32" fill="none">
+                    <circle cx="16" cy="16" r="14" stroke="currentColor" stroke-width="2"/>
+                    <path d="M10 16C10 12.6863 12.6863 10 16 10C19.3137 10 22 12.6863 22 16" stroke="currentColor" stroke-width="2"/>
+                    <circle cx="16" cy="16" r="3" fill="currentColor"/>
+                </svg>
+                <span>Engram</span>
+            </div>
+            <div class="footer-links">
+                <a href="https://github.com/Engram-AI/Engram" target="_blank">GitHub</a>
+                <a href="#docs">Documentation</a>
+                <a href="https://pypi.org/project/engram/" target="_blank">PyPI</a>
+            </div>
+            <p class="footer-tagline">The memory layer that forgets like you do.</p>
+        </div>
+    </footer>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="ribbon.js"></script>
+    <script src="icons.js"></script>
+</body>
+</html>

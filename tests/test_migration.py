@@ -44,13 +44,6 @@ class TestMigrationIdempotency:
             "scene_memories",
             "profiles",
             "profile_memories",
-            "handoff_sessions",
-            "handoff_session_memories",
-            "handoff_lanes",
-            "handoff_checkpoints",
-            "handoff_checkpoint_memories",
-            "handoff_checkpoint_scenes",
-            "handoff_lane_conflicts",
         }
         assert expected.issubset(tables), f"Missing tables: {expected - tables}"
 
@@ -104,17 +97,13 @@ class TestMigrationIdempotency:
         assert mem is not None
         assert mem["memory"] == "hello world"
 
-    def test_handoff_recent_indexes_exist(self, db_path):
+    def test_distillation_tables_exist(self, db_path):
+        """Distillation tables should be created."""
         SQLiteManager(db_path)
         conn = sqlite3.connect(db_path)
-        cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='index'")
-        indexes = {row[0] for row in cursor.fetchall()}
+        cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = {row[0] for row in cursor.fetchall()}
         conn.close()
 
-        expected = {
-            "idx_handoff_sessions_recent",
-            "idx_handoff_sessions_repo_recent",
-            "idx_handoff_lanes_user_recent",
-            "idx_handoff_lanes_repo_recent",
-        }
-        assert expected.issubset(indexes), f"Missing indexes: {expected - indexes}"
+        assert "distillation_provenance" in tables
+        assert "distillation_log" in tables

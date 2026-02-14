@@ -55,10 +55,6 @@ class LLMFactory:
 class VectorStoreFactory:
     @classmethod
     def create(cls, provider: str, config: Dict[str, Any]):
-        if provider == "qdrant":
-            from engram.vector_stores.qdrant import QdrantVectorStore
-
-            return QdrantVectorStore(config)
         if provider == "memory":
             from engram.vector_stores.memory import InMemoryVectorStore
 

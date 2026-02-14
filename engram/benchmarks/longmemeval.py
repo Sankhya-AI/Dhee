@@ -142,7 +142,6 @@ def build_memory(
     vector_store_provider: str,
     embedding_dims: int,
     history_db_path: str,
-    qdrant_path: Optional[str] = None,
     llm_model: Optional[str] = None,
     embedder_model: Optional[str] = None,
     full_potential: bool = True,
@@ -152,8 +151,6 @@ def build_memory(
         "collection_name": "engram_longmemeval",
         "embedding_model_dims": embedding_dims,
     }
-    if vector_store_provider == "qdrant":
-        vector_cfg["path"] = qdrant_path or os.path.join(os.path.expanduser("~"), ".engram", "qdrant-longmemeval")
 
     llm_cfg: Dict[str, Any] = {}
     if llm_model:
@@ -232,7 +229,6 @@ def run_longmemeval(args: argparse.Namespace) -> Dict[str, Any]:
         vector_store_provider=args.vector_store_provider,
         embedding_dims=args.embedding_dims,
         history_db_path=args.history_db_path,
-        qdrant_path=args.qdrant_path,
         llm_model=args.llm_model,
         embedder_model=args.embedder_model,
         full_potential=args.full_potential,
@@ -401,8 +397,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--embedder-model", default=None, help="Optional embedder model override.")
     parser.add_argument("--embedding-dims", type=int, default=1536, help="Embedding dimensions for simple/memory configs.")
-    parser.add_argument("--vector-store-provider", choices=["memory", "qdrant"], default="memory")
-    parser.add_argument("--qdrant-path", default="/content/qdrant-longmemeval", help="Qdrant path when using qdrant.")
+    parser.add_argument("--vector-store-provider", choices=["memory", "sqlite_vec"], default="memory")
     parser.add_argument("--history-db-path", default="/content/engram-longmemeval.db", help="SQLite db path.")
     args = parser.parse_args()
     args.full_potential = not args.minimal

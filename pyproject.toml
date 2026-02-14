@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "engram-memory"
-version = "0.5.0b1"
-description = "Memory layer for AI agents — biologically-inspired forgetting, multi-agent trust, and plug-and-play integrations"
+version = "0.5.0"
+description = "Biologically-inspired memory layer for AI agents — forgetting, echo encoding, and dynamic categories"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
@@ -26,53 +26,39 @@ classifiers = [
 
 dependencies = [
     "pydantic>=2.0",
-    "google-generativeai>=0.3.0",
-    "qdrant-client>=1.7.0",
     "requests>=2.28.0",
+    "sqlite-vec>=0.1.1",
+    "engram-bus>=0.1.0",
 ]
 
 [project.optional-dependencies]
+# LLM / embedding providers (install what you use)
 gemini = ["google-generativeai>=0.3.0"]
 openai = ["openai>=1.0.0"]
+nvidia = ["openai>=1.0.0"]
 ollama = ["ollama>=0.4.0"]
-qdrant = ["qdrant-client>=1.7.0"]
-sqlite_vec = ["sqlite-vec>=0.1.1"]
-mcp = [
-    "mcp>=1.0.0",
-]
-api = [
-    "fastapi>=0.109.0",
-    "uvicorn[standard]>=0.27.0",
-]
+# Integrations
+mcp = ["mcp>=1.0.0"]
+api = ["fastapi>=0.100.0", "uvicorn>=0.20.0"]
+accel = ["engram-accel>=0.1.0"]
 all = [
+    "google-generativeai>=0.3.0",
     "openai>=1.0.0",
     "ollama>=0.4.0",
     "mcp>=1.0.0",
-    "fastapi>=0.109.0",
-    "uvicorn[standard]>=0.27.0",
-    "aiosqlite>=0.19.0",
-    "sqlite-vec>=0.1.1",
-]
-async = [
-    "aiosqlite>=0.19.0",
-]
-docs = [
-    "reportlab>=4.0.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+    "engram-accel>=0.1.0",
 ]
 dev = [
     "pytest>=7.0.0",
-    "pytest-asyncio>=0.21.0",
-    "aiosqlite>=0.19.0",
     "build>=1.0.0",
     "twine>=5.0.0",
 ]
 
 [project.scripts]
-engram = "engram.main_cli:main"
 engram-mcp = "engram.mcp_server:run"
-engram-install = "engram.cli:install"
-engram-api = "engram.api.server:run"
-engram-longmemeval = "engram.benchmarks.longmemeval:main"
+engram = "engram.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/Ashish-dwi99/Engram"

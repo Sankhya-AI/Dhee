@@ -1,0 +1,14 @@
+[package]
+name = "engram-accel"
+version = "0.1.0"
+edition = "2021"
+description = "Rust acceleration for Engram memory layer"
+license = "MIT"
+
+[lib]
+name = "engram_accel"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"] }
+rayon = "1.10"

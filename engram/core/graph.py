@@ -150,7 +150,7 @@ class KnowledgeGraph:
             r'\b(python|javascript|typescript|rust|go|java|c\+\+|ruby|php|swift|kotlin)\b',
             r'\b(react|vue|angular|svelte|django|flask|fastapi|express|nextjs|nuxt)\b',
             r'\b(docker|kubernetes|aws|gcp|azure|terraform|ansible)\b',
-            r'\b(postgresql|mysql|mongodb|redis|elasticsearch|sqlite|qdrant)\b',
+            r'\b(postgresql|mysql|mongodb|redis|elasticsearch|sqlite)\b',
             r'\b(git|github|gitlab|vscode|cursor|vim|neovim|emacs)\b',
         ]
 

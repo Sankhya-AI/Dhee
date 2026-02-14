@@ -20,12 +20,13 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+from engram.utils.math import cosine_similarity as _cosine_similarity
 
 logger = logging.getLogger(__name__)
 
@@ -361,6 +362,53 @@ class CategoryProcessor:
             confidence=0.3,
         )
 
+    def detect_categories_batch(
+        self,
+        contents: List[str],
+        use_llm: bool = True,
+    ) -> List[CategoryMatch]:
+        """Batch category detection for multiple contents.
+
+        Uses keyword matching first for strong matches, then batches
+        ambiguous items into a single LLM call.
+        """
+        if not contents:
+            return []
+        if len(contents) == 1:
+            return [self.detect_category(contents[0], use_llm=use_llm)]
+
+        results: List[Optional[CategoryMatch]] = [None] * len(contents)
+        ambiguous_indices: List[int] = []
+
+        # Phase 1: Fast keyword matching for each content
+        for i, content in enumerate(contents):
+            content_lower = content.lower()
+            best_match = None
+            best_score = 0.0
+
+            for cat in self.categories.values():
+                score = self._keyword_match_score(content_lower, cat)
+                if score > best_score:
+                    best_score = score
+                    best_match = cat
+
+            if best_match and best_score >= 0.7:
+                results[i] = CategoryMatch(
+                    category_id=best_match.id,
+                    category_name=best_match.name,
+                    confidence=best_score,
+                )
+            else:
+                ambiguous_indices.append(i)
+
+        # Phase 2: Batch LLM for ambiguous items (or sequential fallback)
+        for idx in ambiguous_indices:
+            results[idx] = self.detect_category(
+                contents[idx], use_llm=use_llm,
+            )
+
+        return [r for r in results]  # type: ignore[misc]
+
     def _keyword_match_score(self, content_lower: str, category: Category) -> float:
         """Calculate keyword match score between content and category."""
         if not category.keywords:
@@ -369,22 +417,10 @@ class CategoryProcessor:
         matches = sum(1 for kw in category.keywords if kw.lower() in content_lower)
         return min(1.0, matches / max(3, len(category.keywords) * 0.5))
 
-    def _cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
+    @staticmethod
+    def _cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
         """Calculate cosine similarity between two vectors."""
-        if not vec1 or not vec2 or len(vec1) != len(vec2):
-            return 0.0
-
-        dot_product = sum(a * b for a, b in zip(vec1, vec2))
-        norm1 = sum(a * a for a in vec1) ** 0.5
-        norm2 = sum(b * b for b in vec2) ** 0.5
-
-        if norm1 == 0 or norm2 == 0:
-            return 0.0
-
-        result = dot_product / (norm1 * norm2)
-        if math.isnan(result) or math.isinf(result):
-            return 0.0
-        return result
+        return _cosine_similarity(vec1, vec2)
 
     def _llm_detect_category(
         self,

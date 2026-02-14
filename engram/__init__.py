@@ -1,6 +1,5 @@
-"""engram package exports.
+"""engram — biologically-inspired memory for AI agents.
 
-engram: Biologically-inspired memory for AI agents
 - FadeMem: Dual-layer (SML/LML) with natural decay
 - EchoMem: Multi-modal encoding for stronger retention
 - CategoryMem: Dynamic hierarchical category organization
@@ -15,20 +14,16 @@ Quick Start:
 
 from engram.simple import Engram
 from engram.memory.main import Memory
-from engram.memory.client import MemoryClient
-from engram.memory.async_memory import AsyncMemory
 from engram.core.category import CategoryProcessor, Category, CategoryType, CategoryMatch
 from engram.core.echo import EchoProcessor, EchoDepth, EchoResult
 from engram.configs.base import MemoryConfig, FadeMemConfig, EchoMemConfig, CategoryMemConfig, ScopeConfig
 
-__version__ = "0.4.1"
+__version__ = "0.5.0"
 __all__ = [
     # Simplified interface (recommended)
     "Engram",
     # Full interface
     "Memory",
-    "MemoryClient",
-    "AsyncMemory",
     # CategoryMem
     "CategoryProcessor",
     "Category",

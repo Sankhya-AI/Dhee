@@ -142,6 +142,64 @@ Return ONLY a valid JSON object matching this schema:
 }}
 """
 
+BATCH_ECHO_PROCESSING_PROMPT = """
+Transform each memory below into a multi-modal "echo" representation.
+This improves recall by creating multiple neural-like pathways to the same data.
+
+MEMORIES:
+{memories_block}
+
+DEPTH: {depth}
+Instructions: {depth_instructions}
+
+Return ONLY a valid JSON object with a "results" array. Each element must match this schema:
+{{
+  "results": [
+    {{
+      "index": 0,
+      "paraphrases": ["str"],
+      "keywords": ["str"],
+      "implications": ["str"],
+      "questions": ["str"],
+      "question_form": "str or null",
+      "category": "fact" | "preference" | "goal" | "relationship" | "event",
+      "importance": 0.0-1.0
+    }}
+  ]
+}}
+
+IMPORTANT: Return exactly {count} elements in the results array, one per memory, in the same order.
+"""
+
+BATCH_CATEGORY_PROMPT = """Analyze each memory below and determine its category.
+
+MEMORIES:
+{memories_block}
+
+Existing Categories:
+{existing_categories}
+
+For each memory, classify it into an existing category or suggest a new one.
+Return JSON:
+{{
+    "results": [
+        {{
+            "index": 0,
+            "action": "use_existing" | "create_new",
+            "category_id": "existing_category_id or null",
+            "new_category": {{
+                "name": "Category Name",
+                "description": "Brief description",
+                "keywords": ["keyword1", "keyword2"]
+            }},
+            "confidence": 0.0-1.0
+        }}
+    ]
+}}
+
+Return exactly {count} elements in the results array.
+"""
+
 FUSION_PROMPT = """You are consolidating multiple related memories into a single, comprehensive memory.
 
 This is part of a biologically-inspired memory system that mimics how human brains consolidate related memories during sleep. The goal is to:

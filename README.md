@@ -12,11 +12,7 @@
 
 <p align="center">
   Hit a rate limit in Claude Code? Open Codex — it already knows what you were doing.<br>
-  One memory kernel. Shared across every agent. Active + passive memory. Bio-inspired forgetting. Real-time multi-agent coordination.
-</p>
-
-<p align="center">
-  <b>⚠ Early-stage software — not recommended for production use. APIs may change. Use at your own risk.</b>
+  One memory kernel. Shared across every agent. Bio-inspired forgetting. Zero cold starts.
 </p>
 
 <p align="center">
@@ -27,14 +23,37 @@
 </p>
 
 <p align="center">
-  <a href="#-quick-start">Quick Start</a> &middot;
-  <a href="#-why-engram">Why Engram</a> &middot;
-  <a href="#%EF%B8%8F-architecture">Architecture</a> &middot;
-  <a href="#-integrations">Integrations</a> &middot;
-  <a href="#-api--sdk">API & SDK</a> &middot;
-  <a href="#-longmemeval-on-colab-gpu">LongMemEval</a> &middot;
-  <a href="https://github.com/Ashish-dwi99/Engram/blob/main/CHANGELOG.md">Changelog</a>
+  <a href="#quick-start">Quick Start</a> &middot;
+  <a href="#why-engram">Why Engram</a> &middot;
+  <a href="#how-it-works">How It Works</a> &middot;
+  <a href="#packages">Packages</a> &middot;
+  <a href="https://github.com/Ashish-dwi99/Engram/blob/main/CHANGELOG.md">Changelog</a> &middot;
+  <a href="https://github.com/Ashish-dwi99/Engram/wiki">Docs</a>
 </p>
+
+---
+
+### Research Highlights
+
+<p align="center">
+  <b>~45% less storage</b> &nbsp;&nbsp;|&nbsp;&nbsp; <b>+26% retrieval accuracy</b> &nbsp;&nbsp;|&nbsp;&nbsp; <b>+12% multi-hop reasoning</b>
+</p>
+
+<p align="center">
+  Based on <a href="https://arxiv.org/abs/2601.18642"><b>FadeMem</b> (arXiv:2601.18642)</a> — biologically-inspired forgetting for efficient agent memory.
+</p>
+
+---
+
+## Quick Start
+
+```bash
+pip install engram-memory          # 1. Install
+export GEMINI_API_KEY="your-key"   # 2. Set one key (or OPENAI_API_KEY, NVIDIA_API_KEY)
+engram install                     # 3. Auto-configure Claude Code, Cursor, Codex
+```
+
+Restart your agent. Done — it now has persistent memory across sessions and agents.
 
 ---
 
@@ -44,961 +63,156 @@ Every AI agent you use starts with amnesia. But the real pain isn't just forgett
 
 You're 40 minutes into a refactor with Claude Code. You've touched six files, picked a migration strategy, mapped out the remaining TODOs. Then you hit a rate limit. Or your terminal crashes. Or you just need Codex for the next part. So you switch — and the new agent has **zero context**. You re-paste file paths, re-explain decisions, re-describe the plan. Half the time the new agent contradicts something you'd already decided.
 
-**Engram fixes this.** It's a Personal Memory Kernel (PMK) — one memory store shared across all your agents. When Claude Code pauses, it saves a session digest. When Codex picks up, it loads that digest and continues where you left off. No re-explanation. No cold starts.
+**Engram fixes this.** It's a Personal Memory Kernel — one memory store shared across all your agents. When Claude Code pauses, it saves a session digest. When Codex picks up, it loads that digest and continues where you left off. No re-explanation. No cold starts.
 
-But Engram isn't just a handoff bus. It solves four fundamental problems with how AI memory works today:
+But Engram isn't just a handoff bus. It models memory the way brains do:
 
-| Problem | Other Memory Layers | **Engram** |
-|:--------|:--------------------|:-----------|
-| **Switching agents = cold start** | Manual copy/paste context | **Handoff bus — session digests, auto-resume** |
-| **No real-time coordination** | Polling or nothing | **Active Memory signal bus — agents see each other's state instantly** |
-| **Nobody forgets** | Store everything forever | **Ebbinghaus decay curve, ~45% less storage** |
-| **Agents write with no oversight** | Store directly | **Staging + verification + trust scoring** |
-| **No episodic memory** | Vector search only | **CAST scenes (time/place/topic)** |
-| **No consolidation** | Store everything as-is | **CLS Distillation — replay-driven fact extraction** |
-| **Single decay rate** | One exponential curve | **Multi-trace Benna-Fusi model (fast/mid/slow)** |
-| **No intent routing** | Same search for all queries | **Episodic vs semantic query classification** |
-| Multi-modal encoding | Single embedding | **5 retrieval paths (EchoMem)** |
-| Cross-agent memory sharing | Per-agent silos | **Scoped retrieval with all-but-mask privacy** |
-| Concurrent multi-agent access | Single-process locks | **sqlite-vec WAL mode — multiple agents, one DB** |
-| Reference-aware decay | No | **If other agents use it, don't delete it** |
-| Knowledge graph | Sometimes | **Entity extraction + linking** |
-| MCP + REST | One or the other | **Both, plug-and-play** |
-| Local-first | Cloud-required | **127.0.0.1:8100 by default** |
+| Problem | Typical approach | Engram |
+|:--------|:-----------------|:-------|
+| **Switch agents = cold start** | Manual copy-paste | Handoff bus — auto session digests + resume |
+| **Nobody forgets** | Store everything forever | Ebbinghaus decay — ~45% less storage |
+| **Single retrieval path** | One embedding per memory | 5 retrieval paths per memory (EchoMem) |
+| **No episodic memory** | Vector search only | CAST scenes — time/place/topic clustering |
+| **No consolidation** | Store everything as-is | CLS sleep cycles — episodic to semantic distillation |
+| **Single decay rate** | One exponential curve | Multi-trace Benna-Fusi model (fast/mid/slow) |
+| **No real-time coordination** | Polling or nothing | Active memory signal bus — agents see each other instantly |
+| **Concurrent access** | Single-process locks | sqlite-vec WAL — multiple agents, one DB |
 
 ---
 
-## Quick Start
+## How It Works
 
-```bash
-pip install engram-memory          # 1. Install from PyPI
-export GEMINI_API_KEY="your-key"   # 2. Set one key before starting Engram
-engram install                     # 3. Auto-configure Claude Code, Cursor, Codex
+Engram has two distinct memory systems — like the brain's conscious and subconscious:
+
+**Active Memory** — a real-time signal bus. Agents post ephemeral state ("editing auth.py", "build failing") that other agents see instantly. Signals auto-expire. Important ones get consolidated into long-term storage.
+
+**Passive Memory** — the long-term store. Memories fade via Ebbinghaus decay, get promoted from short-term to long-term through repeated access, and are encoded through multiple retrieval paths (paraphrase, keywords, implications, question-form). Sleep cycles distill episodic conversations into durable semantic facts.
+
+**Handoff** — when an agent pauses (rate limit, crash, tool switch), it saves a session digest: task summary, decisions made, files touched, TODOs remaining. The next agent loads it and continues. If no digest was saved, Engram falls back to parsing the conversation logs automatically.
+
+<details>
+<summary><b>The memory stack at a glance</b></summary>
+
+| Layer | What it does |
+|:------|:-------------|
+| **FadeMem** | Ebbinghaus-curve decay, SML/LML dual layers, promotion on access |
+| **EchoMem** | 5 retrieval paths per memory (paraphrase, keywords, implications, Q-form) |
+| **CategoryMem** | Auto-discovered hierarchical categories with retrieval boosting |
+| **CAST Scenes** | Episodic narrative memory — time, place, topic clustering |
+| **CLS Distillation** | Sleep-cycle replay: episodic to semantic fact extraction |
+| **Multi-trace** | Benna-Fusi model — fast/mid/slow decay traces per memory |
+| **Intent routing** | Episodic vs semantic query classification |
+| **Handoff bus** | Session digests, checkpoints, JSONL log fallback |
+| **Active Memory** | Real-time signal bus with TTL tiers |
+</details>
+
+---
+
+## Packages
+
+Engram is three pip-installable packages:
+
+```
+engram-memory ← engram-bus ← engram-enterprise
+   (core)        (comms)       (governance)
 ```
 
-Restart your agent. Done — it now has persistent memory across sessions.
+### [`engram-memory`](./engram/) — Core Memory Engine
 
-### PyPI Install Options
+The main package. Memory CRUD, semantic search, decay, echo encoding, categories, episodic scenes, MCP server, CLI.
 
 ```bash
-# Default runtime (Gemini + local Qdrant + MemoryClient deps)
 pip install engram-memory
-
-# Full stack extras (MCP server + REST API + async + sqlite-vec + all providers)
-pip install "engram-memory[all]"
-
-# sqlite-vec for concurrent multi-agent vector search (no server needed)
-pip install "engram-memory[sqlite_vec]"
-
-# OpenAI provider add-on
-pip install "engram-memory[openai]"
-
-# NVIDIA provider add-on (Llama 3.1, nv-embed-v1, etc.)
-pip install "engram-memory[nvidia]"
-
-# Ollama provider add-on
-pip install "engram-memory[ollama]"
+pip install "engram-memory[openai]"     # OpenAI provider
+pip install "engram-memory[ollama]"     # Ollama (local, no key needed)
+pip install "engram-memory[all]"        # everything
 ```
-
-### API Key: When and How to Provide It
-
-Engram reads provider credentials when a process initializes `Memory()` (for example: `engram`, `engram-api`, `engram-mcp`, or your Python app).
-
-1. Set env vars **before** starting those processes.
-2. If you change keys, restart the process.
-3. Default provider is Gemini, so set `GEMINI_API_KEY` or `GOOGLE_API_KEY` unless you override provider config.
-
-```bash
-# Default (Gemini)
-export GEMINI_API_KEY="your-key"
-engram-api
-```
-
-```bash
-# OpenAI provider
-export OPENAI_API_KEY="your-key"
-engram-api
-```
-
-```bash
-# Ollama (local; no cloud key)
-export OLLAMA_HOST="http://localhost:11434"
-engram-api
-```
-
-For remote usage via `MemoryClient`, provider API keys are needed on the **server** running Engram.  
-The client only needs:
-- `ENGRAM_ADMIN_KEY` (or `admin_key=...`) when minting sessions via `/v1/sessions`
-- Bearer session token for normal read/write API calls
-
-**Or with Docker:**
-
-```bash
-docker compose up -d               # API at http://localhost:8100
-```
-
----
-
-## Architecture
-
-Engram is a **Personal Memory Kernel** — not just a vector store with an API. It models memory the way brains do, with two distinct systems:
-
-- **Active Memory (conscious):** A real-time signal bus where agents post ephemeral state and events. Every MCP response includes the latest active signals — like how your conscious mind always knows "what's happening right now." Signals auto-expire by TTL tier. Important ones get consolidated into passive memory.
-- **Passive Memory (subconscious):** The long-term store — FadeMem decay, EchoMem encoding, CategoryMem organization, CAST scenes. Things the agent "knows" but isn't actively thinking about.
-
-Engram has five opinions about how memory should work:
-
-1. **Switching agents shouldn't mean starting over.** When an agent pauses — rate limit, crash, tool switch — it saves a session digest. The next agent loads it and continues. Zero re-explanation.
-2. **Agents need shared real-time state.** Active Memory lets agents broadcast what they're doing right now — no polling, no coordination protocol. Agent A posts "editing auth.py"; Agent B sees it instantly.
-3. **Memory has a lifecycle.** New memories start in short-term (SML), get promoted to long-term (LML) through repeated access, and fade away through Ebbinghaus decay if unused. Sleep cycles distill episodic conversations into durable semantic facts (CLS consolidation), cascade strength traces from fast to slow, and prune redundant or contradictory memories.
-4. **Agents are untrusted writers.** Every write is a proposal that lands in staging. Trusted agents can auto-merge; untrusted ones wait for approval.
-5. **Scoping is mandatory.** Every memory is scoped by user. Agents see only what they're allowed to — everything else gets the "all but mask" treatment (structure visible, details redacted).
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Agent Orchestrator                            │
-│              (Claude Code / Cursor / Codex / Custom)             │
-└─────────────────────────┬───────────────────────────────────────┘
-                          │
-              ┌───────────┴───────────┐
-              │                       │
-              ▼                       ▼
-        ┌──────────┐           ┌──────────┐
-        │   MCP    │           │   REST   │
-        │  Server  │           │   API    │
-        └────┬─────┘           └────┬─────┘
-             └───────────┬──────────┘
-                         │
-        ┌────────────────┴────────────────────┐
-        │         Policy Gateway              │
-        │   Scopes · Masking · Quotas ·       │
-        │   Capability Tokens · Trust Score   │
-        └────────────────┬────────────────────┘
-                         │
-     ┌───────────────────┼───────────────────┐
-     ▼                   ▼                   ▼
-┌──────────┐  ┌──────────────────┐  ┌──────────────────┐
-│  ACTIVE  │  │  Retrieval Engine │  │ Ingestion Pipeline│
-│  MEMORY  │  │  ┌─────────────┐ │  │                  │
-│          │  │  │Semantic     │ │  │  Text → Views    │
-│ Signal   │  │  │(hybrid+graph│ │  │  Views → Scenes  │
-│ Bus      │  │  │+categories) │ │  │  Scenes → LML    │
-│          │  │  ├─────────────┤ │  │                  │
-│ state    │  │  │Episodic     │ │  └────────┬─────────┘
-│ event    │  │  │(CAST scenes)│ │           │
-│ directive│  │  └─────────────┘ │           ▼
-│          │  │  Intersection    │  ┌──────────────────┐
-│ Auto-    │  │  Promotion:      │  │Write Verification│
-│ injected │  │  match in both → │  │ Invariant checks │
-│ in every │  │  boost score     │  │ Conflict → stash │
-│ response │  └──────────────────┘  │ Trust scoring    │
-│          │                        └────────┬─────────┘
-│  ┌─────┐ │                                 │
-│  │ TTL │ │       ┌─────────────────────────┼──────────────┐
-│  └──┬──┘ │       ▼                         ▼              ▼
-│     │    │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-│     ▼    │  │ Staging (SML)│  │ Long-Term    │  │   Indexes    │
-│ Consoli- │  │ Proposals    │  │ Store (LML)  │  │ Vector+Graph │
-│ dation   │  │ Conflict     │  │ Canonical    │  │ + Episodic   │
-│ Engine ──┼──│ Stash        │  │              │  │              │
-│          │  └──────────────┘  └──────────────┘  └──────────────┘
-└──────────┘          │                 │                  │
-                      └─────────────────┼──────────────────┘
-                                        ▼
-                             ┌──────────────────┐
-                             │   FadeMem GC     │
-                             │  Ref-aware decay │
-                             │  If other agents │
-                             │  use it → keep   │
-                             └──────────────────┘
-```
-
-### The Memory Stack
-
-Engram combines multiple systems, each handling a different aspect of how memory should work:
-
-#### Active Memory — Real-Time Signal Bus
-
-The "conscious mind" of the system. A shared SQLite bus (WAL mode, concurrent-safe) where agents post ephemeral signals that other agents see immediately. Every MCP tool response auto-injects the latest signals — agents always know what's happening without polling.
-
-Three signal types, four TTL tiers:
-
-```
-Signal Types:                    TTL Tiers:
-  state     → upserts by key      noise     → 30 minutes
-  event     → always new row       notable   → 2 hours
-  directive → permanent rule       critical  → 24 hours
-                                   directive → permanent
-```
-
-```
-Agent A: signal_write(key="editing", value="auth.py", signal_type="state")
-Agent B: signal_write(key="build_status", value="failing", signal_type="event")
-User:    signal_write(key="use_typescript", value="always", signal_type="directive")
-
-Any tool call → response includes:
-  "_active": [
-    {"key": "use_typescript", "ttl_tier": "directive", ...},
-    {"key": "build_status",   "ttl_tier": "notable",   ...},
-    {"key": "editing",        "ttl_tier": "notable",   ...}
-  ]
-```
-
-**Consolidation Engine:** Important active signals get promoted to passive memory — like how sleep consolidates short-term into long-term memory. Directives become immutable LML memories. Critical and high-read signals get promoted to SML.
-
-#### FadeMem — Decay & Consolidation
-
-Memories fade based on time and access patterns, following the Ebbinghaus forgetting curve. Frequently accessed memories get promoted from short-term (SML) to long-term (LML). Unused memories weaken and eventually get forgotten. **Reference-aware:** if other agents still reference a memory, it won't be garbage collected — even if the original agent stopped using it.
-
-```
-New Memory → Short-term (SML)
-                  │
-                  │ Accessed frequently?
-                  ▼
-            ┌──────────┐
-       No ← │  Decay   │ → Yes
-            └──────────┘
-            │           │
-            ▼           ▼
-       Forgotten    Promoted to Long-term (LML)
-```
-
-#### EchoMem — Multi-Modal Encoding
-
-Each memory is encoded through multiple retrieval paths — keywords, paraphrases, implications, and question forms. This creates 5x the retrieval surface area compared to single-embedding approaches. Important memories get deeper processing (1.6x strength multiplier).
-
-```
-Input: "User prefers TypeScript over JavaScript"
-  ↓
-  raw:          "User prefers TypeScript over JavaScript"
-  paraphrase:   "TypeScript is the user's preferred language"
-  keywords:     ["typescript", "javascript", "preference"]
-  implications: ["values type safety", "modern tooling"]
-  question:     "What language does the user prefer?"
-```
-
-#### CategoryMem — Dynamic Organization
-
-Categories aren't predefined — they emerge from content and evolve over time. As new memories arrive, the category tree grows, splits, and merges. Categories themselves decay when unused, keeping the taxonomy clean.
-
-#### CAST Scenes — Episodic Narrative Memory
-
-Inspired by the Contextual Associative Scene Theory of memory, Engram clusters interactions into **scenes** defined by three dimensions: time, place, and topic. Each scene has characters, a synopsis, and links to the semantic memories extracted from it.
-
-```
-Scene: "Engram v2 architecture session"
-  Time:       2026-02-09 12:00–12:25
-  Place:      repo:Engram (digital)
-  Characters: [self, collaborator]
-  Synopsis:   "Designed staged writes and scoped retrieval..."
-  Views:      [view_1, view_2, view_3]
-  Memories:   [mem_1, mem_2]  ← semantic facts extracted
-```
-
-#### CLS Distillation Memory — Bio-Inspired Consolidation (v1.4)
-
-Inspired by Complementary Learning Systems (CLS) theory — how the hippocampus and neocortex work together in the brain. Engram v1.4 adds five mechanisms that make memory smarter over time:
-
-**1. Episodic/Semantic Memory Types**
-Conversations are stored as `episodic` memories. During sleep cycles, a replay-driven distiller extracts durable facts into `semantic` memories — just like how your brain consolidates experiences into knowledge overnight.
-
-**2. Replay-Driven Distillation**
-The `ReplayDistiller` samples recent episodic memories, groups them by scene/time, and uses the LLM to extract reusable semantic facts. Every distilled fact links back to its source episodes (provenance tracking).
-
-**3. Multi-Mechanism Forgetting**
-Beyond simple exponential decay, Engram now has three advanced forgetting mechanisms:
-- **Interference Pruning** — contradictory memories are detected and the weaker one is demoted
-- **Redundancy Collapse** — near-duplicate memories are auto-fused
-- **Homeostatic Normalization** — memory budgets per namespace prevent unbounded growth
-
-**4. Multi-Timescale Strength Traces (Benna-Fusi Model)**
-Each memory has three strength traces instead of one scalar:
-```
-s_fast  (decay: 0.20/day) — recent access, volatile
-s_mid   (decay: 0.05/day) — medium-term consolidation
-s_slow  (decay: 0.005/day) — durable long-term knowledge
-```
-New memories start in `s_fast`. Sleep cycles cascade strength: `fast → mid → slow`. Important facts become nearly permanent.
-
-**5. Intent-Aware Retrieval Routing**
-Queries are classified as episodic ("when did we discuss..."), semantic ("what is the deployment process?"), or mixed. Matching memory types get a retrieval boost — the right type of answer for the right type of question.
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│                    Sleep Cycle (v1.4)                         │
-│                                                              │
-│  1. Standard FadeMem decay (SML/LML)                         │
-│  2. Multi-trace decay (fast/mid/slow independently)          │
-│  3. Interference pruning (contradict → demote weaker)        │
-│  4. Redundancy collapse (near-dupes → fuse)                  │
-│  5. Homeostatic normalization (budget enforcement)            │
-│  6. Replay distillation (episodic → semantic facts)          │
-│  7. Trace cascade (fast → mid → slow consolidation)          │
-└──────────────────────────────────────────────────────────────┘
-```
-
-#### Handoff Bus — Cross-Agent Continuity
-
-Engram now defaults to a zero-intervention continuity model: MCP adapters automatically request resume context before tool execution and auto-write checkpoints on lifecycle events (`tool_complete`, `agent_pause`, `agent_end`). The legacy tools (`save_session_digest`, `get_last_session`, `list_sessions`) remain available for compatibility.
-
-```
-Claude Code (rate limited)
-  → save_session_digest(task, decisions, files, todos, blockers)
-  → Session stored in handoff bus
-
-Codex (picks up)
-  → get_last_session(repo="/my-project")
-  → Gets full context: task, decisions, files, todos
-  → Continues where Claude Code stopped
-```
-
-**Default runtime model:** hosted session bus when `ENGRAM_API_URL` is configured.  
-**Default security posture:** strict handoff auth (`read_handoff` / `write_handoff`) with no implicit trusted-agent bootstrap.
-
----
-
-### Key Flows
-
-#### Read: Query → Context Packet
-
-```
-Agent calls search_memory or POST /v1/search
-  → Policy Gateway enforces scope, quotas, masking
-  → Dual retrieval: semantic index + episodic index (parallel)
-  → Intersection promotion: results matching in both get boosted
-  → Returns Context Packet (token-budgeted, with scene citations)
-```
-
-The dual retrieval approach reduces "similar but wrong time/place" errors. If a memory appears in both semantic search and the relevant episodic scene, it gets a confidence boost.
-
-#### Write: Agent Proposal → Staging
-
-```
-Agent calls propose_write or POST /v1/memories
-  → Lands in Staging SML as a Proposal Commit
-  → Provenance recorded (agent, time, scope, trust score)
-  → Verification runs:
-      • Invariant contradiction check → stash if conflict
-      • Duplication detection
-      • PII risk detection → require manual approval if high
-  → High-trust agents: auto-merge
-  → Others: wait for user approval or daily digest
-```
-
-#### "All But Mask" Policy
-
-When an agent queries data outside its scope, it sees structure but not details:
-
-```json
-{
-  "type": "private_event",
-  "time": "2026-02-10T17:00:00Z",
-  "importance": "high",
-  "details": "[REDACTED]"
-}
-```
-
-Agents can still operate (scheduling, planning) without seeing secrets.
-
----
-
-## Integrations
-
-Engram is plug-and-play. Run `engram install` and it auto-configures everything:
-
-### Claude Code (MCP + Plugin)
-
-```bash
-engram install    # Writes MCP config to ~/.claude.json
-```
-
-`engram install` also bootstraps workspace continuity rules (in your current
-project directory) so agents call handoff tools automatically:
-
-- `AGENTS.md`
-- `CLAUDE.md`
-- `CURSOR.md`
-- `.cursor/rules/engram-continuity.mdc`
-
-For hosted continuity, set:
-
-```bash
-export ENGRAM_API_URL="http://127.0.0.1:8100"
-export ENGRAM_ADMIN_KEY="<admin-key>"     # for session minting
-export ENGRAM_API_KEY="<optional-api-key>" # if your hosted API expects bearer auth
-```
-
-Set `ENGRAM_INSTALL_SKIP_WORKSPACE_RULES=1` to disable this behavior.
-
-**MCP tools** give Claude reactive memory — it stores and retrieves when you ask.
-
-The optional **Claude Code plugin** makes memory **proactive** — relevant context is injected automatically before Claude sees your message:
-
-```bash
-# Inside Claude Code:
-/plugin install engram-memory --path ~/.engram/claude-plugin
-```
-
-What the plugin adds:
-
-| Component | What it does |
-|:----------|:-------------|
-| **UserPromptSubmit hook** | Before each reply, queries Engram and injects matching memories into context. Stdlib-only, no extra deps. Under 2s latency. |
-| `/engram:remember <text>` | Save a fact or preference on the spot |
-| `/engram:search <query>` | Search memories by topic |
-| `/engram:forget <id>` | Delete a memory (confirms before removing) |
-| `/engram:status` | Show memory-store stats at a glance |
-| **Skill** | Standing instructions telling Claude when to save, search, and surface memories |
-
-**Without plugin** — Claude reacts to explicit requests:
-```
-You: Remember that I prefer TypeScript
-Claude: [calls remember tool] Done.
-```
-
-**With plugin** — memory is proactive and invisible:
-```
---- Session A ---
-You: /engram:remember I prefer TypeScript for all new projects
-
---- Session B (new conversation, no history) ---
-You: What stack should I use for the new API?
-[Hook injects "TypeScript preference" before Claude sees the message]
-Claude: Based on your preferences, I'd recommend TypeScript...
-```
-
-### Cursor
-
-`engram install` writes MCP config to `~/.cursor/mcp.json`. Restart Cursor to load.
-It also sets `ENGRAM_MCP_AGENT_ID=cursor` for deterministic handoff identity.
-
-### OpenAI Codex
-
-`engram install` writes MCP config to `~/.codex/config.toml`. Restart Codex to load.
-It also sets `ENGRAM_MCP_AGENT_ID=codex` for deterministic handoff identity.
-
-### OpenClaw
-
-`engram install` deploys the Engram skill to OpenClaw's skills directory.
-
-### Any Agent Runtime
-
-Any tool-calling agent can connect via REST:
-
-```bash
-engram-api    # Starts on http://127.0.0.1:8100
-```
-
----
-
-## MCP Tools
-
-Once configured, your agent has access to these tools:
-
-| Tool | Description |
-|:-----|:------------|
-| **Active Memory** | |
-| `signal_write` | Post a signal to the bus (state/event/directive with TTL tiers) |
-| `signal_read` | Read active signals, ordered by priority |
-| `signal_clear` | Clear signals by key, agent, scope, or type |
-| **Passive Memory** | |
-| `add_memory` | Store a new memory (lands in staging by default) |
-| `search_memory` | Semantic + keyword + episodic search |
-| `get_all_memories` | List all stored memories for a user |
-| `get_memory` | Get a specific memory by ID |
-| `update_memory` | Update memory content |
-| `delete_memory` | Remove a memory |
-| `get_memory_stats` | Storage statistics and health |
-| `apply_memory_decay` | Run the forgetting algorithm |
-| `engram_context` | Session-start digest — load top memories from prior sessions |
-| `remember` | Quick-save a fact (no LLM extraction, stores directly) |
-| `propose_write` | Create a staged write proposal (default safe path) |
-| `list_pending_commits` | Inspect staged write queue |
-| `resolve_conflict` | Resolve invariant conflicts (accept proposed or keep existing) |
-| `search_scenes` / `get_scene` | Episodic CAST scene retrieval with masking policy |
-| **Handoff** | |
-| `save_session_digest` | Save handoff context when pausing or switching agents |
-| `get_last_session` | Load session context from the last active agent |
-| `list_sessions` | Browse handoff history across agents |
-
-Every tool response auto-includes an `_active` field with the latest signals from the Active Memory bus. Auto-lifecycle behavior is server-driven: when `auto_session_bus` is enabled, Engram writes handoff checkpoints without explicit user prompts.
-
----
-
-## API & SDK
-
-### REST API
-
-```bash
-engram-api    # http://127.0.0.1:8100
-              # Interactive docs at /docs
-```
-
-```bash
-# 1. Create a capability session token
-curl -X POST http://localhost:8100/v1/sessions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "user_id": "u123",
-    "agent_id": "planner",
-    "allowed_confidentiality_scopes": ["work", "personal"],
-    "capabilities": ["search", "propose_write", "read_scene"],
-    "ttl_minutes": 1440
-  }'
-
-# 2. Propose a write (default: staging)
-curl -X POST http://localhost:8100/v1/memories \
-  -H "Authorization: Bearer <TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{"content": "User prefers dark mode", "user_id": "u123", "mode": "staging"}'
-
-# 3. Search (returns context packet with scene citations)
-curl -X POST http://localhost:8100/v1/search \
-  -H "Authorization: Bearer <TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "UI preferences", "user_id": "u123"}'
-
-# 4. Review staged commits
-curl "http://localhost:8100/v1/staging/commits?user_id=u123&status=PENDING"
-curl -X POST http://localhost:8100/v1/staging/commits/<id>/approve
-
-# 5. Episodic scene search
-curl -X POST http://localhost:8100/v1/scenes/search \
-  -H "Content-Type: application/json" \
-  -d '{"query": "architecture discussion", "user_id": "u123"}'
-
-# 6. Namespace & trust management
-curl -X POST http://localhost:8100/v1/namespaces \
-  -d '{"user_id": "u123", "namespace": "workbench"}'
-curl "http://localhost:8100/v1/trust?user_id=u123&agent_id=planner"
-
-# 7. Sleep-cycle maintenance
-curl -X POST http://localhost:8100/v1/sleep/run \
-  -d '{"user_id": "u123", "apply_decay": true, "cleanup_stale_refs": true}'
-
-# 8. Zero-intervention handoff (session bus)
-curl -X POST http://localhost:8100/v1/handoff/resume \
-  -H "Authorization: Bearer <TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{"user_id":"u123","agent_id":"frontend","repo_path":"/repo","objective":"continue latest task"}'
-
-curl -X POST http://localhost:8100/v1/handoff/checkpoint \
-  -H "Authorization: Bearer <TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{"user_id":"u123","agent_id":"frontend","repo_path":"/repo","task_summary":"implemented card layout"}'
-
-curl "http://localhost:8100/v1/handoff/lanes?user_id=u123"
-```
-
-### Handoff Compatibility Routes
-
-Hosted integrations can call compatibility routes that mirror MCP handoff tools:
-
-```bash
-# Save digest (compat)
-curl -X POST http://localhost:8100/v1/handoff/sessions/digest \
-  -H "Authorization: Bearer <TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{"user_id":"u123","agent_id":"codex","task_summary":"Continue task","repo":"/repo"}'
-
-# Get last session (compat)
-curl "http://localhost:8100/v1/handoff/sessions/last?user_id=u123&repo=/repo"
-
-# List sessions (compat)
-curl "http://localhost:8100/v1/handoff/sessions?user_id=u123&repo=/repo&limit=20"
-```
-
-### Continuity Troubleshooting
-
-- `hosted_backend_unavailable`: verify `ENGRAM_API_URL` and network reachability.
-- `missing_or_expired_token` / `missing_capability`: ensure the caller has a valid session token with `read_handoff` or `write_handoff`.
-- `Storage folder ... qdrant is already accessed`: local Qdrant file mode is single-process. Fix: switch to `sqlite_vec` provider (`pip install "engram-memory[sqlite_vec]"`) which uses WAL mode for concurrent access, or use hosted API mode / a shared Qdrant server.
-
-### Python SDK
 
 ```python
 from engram import Engram
 
 memory = Engram()
-
-# Add a memory
-memory.add("User prefers Python over JavaScript", user_id="u123")
-
-# Search with dual retrieval
-results = memory.search("programming preferences", user_id="u123")
-
-# Cross-agent knowledge sharing
-memory.add(
-    "The API rate limit is 100 req/min",
-    user_id="team_alpha",
-    agent_id="researcher",
-    categories=["technical", "api"]
-)
-
-# Another agent finds it
-results = memory.search("rate limits", user_id="team_alpha")
+memory.add("User prefers Python over TypeScript", user_id="u1")
+results = memory.search("programming preferences", user_id="u1")
 ```
 
-**Full Memory interface:**
+**18 MCP tools** — memory CRUD, semantic search, episodic scenes, profiles, decay, session handoff. One command configures Claude Code, Cursor, and Codex:
+
+```bash
+engram install
+```
+
+### [`engram-bus`](./engram-bus/) — Agent Communication Bus
+
+Real-time agent-to-agent coordination. Key/value with TTL, pub/sub messaging, handoff sessions and checkpoints. Zero external dependencies — stdlib only.
+
+```bash
+pip install engram-bus
+```
 
 ```python
-from engram import Memory
+from engram_bus import Bus
 
-memory = Memory()
-
-# Lifecycle
-memory.add(content, user_id, agent_id=None, categories=None, metadata=None)
-memory.get(memory_id)
-memory.update(memory_id, content)
-memory.delete(memory_id)
-
-# Search
-memory.search(query, user_id, agent_id=None, limit=10, categories=None)
-memory.get_all(user_id, agent_id=None, layer=None, limit=100)
-
-# Memory management
-memory.promote(memory_id)                # SML → LML
-memory.demote(memory_id)                 # LML → SML
-memory.fuse(memory_ids)                  # Combine related memories
-memory.decay(user_id=None)               # Apply forgetting
-memory.history(memory_id)                # Access history
-
-# Active Memory (signal bus)
-memory.active.write_signal(key="editing", value="auth.py", signal_type="state")
-memory.active.read_signals(user_id="default")
-memory.active.clear_signals(key="editing")
-memory.consolidate_active()              # Promote important signals → passive memory
-
-# Knowledge graph
-memory.get_related_memories(memory_id)   # Graph traversal
-memory.get_memory_entities(memory_id)    # Extracted entities
-memory.get_entity_memories(entity_name)  # All memories with entity
-memory.get_memory_graph(memory_id)       # Visualization data
-
-# Categories
-memory.get_category_tree()
-memory.search_by_category(category_id)
-memory.stats(user_id=None, agent_id=None)
+bus = Bus()
+bus.put("status", "refactoring auth", agent="planner", ttl=300)
+bus.publish("progress", {"step": 3, "total": 5}, agent="worker")
 ```
 
-**Async support:**
+[Full documentation →](./engram-bus/README.md)
+
+### [`engram-enterprise`](./engram-enterprise/) — Governance Layer
+
+Policy enforcement, provenance tracking, acceptance gates, async operations, and authenticated REST API. Built on top of engram-memory and engram-bus.
+
+```bash
+pip install engram-enterprise
+```
 
 ```python
-from engram.memory.async_memory import AsyncMemory
+from engram_enterprise import PersonalMemoryKernel
 
-async with AsyncMemory() as memory:
-    await memory.add("User prefers Python", user_id="u1")
-    results = await memory.search("programming", user_id="u1")
+kernel = PersonalMemoryKernel()
 ```
 
-### CLI
+[Full documentation →](./engram-enterprise/README.md)
+
+---
+
+## Integrations
 
 ```bash
-engram install                     # Auto-configure all integrations
-engram status                      # Version, config paths, DB stats
-engram serve                       # Start REST API server
-
-engram add "User prefers Python"   # Add a memory
-engram search "preferences"        # Search
-engram list --layer lml            # List long-term memories
-engram stats                       # Memory statistics
-engram decay                       # Apply forgetting
-engram categories                  # List categories
-
-engram export -o memories.json     # Export
-engram import memories.json        # Import (Engram or Mem0 format)
+engram install    # auto-configures everything
 ```
+
+One command sets up MCP config for Claude Code, Cursor, and Codex. It also deploys the **Claude Code plugin** — a hook that proactively injects relevant memories before every prompt, plus periodic background checkpoints that survive rate limits.
+
+Works with any tool-calling agent via REST: `engram-api` starts a server at `http://127.0.0.1:8100`.
 
 ---
 
-## Configuration
+## Repo Structure
 
-```bash
-# LLM & Embeddings (choose one)
-export GEMINI_API_KEY="your-key"                      # Gemini (default)
-export OPENAI_API_KEY="your-key"                      # OpenAI
-export OLLAMA_HOST="http://localhost:11434"            # Ollama (local, no key)
-
-# v2 features (all enabled by default)
-export ENGRAM_V2_POLICY_GATEWAY="true"                # Token + scope enforcement
-export ENGRAM_V2_STAGING_WRITES="true"                # Writes land in staging
-export ENGRAM_V2_DUAL_RETRIEVAL="true"                # Semantic + episodic search
-export ENGRAM_V2_REF_AWARE_DECAY="true"               # Preserve referenced memories
-export ENGRAM_V2_TRUST_AUTOMERGE="true"               # Auto-approve for trusted agents
-export ENGRAM_V2_AUTO_MERGE_TRUST_THRESHOLD="0.85"    # Trust threshold for auto-merge
 ```
-
-**Python config:**
-
-```python
-from engram.configs.base import MemoryConfig, VectorStoreConfig, FadeMemConfig, EchoMemConfig, CategoryMemConfig
-from engram.configs.active import ActiveMemoryConfig
-
-config = MemoryConfig(
-    # Use sqlite-vec for concurrent multi-agent access (no server needed)
-    vector_store=VectorStoreConfig(
-        provider="sqlite_vec",
-        config={"path": "~/.engram/vectors.db"},
-    ),
-    engram=FadeMemConfig(
-        enable_forgetting=True,
-        sml_decay_rate=0.15,
-        lml_decay_rate=0.02,
-        promotion_access_threshold=3,
-        forgetting_threshold=0.1,
-    ),
-    echo=EchoMemConfig(
-        enable_echo=True,
-        auto_depth=True,
-        deep_multiplier=1.6,
-    ),
-    category=CategoryMemConfig(
-        enable_categories=True,
-        auto_categorize=True,
-        enable_category_decay=True,
-        max_category_depth=3,
-    ),
-    # Active Memory signal bus
-    active=ActiveMemoryConfig(
-        enabled=True,
-        db_path="~/.engram/active.db",
-        default_ttl_tier="notable",
-        consolidation_enabled=True,
-    ),
-)
+├── engram/                  # engram-memory — core Python package
+│   ├── core/                #   decay, echo, category, scenes, distillation, traces
+│   ├── memory/              #   Memory class (orchestrates all layers)
+│   ├── llms/                #   LLM providers (gemini, openai, nvidia, ollama)
+│   ├── embeddings/          #   embedding providers
+│   ├── vector_stores/       #   sqlite-vec, in-memory
+│   ├── db/                  #   SQLite persistence
+│   ├── api/                 #   REST API endpoints
+│   ├── mcp_server.py        #   MCP server (18 tools)
+│   └── cli.py               #   CLI interface
+├── engram-bus/              # engram-bus — agent communication
+│   └── engram_bus/          #   bus, pub/sub, handoff store, TCP server
+├── engram-enterprise/       # engram-enterprise — governance layer
+│   └── engram_enterprise/   #   kernel, policy, provenance, async, API + auth
+├── plugins/                 # Claude Code plugin (hooks, commands, skill)
+├── dashboard/               # Next.js memory visualizer
+├── tests/                   # Test suite (300+ tests)
+├── pyproject.toml           # engram-memory package config
+└── install.sh               # One-line installer
 ```
-
----
-
-## Multi-Agent Memory
-
-Engram is designed for agent orchestrators. Every memory is scoped by `user_id` and optionally `agent_id`:
-
-```python
-# Research agent stores knowledge (passive memory)
-memory.add("OAuth 2.0 with JWT tokens",
-           user_id="project_123", agent_id="researcher")
-
-# Implementation agent searches shared knowledge
-results = memory.search("authentication", user_id="project_123")
-# → Finds researcher's discovery
-
-# Review agent adds findings
-memory.add("Security review passed",
-           user_id="project_123", agent_id="reviewer")
-```
-
-**Real-time coordination with Active Memory:**
-
-```python
-# Agent A broadcasts what it's working on
-memory.active.write_signal(
-    key="editing_file", value="src/auth.py",
-    signal_type="state", source_agent_id="agent-A"
-)
-
-# Agent B posts a build event
-memory.active.write_signal(
-    key="build", value="tests failing: 3 errors in auth module",
-    signal_type="event", ttl_tier="critical"
-)
-
-# User sets a permanent directive
-memory.active.write_signal(
-    key="style_rule", value="Always use TypeScript for new files",
-    signal_type="directive"  # Never expires, auto-promoted to passive memory
-)
-
-# Any agent reads the bus — or it's auto-injected into every MCP response
-signals = memory.active.read_signals(user_id="default")
-```
-
-**Agent trust scoring** determines write permissions:
-- High-trust agents (>0.85): proposals auto-merge
-- Medium-trust: queued for daily digest review
-- Low-trust: require explicit approval
-
----
-
-## Research
-
-Engram is based on:
-
-> **FadeMem: Biologically-Inspired Forgetting for Efficient Agent Memory**
-> [arXiv:2601.18642](https://arxiv.org/abs/2601.18642)
-
-| Metric | Result |
-|:-------|:-------|
-| Storage Reduction | ~45% |
-| Multi-hop Reasoning | +12% accuracy |
-| Retrieval Precision | +8% on LTI-Bench |
-
-Biological inspirations: Ebbinghaus Forgetting Curve → exponential decay, Spaced Repetition → access boosts strength, Sleep Consolidation → SML → LML promotion + CLS replay distillation, Benna-Fusi Model → multi-timescale strength traces (fast/mid/slow), Complementary Learning Systems → episodic-to-semantic consolidation, Working Memory → Active Memory signal bus, Conscious/Subconscious Split → Active vs Passive memory, Production Effect → echo encoding, Elaborative Encoding → deeper processing = stronger memory.
-
----
-
-## LongMemEval on Colab (GPU)
-
-Use this flow to benchmark Engram on LongMemEval in Google Colab with GPU acceleration.
-
-```bash
-# 1) In Colab: Runtime -> Change runtime type -> GPU
-
-# 2) Install Engram + GPU reader dependencies
-pip install -U engram-memory transformers accelerate
-
-# 3) Download LongMemEval data
-mkdir -p /content/longmemeval
-cd /content/longmemeval
-curl -L -o longmemeval_s_cleaned.json \
-  https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json
-
-# 4) Run Engram benchmark (HF reader on GPU)
-python -m engram.benchmarks.longmemeval \
-  --dataset-path /content/longmemeval/longmemeval_s_cleaned.json \
-  --output-jsonl /content/longmemeval/engram_hypotheses.jsonl \
-  --retrieval-jsonl /content/longmemeval/engram_retrieval.jsonl \
-  --answer-backend hf \
-  --hf-model Qwen/Qwen2.5-1.5B-Instruct \
-  --embedder-provider simple \
-  --llm-provider mock \
-  --vector-store-provider memory \
-  --history-db-path /content/engram-longmemeval.db \
-  --top-k 8 \
-  --max-questions 100 \
-  --skip-abstention
-```
-
-Notes:
-- The output file is evaluator-compatible (`question_id`, `hypothesis` per line).
-- `--include-debug-fields` adds retrieval diagnostics into each output row.
-- The command above uses `simple` embedder + `mock` LLM for memory operations, so **no Gemini/OpenAI key is required**.
-
-If you want to run with Gemini only (no extra reader packages), use base install and set key **before** starting the run:
-
-```bash
-pip install -U engram-memory
-export GEMINI_API_KEY="your-key"
-
-python -m engram.benchmarks.longmemeval \
-  --dataset-path /content/longmemeval/longmemeval_s_cleaned.json \
-  --output-jsonl /content/longmemeval/engram_hypotheses.jsonl \
-  --answer-backend engram-llm \
-  --llm-provider gemini \
-  --embedder-provider gemini \
-  --vector-store-provider memory
-```
-
-Optional official QA scoring from the LongMemEval repo:
-
-```bash
-cd /content
-git clone https://github.com/xiaowu0162/LongMemEval.git
-cd /content/LongMemEval/src/evaluation
-export OPENAI_API_KEY="your-key"
-python evaluate_qa.py gpt-4o /content/longmemeval/engram_hypotheses.jsonl /content/longmemeval/longmemeval_s_cleaned.json
-```
-
----
-
-## Docker
-
-```bash
-# Quick start
-docker compose up -d
-
-# Or build manually
-docker build -t engram .
-docker run -p 8100:8100 -v engram-data:/data \
-  -e GEMINI_API_KEY="your-key" engram
-```
-
----
-
-## Manual Integration Setup
-
-<details>
-<summary><b>Claude Code / Claude Desktop</b></summary>
-
-Add to `~/.claude.json` (CLI) or `claude_desktop_config.json` (Desktop):
-
-```json
-{
-  "mcpServers": {
-    "engram-memory": {
-      "command": "python",
-      "args": ["-m", "engram.mcp_server"],
-      "env": {
-        "GEMINI_API_KEY": "your-api-key"
-      }
-    }
-  }
-}
-```
-</details>
-
-<details>
-<summary><b>Cursor</b></summary>
-
-Add to `~/.cursor/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "engram-memory": {
-      "command": "python",
-      "args": ["-m", "engram.mcp_server"],
-      "env": {
-        "GEMINI_API_KEY": "your-api-key"
-      }
-    }
-  }
-}
-```
-</details>
-
-<details>
-<summary><b>OpenAI Codex</b></summary>
-
-Add to `~/.codex/config.toml`:
-
-```toml
-[mcp_servers.engram-memory]
-command = "python"
-args = ["-m", "engram.mcp_server"]
-
-[mcp_servers.engram-memory.env]
-GEMINI_API_KEY = "your-api-key"
-```
-</details>
-
----
-
-## Troubleshooting
-
-<details>
-<summary><b>Claude Code doesn't see the memory tools</b></summary>
-
-- Restart Claude Code after running `engram install`
-- Check that `~/.claude.json` has an `mcpServers.engram-memory` section
-- Verify your API key: `echo $GEMINI_API_KEY`
-</details>
-
-<details>
-<summary><b>The hook isn't injecting memories</b></summary>
-
-- Check that `engram-api` is running: `curl http://127.0.0.1:8100/health`
-- Verify the plugin is activated: run `/plugin` in Claude Code
-- Check script permissions: `ls -l ~/.engram/claude-plugin/engram-memory/hooks/prompt_context.py`
-</details>
-
-<details>
-<summary><b>API won't start (port in use)</b></summary>
-
-- Check: `lsof -i :8100`
-- Kill the process: `kill <PID>`
-- Or use a different port: `ENGRAM_API_PORT=8200 engram-api`
-</details>
 
 ---
 
@@ -1007,22 +221,33 @@ GEMINI_API_KEY = "your-api-key"
 ```bash
 git clone https://github.com/Ashish-dwi99/Engram.git
 cd Engram
+
+# Core
 pip install -e ".[dev]"
-pytest tests/ -v
+pytest
+
+# Bus
+pip install -e "./engram-bus[dev]"
+cd engram-bus && pytest
+
+# Enterprise
+pip install -e "./engram-enterprise[dev]"
+cd engram-enterprise && pytest
 ```
 
 ---
 
 ## License
 
-MIT License — see [LICENSE](LICENSE) for details.
+MIT — see [LICENSE](LICENSE).
 
 ---
 
 <p align="center">
-  <b>One memory. Every agent. Real-time coordination. Zero cold starts.</b>
+  <b>One memory. Every agent. Zero cold starts.</b>
   <br><br>
   <a href="https://github.com/Ashish-dwi99/Engram">GitHub</a> &middot;
   <a href="https://github.com/Ashish-dwi99/Engram/issues">Issues</a> &middot;
-  <a href="https://github.com/Ashish-dwi99/Engram/blob/main/CHANGELOG.md">Changelog</a>
+  <a href="https://github.com/Ashish-dwi99/Engram/blob/main/CHANGELOG.md">Changelog</a> &middot;
+  <a href="https://github.com/Ashish-dwi99/Engram/wiki">Docs</a>
 </p>

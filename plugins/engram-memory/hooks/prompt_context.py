@@ -8,6 +8,8 @@ and emits a systemMessage for Claude Code context injection.
 import json
 import os
 import sys
+import threading
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -28,6 +30,58 @@ USER_ID = os.environ.get("ENGRAM_USER_ID", "default")
 AGENT_ID = os.environ.get("ENGRAM_AGENT_ID", "claude-code")
 TOKEN_CACHE = Path(os.environ.get("ENGRAM_TOKEN_CACHE", str(Path.home() / ".engram" / "session_token.json")))
 ADMIN_KEY = os.environ.get("ENGRAM_ADMIN_KEY", "").strip()
+
+# Phase 0: periodic background checkpoint
+CHECKPOINT_THROTTLE_SECS = 60
+CHECKPOINT_TIMEOUT = 3
+CHECKPOINT_FILE = Path(os.environ.get(
+    "ENGRAM_CHECKPOINT_THROTTLE",
+    str(Path.home() / ".engram" / ".last_hook_checkpoint"),
+))
+
+
+def _should_checkpoint() -> bool:
+    """Return True if enough time has elapsed since the last checkpoint."""
+    try:
+        if CHECKPOINT_FILE.exists():
+            age = time.time() - CHECKPOINT_FILE.stat().st_mtime
+            if age < CHECKPOINT_THROTTLE_SECS:
+                return False
+    except Exception:
+        pass
+    return True
+
+
+def _touch_checkpoint_file() -> None:
+    """Update the throttle file mtime."""
+    try:
+        CHECKPOINT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CHECKPOINT_FILE.touch()
+    except Exception:
+        pass
+
+
+def _background_checkpoint(prompt_text: str) -> None:
+    """POST a lightweight checkpoint to the API (fire-and-forget)."""
+    try:
+        cwd = os.getcwd()
+        payload = json.dumps({
+            "task_summary": prompt_text[:200],
+            "event_type": "hook_checkpoint",
+            "agent_id": AGENT_ID,
+            "context_snapshot": prompt_text[-500:],
+            "repo_path": cwd,
+        }).encode("utf-8")
+        req = Request(
+            f"{API_BASE}/v1/handoff/checkpoint",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urlopen(req, timeout=CHECKPOINT_TIMEOUT)
+        _touch_checkpoint_file()
+    except Exception:
+        pass  # fire-and-forget — never block the hook
 
 
 def _derive_query(raw: str) -> str:
@@ -173,6 +227,13 @@ def main() -> None:
     if not raw_prompt.strip():
         sys.stdout.write("{}")
         return
+
+    # Phase 0: fire-and-forget background checkpoint (non-blocking)
+    if _should_checkpoint():
+        t = threading.Thread(
+            target=_background_checkpoint, args=(raw_prompt,), daemon=True
+        )
+        t.start()
 
     if not _health_check():
         sys.stdout.write("{}")

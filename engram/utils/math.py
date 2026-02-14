@@ -1,29 +1,53 @@
-"""Shared math utilities for engram."""
+"""Shared math utilities for engram.
 
-from typing import List
+This module is the single canonical source for cosine similarity and related
+numerical operations. All other modules should import from here.
+
+Requires engram-accel (Rust) for SIMD-optimized operations.
+"""
+
+from typing import List, Optional
+
+import math as _math
 
 try:
-    import numpy as np
-
-    def cosine_similarity(a: List[float], b: List[float]) -> float:
-        """Compute cosine similarity between two vectors using NumPy."""
-        if not a or not b or len(a) != len(b):
-            return 0.0
-        arr_a = np.asarray(a, dtype=np.float64)
-        arr_b = np.asarray(b, dtype=np.float64)
-        dot = np.dot(arr_a, arr_b)
-        denom = np.sqrt(np.dot(arr_a, arr_a) * np.dot(arr_b, arr_b))
-        return float(dot / denom) if denom else 0.0
-
+    from engram_accel import (
+        cosine_similarity as _rs_cosine,
+        cosine_similarity_batch as _rs_cosine_batch,
+    )
+    ACCEL_AVAILABLE = True
 except ImportError:
+    ACCEL_AVAILABLE = False
 
-    def cosine_similarity(a: List[float], b: List[float]) -> float:  # type: ignore[misc]
-        """Compute cosine similarity between two vectors (pure-Python fallback)."""
-        if not a or not b or len(a) != len(b):
-            return 0.0
+    def _rs_cosine(a, b):
         dot = sum(x * y for x, y in zip(a, b))
-        norm_a = sum(x * x for x in a) ** 0.5
-        norm_b = sum(x * x for x in b) ** 0.5
-        if norm_a == 0 or norm_b == 0:
-            return 0.0
-        return dot / (norm_a * norm_b)
+        na = _math.sqrt(sum(x * x for x in a))
+        nb = _math.sqrt(sum(x * x for x in b))
+        return dot / (na * nb) if na and nb else 0.0
+
+    def _rs_cosine_batch(query, store):
+        return [_rs_cosine(query, v) for v in store]
+
+
+def _pure_python_cosine(a, b):
+    """Pure Python cosine similarity (reference implementation for tests)."""
+    dot = sum(x * y for x, y in zip(a, b))
+    na = _math.sqrt(sum(x * x for x in a))
+    nb = _math.sqrt(sum(x * x for x in b))
+    return dot / (na * nb) if na and nb else 0.0
+
+
+def cosine_similarity(a: Optional[List[float]], b: Optional[List[float]]) -> float:
+    """Compute cosine similarity between two vectors (Rust-accelerated)."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    return _rs_cosine(list(a), list(b))
+
+
+def cosine_similarity_batch(
+    query: List[float], store: List[List[float]]
+) -> List[float]:
+    """Compute cosine similarity of *query* against every vector in *store* (SIMD)."""
+    if not query or not store:
+        return [0.0] * len(store)
+    return _rs_cosine_batch(list(query), [list(v) for v in store])

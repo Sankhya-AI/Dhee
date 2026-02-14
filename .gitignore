@@ -58,13 +58,7 @@ credentials.json
 *.db-wal
 *.db-shm
 
-# Qdrant vector store data
-qdrant/
-.qdrant/
-qdrant_storage/
-
 # History and cache directories
-.engram/
 .engram/
 history.db
 engram_history.db
@@ -73,7 +67,6 @@ fadem_history.db
 # Temporary test files
 /tmp/
 test_output/
-test_qdrant/
 *_test_*
 
 # macOS
@@ -125,3 +118,9 @@ logs/
 # Package manager
 pip-log.txt
 pip-delete-this-directory.txt
+
+# Node (dashboard)
+node_modules/
+
+# Rust build artifacts (engram-accel)
+target/

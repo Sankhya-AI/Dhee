@@ -26,3 +26,22 @@ class OpenAIEmbedder(BaseEmbedder):
             raise RuntimeError(
                 f"OpenAI embedding failed (model={self.model}): {exc}"
             ) from exc
+
+    def embed_batch(
+        self, texts: List[str], memory_action: Optional[str] = None
+    ) -> List[List[float]]:
+        """Native batch embedding — single API call for N texts."""
+        if not texts:
+            return []
+        if len(texts) == 1:
+            return [self.embed(texts[0], memory_action=memory_action)]
+        try:
+            response = self.client.embeddings.create(model=self.model, input=texts)
+            # Response data is sorted by index
+            sorted_data = sorted(response.data, key=lambda d: d.index)
+            return [d.embedding for d in sorted_data]
+        except Exception as exc:
+            logger.warning(
+                "OpenAI batch embedding failed, falling back to sequential: %s", exc
+            )
+            return [self.embed(t, memory_action=memory_action) for t in texts]
