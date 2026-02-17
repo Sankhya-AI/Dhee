@@ -26,6 +26,20 @@ class RelationType(str, Enum):
     ELABORATES = "elaborates"            # Memory adds detail to another
     CAUSED_BY = "caused_by"              # Causal relationship
     DEPENDS_ON = "depends_on"            # Dependency relationship
+    LED_TO = "led_to"                    # Forward causal (A led to B)
+    PREVENTS = "prevents"                # A prevents B from happening
+    ENABLES = "enables"                  # A enables B to happen
+    REQUIRES = "requires"                # A requires B as precondition
+
+
+# Causal relationship types for filtering
+CAUSAL_RELATION_TYPES = frozenset({
+    RelationType.CAUSED_BY,
+    RelationType.LED_TO,
+    RelationType.PREVENTS,
+    RelationType.ENABLES,
+    RelationType.REQUIRES,
+})
 
 
 class EntityType(str, Enum):
@@ -198,10 +212,10 @@ Return only valid JSON array, no explanation:"""
 
         try:
             response = self.llm.generate(prompt)
-            # Try to parse JSON from response
-            json_match = re.search(r'\[.*\]', response, re.DOTALL)
-            if json_match:
-                entity_data = json.loads(json_match.group())
+            # Parse first complete JSON array, ignoring trailing LLM text
+            arr_start = response.find("[")
+            if arr_start >= 0:
+                entity_data, _ = json.JSONDecoder().raw_decode(response, arr_start)
                 entities = []
                 for item in entity_data:
                     name = item.get("name", "").strip()
@@ -455,6 +469,62 @@ Return only valid JSON array, no explanation:"""
 
         return graph
 
+    def get_causal_chain(
+        self,
+        memory_id: str,
+        direction: str = "backward",
+        depth: int = 5,
+    ) -> List[Tuple[str, int, List[Relationship]]]:
+        """Traverse causal links from a memory.
+
+        Args:
+            memory_id: Starting memory ID
+            direction: "backward" (what caused this) or "forward" (what this caused)
+            depth: Maximum traversal depth
+
+        Returns:
+            List of (memory_id, depth, path) tuples along the causal chain
+        """
+        # For backward: follow CAUSED_BY source->target and LED_TO target->source
+        # For forward: follow LED_TO source->target and CAUSED_BY target->source
+        visited = {memory_id}
+        results = []
+        queue = deque([(memory_id, 0, [])])
+
+        while queue:
+            current_id, d, path = queue.popleft()
+            if d >= depth:
+                continue
+
+            for rel in self.memory_relations.get(current_id, []):
+                if rel.relation_type not in CAUSAL_RELATION_TYPES:
+                    continue
+
+                if direction == "backward":
+                    # We want to find what caused current_id
+                    if rel.target_id == current_id:
+                        other_id = rel.source_id
+                    elif rel.source_id == current_id and rel.relation_type == RelationType.CAUSED_BY:
+                        other_id = rel.target_id
+                    else:
+                        continue
+                else:
+                    # Forward: what did current_id cause
+                    if rel.source_id == current_id:
+                        other_id = rel.target_id
+                    elif rel.target_id == current_id and rel.relation_type == RelationType.CAUSED_BY:
+                        other_id = rel.source_id
+                    else:
+                        continue
+
+                if other_id not in visited:
+                    visited.add(other_id)
+                    new_path = path + [rel]
+                    results.append((other_id, d + 1, new_path))
+                    queue.append((other_id, d + 1, new_path))
+
+        return results
+
     def stats(self) -> Dict[str, Any]:
         """Get graph statistics."""
         return {
@@ -470,3 +540,27 @@ Return only valid JSON array, no explanation:"""
                 for t in RelationType
             },
         }
+
+
+# ── Causal language detection (module-level) ──
+
+_CAUSAL_PATTERNS = [
+    (re.compile(r'\bbecause\b', re.IGNORECASE), RelationType.CAUSED_BY),
+    (re.compile(r'\bcaused by\b', re.IGNORECASE), RelationType.CAUSED_BY),
+    (re.compile(r'\bdue to\b', re.IGNORECASE), RelationType.CAUSED_BY),
+    (re.compile(r'\bled to\b', re.IGNORECASE), RelationType.LED_TO),
+    (re.compile(r'\bresulted in\b', re.IGNORECASE), RelationType.LED_TO),
+    (re.compile(r'\bprevents?\b', re.IGNORECASE), RelationType.PREVENTS),
+    (re.compile(r'\benables?\b', re.IGNORECASE), RelationType.ENABLES),
+    (re.compile(r'\brequires?\b', re.IGNORECASE), RelationType.REQUIRES),
+]
+
+
+def detect_causal_language(content: str) -> List[RelationType]:
+    """Detect causal relationship types present in text content."""
+    found = []
+    for pattern, rel_type in _CAUSAL_PATTERNS:
+        if pattern.search(content):
+            if rel_type not in found:
+                found.append(rel_type)
+    return found

@@ -5,6 +5,7 @@ import type {
   Project, ProjectStatus, ProjectTag, Issue, FeedEvent, SystemInfo,
   MemoryItem, MemoryStats, MemoryCategory,
   CoordinationAgent, CoordinationEvent, RouteResult,
+  WarRoom, WarRoomMessage,
 } from "@/types";
 import type { AgentInfo } from "@/types/dashboard";
 
@@ -48,6 +49,8 @@ export const api = {
   health: () => get<{ status: string }>("/health"),
   feed: () => get<FeedEvent[]>("/api/feed"),
   agents: () => get<unknown[]>("/api/agents"),
+  getConfig: () => get<Record<string, unknown>>("/api/config"),
+  updateConfig: (data: Record<string, unknown>) => post<{ ok: boolean }>("/api/config", data),
 
   // Projects
   listProjects: () => get<Project[]>("/api/projects"),
@@ -152,6 +155,22 @@ export const api = {
     post<Issue>(`/api/coordination/claim/${taskId}`, { agent_name: agentName }),
   coordinationEvents: (limit = 50) =>
     get<CoordinationEvent[]>(`/api/coordination/events?limit=${limit}`),
+
+  // War Rooms
+  warrooms: () => get<WarRoom[]>("/api/warrooms"),
+  createWarroom: (data: { topic: string; agenda?: string; task_id?: string; created_by?: string }) =>
+    post<WarRoom>("/api/warrooms", data),
+  getWarroom: (id: string) => get<WarRoom>(`/api/warrooms/${id}`),
+  warroomMessages: (id: string, limit = 50) =>
+    get<WarRoomMessage[]>(`/api/warrooms/${id}/messages?limit=${limit}`),
+  postWarroomMessage: (id: string, sender: string, content: string, message_type = "message") =>
+    post<WarRoomMessage>(`/api/warrooms/${id}/messages`, { sender, content, message_type }),
+  setWarroomMonitor: (id: string, agent_name: string) =>
+    post<WarRoom>(`/api/warrooms/${id}/monitor`, { agent_name }),
+  transitionWarroom: (id: string, new_state: string) =>
+    post<WarRoom>(`/api/warrooms/${id}/transition`, { new_state }),
+  decideWarroom: (id: string, decision_text: string, action_items?: string[]) =>
+    post<WarRoom>(`/api/warrooms/${id}/decide`, { decision_text, action_items }),
 };
 
 // ── Legacy hooks for backward compatibility with old dashboard ──

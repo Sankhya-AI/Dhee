@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { useHotkeys } from "react-hotkeys-hook";
 import { useState } from "react";
+import { Toaster } from "sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ProjectProvider } from "@/contexts/ProjectContext";
 import { WebSocketProvider } from "@/contexts/WebSocketContext";
@@ -11,6 +12,7 @@ import { TaskChatView } from "@/views/TaskChatView";
 import { MemoryView } from "@/views/MemoryView";
 import { TodoView } from "@/views/TodoView";
 import { CoordinationView } from "@/views/CoordinationView";
+import { WarRoomView } from "@/views/WarRoomView";
 import { CommandBar } from "@/components/dialogs/CommandBar";
 import { SettingsDialog } from "@/components/dialogs/SettingsDialog";
 import { IssuePanel } from "@/components/issue/IssuePanel";
@@ -36,6 +38,7 @@ function AppInner() {
           <Route path="/task/:taskId" element={<TaskChatView />} />
           <Route path="/memory" element={<MemoryView />} />
           <Route path="/coordination" element={<CoordinationView />} />
+          <Route path="/warroom" element={<WarRoomView />} />
         </Routes>
 
         {/* Command palette */}
@@ -60,6 +63,9 @@ function AppInner() {
             onIssueChange={updated => setCommandIssue(updated)}
           />
         )}
+
+        {/* Toast notifications */}
+        <Toaster position="bottom-right" richColors />
       </div>
     </TooltipProvider>
   );

@@ -156,9 +156,11 @@ class ProfileProcessor:
         )
         try:
             response = self.llm.generate(prompt)
-            json_match = re.search(r"\[.*\]", response, re.DOTALL)
-            if json_match:
-                data = json.loads(json_match.group())
+            # Use raw_decode to parse the first complete JSON array,
+            # ignoring trailing LLM commentary that may contain [] chars.
+            arr_start = response.find("[")
+            if arr_start >= 0:
+                data, _ = json.JSONDecoder().raw_decode(response, arr_start)
                 updates = []
                 for item in data:
                     name = item.get("name", "").strip()

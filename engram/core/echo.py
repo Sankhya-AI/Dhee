@@ -420,10 +420,19 @@ class EchoProcessor:
         fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
         if fence_match:
             return fence_match.group(1).strip()
+        # Use raw_decode to extract the first complete JSON object,
+        # ignoring any trailing LLM commentary.
         start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            return text[start:end + 1].strip()
+        if start != -1:
+            try:
+                obj, end = json.JSONDecoder().raw_decode(text, start)
+                return json.dumps(obj)
+            except json.JSONDecodeError:
+                pass
+            # Fallback: bracket matching
+            end = text.rfind("}")
+            if end > start:
+                return text[start:end + 1].strip()
         return text
 
     def _repair_json(self, text: str) -> str:
@@ -436,8 +445,16 @@ class EchoProcessor:
     def _load_json_dict(self, text: str) -> Optional[Dict[str, Any]]:
         try:
             data = json.loads(text)
-        except Exception:
-            return None
+        except json.JSONDecodeError:
+            # Try raw_decode to handle trailing text
+            start = text.find("{") if text else -1
+            if start >= 0:
+                try:
+                    data, _ = json.JSONDecoder().raw_decode(text, start)
+                except (json.JSONDecodeError, ValueError):
+                    return None
+            else:
+                return None
         return data if isinstance(data, dict) else None
 
     def _normalize_echo_dict(self, data: Dict[str, Any]) -> Dict[str, Any]:

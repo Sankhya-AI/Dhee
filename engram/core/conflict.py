@@ -28,7 +28,10 @@ def resolve_conflict(existing_memory: Dict[str, Any], new_content: str, llm, cus
 
     try:
         response = llm.generate(prompt)
-        data = json.loads(response.strip())
+        json_start = response.find("{")
+        if json_start < 0:
+            raise json.JSONDecodeError("No JSON object found", response, 0)
+        data, _ = json.JSONDecoder().raw_decode(response, json_start)
         try:
             confidence = float(data.get("confidence", 0.5))
         except (ValueError, TypeError):

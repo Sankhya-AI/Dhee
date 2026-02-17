@@ -218,13 +218,53 @@ function MatchCard({
 
 // ── Agent Detail Panel ──
 
-function AgentDetailPanel({ agent }: { agent: CoordinationAgent | null }) {
+function AgentDetailPanel({ agent, agents }: { agent: CoordinationAgent | null; agents: CoordinationAgent[] }) {
   if (!agent) {
+    const available = agents.filter((a) => a.status === "available").length;
+    const busy = agents.filter((a) => a.status === "busy").length;
+    const totalTasks = agents.reduce((n, a) => n + a.active_tasks.length, 0);
+
     return (
-      <div className="flex flex-col items-center justify-center h-full text-muted-foreground py-12">
-        <Bot className="h-8 w-8 mb-2 opacity-30" />
-        <p className="text-sm">Select an agent</p>
-        <p className="text-xs mt-1">Click an agent to view details</p>
+      <div className="p-4 space-y-4">
+        <div className="text-center py-4">
+          <Network className="h-8 w-8 mx-auto mb-2 text-muted-foreground/40" />
+          <p className="text-sm font-medium">Agent Overview</p>
+        </div>
+
+        {agents.length > 0 && (
+          <>
+            <div className="grid grid-cols-2 gap-2">
+              <div className="p-2.5 rounded-lg bg-emerald-50 border border-emerald-200 text-center">
+                <span className="text-lg font-bold text-emerald-700">{available}</span>
+                <p className="text-[10px] text-emerald-600">Available</p>
+              </div>
+              <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-center">
+                <span className="text-lg font-bold text-amber-700">{busy}</span>
+                <p className="text-[10px] text-amber-600">Busy</p>
+              </div>
+            </div>
+            <div className="p-2.5 rounded-lg bg-muted text-center">
+              <span className="text-lg font-bold">{totalTasks}</span>
+              <p className="text-[10px] text-muted-foreground">Active Tasks</p>
+            </div>
+          </>
+        )}
+
+        <div className="border-t border-border pt-3">
+          <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">
+            How it works
+          </h4>
+          <div className="space-y-2 text-xs text-muted-foreground leading-relaxed">
+            <p><strong className="text-foreground">1.</strong> Create tasks on the Board</p>
+            <p><strong className="text-foreground">2.</strong> Click <strong className="text-foreground">Assign</strong> to auto-match the best agent</p>
+            <p><strong className="text-foreground">3.</strong> Or <strong className="text-foreground">Assign All</strong> to dispatch everything at once</p>
+            <p><strong className="text-foreground">4.</strong> Watch agents work in the task chat view</p>
+          </div>
+        </div>
+
+        <p className="text-[10px] text-muted-foreground text-center">
+          Click an agent on the left for details
+        </p>
       </div>
     );
   }
@@ -534,7 +574,7 @@ export function CoordinationView() {
             }`}
           >
             <Search className="h-3 w-3" />
-            Routing
+            Tasks
           </button>
           <button
             onClick={() => setCenterTab("events")}
@@ -561,7 +601,7 @@ export function CoordinationView() {
               <div className="relative">
                 <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
                 <Input
-                  placeholder="Search capabilities... (e.g. python debugging)"
+                  placeholder="Find an agent by skill... (e.g. python debugging)"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   className="pl-8 h-8 text-sm"
@@ -585,7 +625,7 @@ export function CoordinationView() {
                     ) : (
                       <Zap className="h-3 w-3" />
                     )}
-                    Route All Pending
+                    Assign All
                   </Button>
                 </div>
               )}
@@ -669,7 +709,7 @@ export function CoordinationView() {
           </h3>
         </div>
         <div className="flex-1 overflow-hidden">
-          <AgentDetailPanel agent={selectedAgent} />
+          <AgentDetailPanel agent={selectedAgent} agents={agents} />
         </div>
       </div>
     </div>
@@ -721,7 +761,7 @@ function UnassignedTaskRow({
         ) : (
           <ArrowRightLeft className="h-3 w-3" />
         )}
-        Route
+        Assign
       </Button>
     </div>
   );

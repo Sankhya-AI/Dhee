@@ -3,6 +3,8 @@ import { useWebSocket, type ConnectionStatus, type WsMessage } from "@/hooks/use
 import { useProjectContext } from "@/contexts/ProjectContext";
 import { useChatStore } from "@/stores/useChatStore";
 import { useTaskConversationStore } from "@/stores/useTaskConversationStore";
+import { useWarRoomStore } from "@/stores/useWarRoomStore";
+import { toast } from "sonner";
 import type { ProcessEntry, FileChange } from "@/types";
 
 // Extended WS message with dynamic fields from server
@@ -41,6 +43,30 @@ export function WebSocketProvider({ children }: Props) {
         msg.type === "issues_bulk_updated"
       ) {
         refreshIssues();
+        return;
+      }
+
+      // ── Auto-execute notification ──
+      if (msg.type === "task_auto_started") {
+        const autoTaskId = msg.task_id as string;
+        const agent = msg.agent as string;
+        const title = msg.title as string;
+        const store = useTaskConversationStore.getState();
+        store.setExecuting(autoTaskId, true);
+        store.addConversationEntry(autoTaskId, {
+          id: `system-auto-${Date.now()}`,
+          type: "system",
+          content: `Auto-dispatching to ${agent}...`,
+          ts: new Date().toISOString(),
+        });
+        refreshIssues();
+        toast.info(`${agent} started on "${title}"`, {
+          action: {
+            label: "View",
+            onClick: () => { window.location.href = `/task/${autoTaskId}`; },
+          },
+          duration: 8000,
+        });
         return;
       }
 
@@ -143,6 +169,42 @@ export function WebSocketProvider({ children }: Props) {
             store.markComplete(taskId);
             break;
         }
+        return;
+      }
+
+      // ── War Room broadcasts → useWarRoomStore ──
+      const wrStore = useWarRoomStore.getState();
+
+      if (msg.type === "warroom_created") {
+        wrStore.addRoom(msg.room as any);
+        toast.info(`War Room created: ${(msg.room as any)?.wr_topic || "New room"}`);
+        return;
+      }
+      if (msg.type === "warroom_message") {
+        const wrmsg = msg.message as any;
+        if (wrmsg?.wrmsg_room_id) {
+          wrStore.addMessage(wrmsg.wrmsg_room_id, wrmsg);
+        }
+        return;
+      }
+      if (msg.type === "warroom_state_changed") {
+        wrStore.updateRoom(msg.room_id as string, { wr_state: msg.to_state as any });
+        return;
+      }
+      if (msg.type === "warroom_monitor_changed") {
+        wrStore.updateRoom(msg.room_id as string, { wr_monitor_agent: msg.new_monitor as string });
+        return;
+      }
+      if (msg.type === "warroom_decided") {
+        wrStore.updateRoom(msg.room_id as string, {
+          wr_decision_text: msg.decision as string,
+          wr_state: "decided",
+        });
+        toast.success("War Room decision recorded");
+        return;
+      }
+      if (msg.type === "auto_picked") {
+        toast.info(`Auto-picked: ${(msg as any).agent_name || "agent"}`);
         return;
       }
 

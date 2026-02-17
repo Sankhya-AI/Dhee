@@ -277,6 +277,54 @@ class DistillationConfig(BaseModel):
         return max(1, int(v))
 
 
+class MetamemoryInlineConfig(BaseModel):
+    """Inline config for metamemory features in core (no engram-metamemory dependency)."""
+    enable_confidence: bool = True
+    confidence_in_search_results: bool = True
+    auto_log_gaps: bool = True
+
+
+class ProspectiveInlineConfig(BaseModel):
+    """Inline config for prospective memory features in core."""
+    enable_prospective: bool = True
+
+
+class ProceduralInlineConfig(BaseModel):
+    """Inline config for procedural memory features in core."""
+    enable_procedural: bool = True
+    automaticity_boost_in_search: bool = True
+    automaticity_boost_in_search_weight: float = 0.20
+
+
+class ReconsolidationInlineConfig(BaseModel):
+    """Inline config for reconsolidation features in core."""
+    enable_auto_reconsolidation: bool = True
+
+
+class FailureInlineConfig(BaseModel):
+    """Inline config for failure learning features in core."""
+    enable_failure_warnings: bool = True
+
+
+class WorkingMemoryInlineConfig(BaseModel):
+    """Inline config for working memory features in core."""
+    enable_working_memory: bool = True
+
+
+class SalienceInlineConfig(BaseModel):
+    """Inline config for salience tagging in core."""
+    enable_salience: bool = True
+    use_llm_salience: bool = False
+    salience_boost_weight: float = 0.15
+    salience_decay_modifier: bool = True
+
+
+class CausalInlineConfig(BaseModel):
+    """Inline config for causal reasoning in core."""
+    enable_causal: bool = True
+    auto_detect_causal_language: bool = True
+
+
 class TaskConfig(BaseModel):
     """Configuration for tasks as first-class Engram memories."""
     enable_tasks: bool = True
@@ -385,6 +433,14 @@ class MemoryConfig(BaseModel):
     parallel: ParallelConfig = Field(default_factory=ParallelConfig)
     batch: BatchConfig = Field(default_factory=BatchConfig)
     task: TaskConfig = Field(default_factory=TaskConfig)
+    metamemory: MetamemoryInlineConfig = Field(default_factory=MetamemoryInlineConfig)
+    prospective: ProspectiveInlineConfig = Field(default_factory=ProspectiveInlineConfig)
+    procedural: ProceduralInlineConfig = Field(default_factory=ProceduralInlineConfig)
+    reconsolidation: ReconsolidationInlineConfig = Field(default_factory=ReconsolidationInlineConfig)
+    failure: FailureInlineConfig = Field(default_factory=FailureInlineConfig)
+    working_memory: WorkingMemoryInlineConfig = Field(default_factory=WorkingMemoryInlineConfig)
+    salience: SalienceInlineConfig = Field(default_factory=SalienceInlineConfig)
+    causal: CausalInlineConfig = Field(default_factory=CausalInlineConfig)
 
     @field_validator("embedding_model_dims")
     @classmethod

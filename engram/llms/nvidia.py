@@ -42,7 +42,7 @@ class NvidiaLLM(BaseLLM):
             extra_kwargs = {}
             if self.enable_thinking:
                 extra_kwargs["extra_body"] = {
-                    "chat_template_kwargs": {"enable_thinking": True}
+                    "chat_template_kwargs": {"thinking": True}
                 }
 
             response = self.client.chat.completions.create(

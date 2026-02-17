@@ -105,11 +105,14 @@ _HEALTH_HINT_RE = re.compile(
     re.IGNORECASE,
 )
 _FINANCE_HINT_RE = re.compile(
-    r"\b(bank|account number|routing|iban|swift|credit card|debit card|cvv|salary|income|mortgage|loan|tax|tax id|payment|billing|invoice)\b",
+    r"\b(bank account|account number|routing number|iban|swift code|credit card|debit card|cvv|salary|income|mortgage|loan amount|tax id|tax return)\b",
     re.IGNORECASE,
 )
 _EPHEMERAL_HINT_RE = re.compile(
-    r"\b(today|tomorrow|tonight|this morning|this afternoon|this evening|this week|next week|later|in \d+\s*(?:minutes|hours|days)|remind me|schedule|book|call|email|send|buy|pick up|meeting|appointment|todo|to-do|task|for now|currently|at the moment)\b",
+    r"\b(remind me|pick up|todo|to-do)\b"
+    r"|\b(today|tomorrow|tonight)\s+(?:i\s|we\s|I\s)"
+    r"|(?:this|next)\s+(?:morning|afternoon|evening|week)\b"
+    r"|\bin\s+\d+\s*(?:minutes|hours|days)\b",
     re.IGNORECASE,
 )
 _PREFERENCE_HINT_RE = re.compile(
@@ -156,6 +159,9 @@ def is_ephemeral(text: str) -> bool:
 
 def looks_high_confidence(content: str, metadata: Optional[Dict[str, object]] = None) -> bool:
     metadata = metadata or {}
+    # Content explicitly provided by user (infer=False) is always high confidence.
+    if metadata.get("user_provided"):
+        return True
     confidence = _coerce_float(metadata.get("confidence"))
     importance = _coerce_float(metadata.get("importance"))
     if confidence is not None and confidence >= 0.7:
@@ -368,6 +374,7 @@ class Memory(MemoryBase):
         connector_id: Optional[str] = None,
         scope: Optional[str] = None,
         source_app: Optional[str] = None,
+        memory_id: Optional[str] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         processed_metadata, effective_filters = build_filters_and_metadata(
@@ -399,6 +406,9 @@ class Memory(MemoryBase):
                     continue
                 mem_meta = dict(processed_metadata)
                 mem_meta["role"] = role
+                # When infer=False, the caller explicitly provides content to store.
+                # Treat as high confidence to avoid the low_confidence strength cap.
+                mem_meta["user_provided"] = True
                 if msg.get("name"):
                     mem_meta["actor_id"] = msg.get("name")
                 memories_to_add.append({"content": content, "metadata": mem_meta})
@@ -423,6 +433,7 @@ class Memory(MemoryBase):
                 initial_layer=initial_layer,
                 initial_strength=initial_strength,
                 echo_depth=echo_depth,
+                memory_id=memory_id,
             )
             if result is not None:
                 results.append(result)
@@ -837,6 +848,7 @@ class Memory(MemoryBase):
         initial_layer: str,
         initial_strength: float,
         echo_depth: Optional[str],
+        memory_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Process and store a single memory item. Returns result dict or None if skipped."""
         content = mem.get("content", "").strip()
@@ -1050,10 +1062,23 @@ class Memory(MemoryBase):
         if self.distillation_config and self.distillation_config.enable_multi_trace:
             s_fast_val, s_mid_val, s_slow_val = initialize_traces(effective_strength, is_new=True)
 
-        memory_id = str(uuid.uuid4())
+        # Metamemory: compute confidence score if enabled
+        if self.config.metamemory.enable_confidence:
+            try:
+                from engram_metamemory.confidence import compute_confidence as _mm_confidence
+                mem_metadata["mm_confidence"] = _mm_confidence(
+                    metadata=mem_metadata,
+                    strength=effective_strength,
+                    access_count=0,
+                    created_at=None,
+                )
+            except ImportError:
+                pass
+
+        effective_memory_id = memory_id or str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
         memory_data = {
-            "id": memory_id,
+            "id": effective_memory_id,
             "memory": content,
             "user_id": user_id,
             "agent_id": store_agent_id,
@@ -1086,7 +1111,7 @@ class Memory(MemoryBase):
         }
 
         vectors, payloads, vector_ids = self._build_index_vectors(
-            memory_id=memory_id,
+            memory_id=effective_memory_id,
             content=content,
             primary_text=self._select_primary_text(content, echo_result),
             embedding=embedding,
@@ -1107,14 +1132,14 @@ class Memory(MemoryBase):
                 # Vector insert failed — roll back the DB record to prevent desync.
                 logger.error(
                     "Vector insert failed for memory %s, rolling back DB record: %s",
-                    memory_id, e,
+                    effective_memory_id, e,
                 )
                 try:
-                    self.db.delete_memory(memory_id, use_tombstone=False)
+                    self.db.delete_memory(effective_memory_id, use_tombstone=False)
                 except Exception as rollback_err:
                     logger.critical(
                         "CRITICAL: DB rollback also failed for memory %s — manual cleanup required: %s",
-                        memory_id, rollback_err,
+                        effective_memory_id, rollback_err,
                     )
                 raise
 
@@ -1128,26 +1153,26 @@ class Memory(MemoryBase):
         if self.knowledge_graph:
             self.knowledge_graph.extract_entities(
                 content=content,
-                memory_id=memory_id,
+                memory_id=effective_memory_id,
                 use_llm=self.graph_config.use_llm_extraction,
             )
             if self.graph_config.auto_link_entities:
-                self.knowledge_graph.link_by_shared_entities(memory_id)
+                self.knowledge_graph.link_by_shared_entities(effective_memory_id)
 
         if self.scene_processor:
             try:
-                self._assign_to_scene(memory_id, content, embedding, user_id, now)
+                self._assign_to_scene(effective_memory_id, content, embedding, user_id, now)
             except Exception as e:
-                logger.warning("Scene assignment failed for %s: %s", memory_id, e)
+                logger.warning("Scene assignment failed for %s: %s", effective_memory_id, e)
 
         if self.profile_processor:
             try:
-                self._update_profiles(memory_id, content, mem_metadata, user_id)
+                self._update_profiles(effective_memory_id, content, mem_metadata, user_id)
             except Exception as e:
-                logger.warning("Profile update failed for %s: %s", memory_id, e)
+                logger.warning("Profile update failed for %s: %s", effective_memory_id, e)
 
         return {
-            "id": memory_id,
+            "id": effective_memory_id,
             "memory": content,
             "event": event,
             "layer": layer,
@@ -1249,9 +1274,11 @@ class Memory(MemoryBase):
 
         vector_results = self._collapse_vector_results(vector_results)
 
-        # Prepare query terms for echo-based re-ranking
+        # Prepare query terms for echo-based re-ranking (strip punctuation)
         query_lower = query.lower()
-        query_terms = set(query_lower.split())
+        query_terms = set(
+            re.sub(r"[^\w\s]", "", query_lower).split()
+        )
 
         # CategoryMem: Detect relevant categories for the query
         query_category_id = None
@@ -1375,6 +1402,22 @@ class Memory(MemoryBase):
                         break
                 combined = combined * (1 + graph_boost)
 
+            # Procedural: boost automatic procedures in search results
+            proc_boost = 0.0
+            if self.config.procedural.automaticity_boost_in_search:
+                automaticity = metadata.get("proc_automaticity", 0)
+                if isinstance(automaticity, (int, float)) and automaticity >= 0.5:
+                    proc_boost = float(automaticity) * self.config.procedural.automaticity_boost_in_search_weight
+                    combined = combined * (1 + proc_boost)
+
+            # Salience: boost high-salience memories
+            salience_boost = 0.0
+            if self.config.salience.enable_salience:
+                sal_score = metadata.get("sal_salience_score", 0)
+                if isinstance(sal_score, (int, float)) and sal_score > 0:
+                    salience_boost = float(sal_score) * self.config.salience.salience_boost_weight
+                    combined = combined * (1 + salience_boost)
+
             if boost_on_access:
                 access_ids.append(memory["id"])
                 if self.fadem_config.access_strength_boost > 0:
@@ -1429,8 +1472,11 @@ class Memory(MemoryBase):
                     "category_boost": category_boost,
                     "graph_boost": graph_boost,
                     "intent_boost": intent_boost,
+                    "proc_boost": proc_boost,
+                    "salience_boost": salience_boost,
                     "memory_type": mem_type,
                     "query_intent": query_intent.value if query_intent else None,
+                    "confidence": metadata.get("mm_confidence"),
                 }
             )
 
@@ -1464,34 +1510,75 @@ class Memory(MemoryBase):
             self._persist_categories()
 
         results.sort(key=lambda x: x["composite_score"], reverse=True)
+
+        # Metamemory: auto-log knowledge gap when search returns no results
+        if not results and self.config.metamemory.auto_log_gaps:
+            try:
+                from engram_metamemory.metamemory import Metamemory as _Metamemory
+                _mm = _Metamemory(self, user_id=user_id or "default")
+                _mm.log_knowledge_gap(query=query, reason="empty_search")
+            except ImportError:
+                pass
+            except Exception as e:
+                logger.debug("Auto-gap logging failed: %s", e)
+
         return {"results": results[:limit]}
+
+    # Stop words to exclude from echo boost term matching
+    _ECHO_STOP_WORDS = frozenset({
+        "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+        "do", "does", "did", "has", "have", "had", "i", "me", "my", "we",
+        "our", "you", "your", "he", "she", "it", "they", "them", "their",
+        "what", "which", "who", "whom", "this", "that", "these", "those",
+        "am", "will", "would", "shall", "should", "can", "could", "may",
+        "might", "must", "to", "of", "in", "for", "on", "with", "at", "by",
+        "from", "about", "as", "into", "through", "during", "before", "after",
+        "and", "but", "or", "nor", "not", "so", "if", "then", "than", "too",
+        "very", "just", "how", "when", "where", "why", "all", "each", "some",
+        "any", "no", "yes",
+    })
 
     def _calculate_echo_boost(
         self, query_lower: str, query_terms: set, metadata: Dict[str, Any]
     ) -> float:
         """Calculate re-ranking boost based on echo metadata matches."""
         boost = 0.0
+        content_query_terms = query_terms - self._ECHO_STOP_WORDS
 
-        # Keyword match boost (each matching keyword adds 0.05)
+        # Keyword match boost
         keywords = metadata.get("echo_keywords", [])
         if keywords:
-            keyword_matches = sum(1 for kw in keywords if kw.lower() in query_lower)
-            boost += keyword_matches * 0.05
+            keyword_matches = 0
+            for kw in keywords:
+                kw_lower = kw.lower()
+                if kw_lower in query_lower:
+                    keyword_matches += 1
+                elif content_query_terms and any(
+                    term in kw_lower or kw_lower in term
+                    for term in content_query_terms
+                    if len(term) > 3
+                ):
+                    keyword_matches += 1
+            boost += keyword_matches * 0.06
+            # Coverage bonus: high fraction of query content matched = strong signal
+            if content_query_terms and keyword_matches > 0:
+                coverage = keyword_matches / len(content_query_terms)
+                boost += coverage * 0.15
 
         # Question form similarity boost (if query is similar to question_form)
         question_form = metadata.get("echo_question_form", "")
-        if question_form:
-            q_terms = set(question_form.lower().split())
-            overlap = len(query_terms & q_terms)
+        if question_form and content_query_terms:
+            q_terms = set(question_form.lower().split()) - self._ECHO_STOP_WORDS
+            overlap = len(content_query_terms & q_terms)
             if overlap > 0:
                 boost += min(0.15, overlap * 0.05)
 
         # Implication match boost
         implications = metadata.get("echo_implications", [])
-        if implications:
+        if implications and content_query_terms:
             for impl in implications:
-                impl_terms = set(impl.lower().split())
-                if query_terms & impl_terms:
+                impl_terms = set(impl.lower().split()) - self._ECHO_STOP_WORDS
+                if content_query_terms & impl_terms:
                     boost += 0.03
 
         # Cap boost at 0.3 (30% max increase)
@@ -1553,6 +1640,12 @@ class Memory(MemoryBase):
         if app_id:
             effective_filters["app_id"] = app_id
 
+        # When metadata filters are present, fetch extra rows to account
+        # for post-hoc filtering (same pattern as TaskManager uses limit*3).
+        fetch_limit = limit
+        if filters:
+            fetch_limit = max(limit * 5, 200)
+
         memories = self.db.get_all_memories(
             user_id=user_id,
             agent_id=agent_id,
@@ -1560,7 +1653,7 @@ class Memory(MemoryBase):
             app_id=app_id,
             layer=layer,
             min_strength=min_strength,
-            limit=limit,
+            limit=fetch_limit,
         )
 
         if categories:
@@ -2036,7 +2129,8 @@ class Memory(MemoryBase):
         # Explicit override from metadata
         explicit = metadata.get("memory_type")
         if explicit in ("episodic", "semantic", "task", "note", "procedural",
-                       "project", "project_status", "project_tag"):
+                       "project", "project_status", "project_tag",
+                       "warroom", "warroom_message"):
             return explicit
 
         # Distilled content is always semantic
