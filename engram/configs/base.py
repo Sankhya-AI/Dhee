@@ -449,3 +449,23 @@ class MemoryConfig(BaseModel):
         if v < 1 or v > 65536:
             raise ValueError(f"embedding_model_dims must be 1-65536, got {v}")
         return v
+
+    # ---- Preset factory methods ----
+
+    @classmethod
+    def minimal(cls) -> "MemoryConfig":
+        """Zero-config: hash embedder, in-memory vector store, basic decay. No API key."""
+        from engram.configs.presets import minimal_config
+        return minimal_config()
+
+    @classmethod
+    def smart(cls) -> "MemoryConfig":
+        """Auto-detect best available provider + echo + categories."""
+        from engram.configs.presets import smart_config
+        return smart_config()
+
+    @classmethod
+    def full(cls) -> "MemoryConfig":
+        """Everything: scenes, profiles, graph, tasks."""
+        from engram.configs.presets import full_config
+        return full_config()

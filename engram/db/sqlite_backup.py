@@ -18,7 +18,7 @@ VALID_MEMORY_COLUMNS = frozenset({
     "decay_lambda", "status", "importance", "sensitivity", "namespace",
     "access_count", "last_accessed", "immutable", "expiration_date",
     "scene_id", "user_id", "agent_id", "run_id", "app_id",
-    "memory_type", "s_fast", "s_mid", "s_slow", "content_hash",
+    "memory_type", "s_fast", "s_mid", "s_slow",
 })
 
 VALID_SCENE_COLUMNS = frozenset({
@@ -147,11 +147,6 @@ class CoreSQLiteManager(_SQLiteBase):
         with self._get_connection() as conn:
             conn.executescript(
                 """
-                CREATE TABLE IF NOT EXISTS schema_migrations (
-                    version TEXT PRIMARY KEY,
-                    applied_at TEXT DEFAULT CURRENT_TIMESTAMP
-                );
-
                 CREATE TABLE IF NOT EXISTS memories (
                     id TEXT PRIMARY KEY,
                     memory TEXT NOT NULL,
@@ -179,6 +174,7 @@ class CoreSQLiteManager(_SQLiteBase):
                 CREATE INDEX IF NOT EXISTS idx_user_layer ON memories(user_id, layer);
                 CREATE INDEX IF NOT EXISTS idx_strength ON memories(strength DESC);
                 CREATE INDEX IF NOT EXISTS idx_tombstone ON memories(tombstone);
+                CREATE INDEX IF NOT EXISTS idx_content_hash ON memories(content_hash, user_id);
 
                 CREATE TABLE IF NOT EXISTS memory_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -202,9 +198,14 @@ class CoreSQLiteManager(_SQLiteBase):
                     storage_before_mb REAL,
                     storage_after_mb REAL
                 );
+
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version TEXT PRIMARY KEY,
+                    applied_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
                 """
             )
-            # Migrate content_hash column + index for pre-existing DBs
+            # Apply content_hash column migration if needed
             self._ensure_content_hash_column(conn)
 
     def _ensure_content_hash_column(self, conn: sqlite3.Connection) -> None:
@@ -499,9 +500,6 @@ class CoreSQLiteManager(_SQLiteBase):
                 (memory_id,),
             ).fetchall()
             return [dict(row) for row in rows]
-
-    # Alias for CoreMemory compatibility
-    get_memory_history = get_history
 
     def log_decay(
         self,

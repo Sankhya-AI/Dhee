@@ -1,4 +1,40 @@
-from typing import Any, Dict
+"""Factories for creating embedder, LLM, and vector store instances."""
+
+import logging
+import os
+from typing import Any, Dict, Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+
+def _detect_provider() -> Tuple[str, str]:
+    """Auto-detect the best available LLM/embedder provider.
+
+    Returns (embedder_provider, llm_provider) tuple.
+
+    Detection order:
+    1. GEMINI_API_KEY / GOOGLE_API_KEY set → gemini
+    2. OPENAI_API_KEY set → openai
+    3. Ollama running on localhost:11434 → ollama
+    4. Fall back to simple embedder + mock LLM (zero-config, no API key)
+    """
+    if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
+        return ("gemini", "gemini")
+    if os.environ.get("OPENAI_API_KEY"):
+        return ("openai", "openai")
+
+    # Try Ollama
+    try:
+        import requests
+        resp = requests.get("http://localhost:11434/api/tags", timeout=1)
+        if resp.status_code == 200:
+            return ("ollama", "ollama")
+    except Exception:
+        pass
+
+    # Zero-config fallback: hash embedder + mock LLM
+    return ("simple", "mock")
+
 
 class EmbedderFactory:
     @classmethod
@@ -25,6 +61,15 @@ class EmbedderFactory:
             return NvidiaEmbedder(config)
         raise ValueError(f"Unsupported embedder provider: {provider}")
 
+    @classmethod
+    def create_auto(cls, config: Optional[Dict[str, Any]] = None):
+        """Auto-detect best available embedder. No API key required."""
+        embedder_provider, _ = _detect_provider()
+        cfg = dict(config or {})
+        if embedder_provider == "simple":
+            cfg.setdefault("embedding_dims", 384)
+        return cls.create(embedder_provider, cfg)
+
 
 class LLMFactory:
     @classmethod
@@ -50,6 +95,12 @@ class LLMFactory:
 
             return NvidiaLLM(config)
         raise ValueError(f"Unsupported LLM provider: {provider}")
+
+    @classmethod
+    def create_auto(cls, config: Optional[Dict[str, Any]] = None):
+        """Auto-detect best available LLM. Falls back to mock."""
+        _, llm_provider = _detect_provider()
+        return cls.create(llm_provider, dict(config or {}))
 
 
 class VectorStoreFactory:

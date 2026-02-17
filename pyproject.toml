@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "engram-memory"
-version = "0.5.0"
-description = "Biologically-inspired memory layer for AI agents — forgetting, echo encoding, and dynamic categories"
+version = "0.6.0"
+description = "The memory layer for AI agents. Bio-inspired decay, echo encoding, zero-config."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 license = {text = "MIT"}
 authors = [
     {name = "Engram Team"}
@@ -18,82 +18,37 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
 ]
 
 dependencies = [
     "pydantic>=2.0",
     "requests>=2.28.0",
     "sqlite-vec>=0.1.1",
-    "engram-bus>=0.1.0",
+    "engram-accel>=0.1.0",
 ]
 
 [project.optional-dependencies]
 # LLM / embedding providers (install what you use)
-gemini = ["google-generativeai>=0.3.0"]
+gemini = ["google-genai>=1.0.0"]
 openai = ["openai>=1.0.0"]
 nvidia = ["openai>=1.0.0"]
 ollama = ["ollama>=0.4.0"]
 # Integrations
 mcp = ["mcp>=1.0.0"]
 api = ["fastapi>=0.100.0", "uvicorn>=0.20.0"]
-accel = ["engram-accel>=0.1.0"]
-# Power packages (install what you need)
-router = ["engram-router>=0.2.0"]
-identity = ["engram-identity>=0.1.0"]
-heartbeat = ["engram-heartbeat>=0.1.0"]
-policy = ["engram-policy>=0.1.0"]
-skills = ["engram-skills>=0.1.0"]
-spawn = ["engram-spawn>=0.1.0"]
-resilience = ["engram-resilience>=0.1.0"]
-metamemory = ["engram-metamemory>=0.1.0"]
-prospective = ["engram-prospective>=0.1.0"]
-procedural = ["engram-procedural>=0.1.0"]
-reconsolidation = ["engram-reconsolidation>=0.1.0"]
-failure = ["engram-failure>=0.1.0"]
-working = ["engram-working>=0.1.0"]
-warroom = ["engram-warroom>=0.1.0"]
-powers = [
-    "engram-router>=0.2.0",
-    "engram-identity>=0.1.0",
-    "engram-heartbeat>=0.1.0",
-    "engram-policy>=0.1.0",
-    "engram-skills>=0.1.0",
-    "engram-spawn>=0.1.0",
-    "engram-resilience>=0.1.0",
-    "engram-metamemory>=0.1.0",
-    "engram-prospective>=0.1.0",
-    "engram-procedural>=0.1.0",
-    "engram-reconsolidation>=0.1.0",
-    "engram-failure>=0.1.0",
-    "engram-working>=0.1.0",
-    "engram-warroom>=0.1.0",
-]
+bus = ["engram-bus>=0.1.0"]
 all = [
-    "google-generativeai>=0.3.0",
+    "google-genai>=1.0.0",
     "openai>=1.0.0",
     "ollama>=0.4.0",
     "mcp>=1.0.0",
     "fastapi>=0.100.0",
     "uvicorn>=0.20.0",
     "engram-accel>=0.1.0",
-    "engram-router>=0.2.0",
-    "engram-identity>=0.1.0",
-    "engram-heartbeat>=0.1.0",
-    "engram-policy>=0.1.0",
-    "engram-skills>=0.1.0",
-    "engram-spawn>=0.1.0",
-    "engram-resilience>=0.1.0",
-    "engram-metamemory>=0.1.0",
-    "engram-prospective>=0.1.0",
-    "engram-procedural>=0.1.0",
-    "engram-reconsolidation>=0.1.0",
-    "engram-failure>=0.1.0",
-    "engram-working>=0.1.0",
-    "engram-warroom>=0.1.0",
+    "engram-bus>=0.1.0",
 ]
 dev = [
     "pytest>=7.0.0",

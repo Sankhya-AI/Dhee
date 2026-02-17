@@ -10,12 +10,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from engram.configs.base import FadeMemConfig
 
-try:
-    from engram_accel import calculate_decayed_strength as _rs_decay
-except ImportError:
-    def _rs_decay(strength, elapsed_days, decay_rate, access_count, dampening_factor):
-        dampening = 1.0 + dampening_factor * math.log1p(access_count)
-        return strength * math.exp(-decay_rate * elapsed_days / dampening)
+from engram_accel import calculate_decayed_strength as _rs_decay
 
 
 def calculate_decayed_strength(

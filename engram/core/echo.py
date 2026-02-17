@@ -16,11 +16,7 @@ from enum import Enum
 from functools import wraps
 from typing import Any, Callable, Dict, List, Optional, TypeVar
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
-try:
-    from pydantic import ConfigDict
-except ImportError:  # pragma: no cover - fallback for older pydantic
-    ConfigDict = None
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from engram.utils.prompts import BATCH_ECHO_PROCESSING_PROMPT, ECHO_PROCESSING_PROMPT
 
@@ -60,8 +56,7 @@ class EchoDepth(str, Enum):
 
 class EchoOutput(BaseModel):
     """Structured output from LLM for echo processing."""
-    if ConfigDict:
-        model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="ignore")
 
     paraphrases: List[str] = Field(description="3-5 diverse rephrasings of the memory.")
     keywords: List[str] = Field(description="Core concepts and entities.")

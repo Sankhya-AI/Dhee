@@ -42,6 +42,7 @@ from engram.memory.utils import (
     strip_code_fences,
 )
 from engram.memory.parallel import ParallelExecutor
+from engram.memory.smart import SmartMemory
 from engram.observability import metrics
 from engram.utils.factory import EmbedderFactory, LLMFactory, VectorStoreFactory
 from engram.utils.prompts import AGENT_MEMORY_EXTRACTION_PROMPT, MEMORY_EXTRACTION_PROMPT
@@ -230,126 +231,90 @@ class MemoryScope(str, Enum):
     GLOBAL = "global"
 
 
-class Memory(MemoryBase):
-    """engram Memory class - biologically-inspired memory for AI agents."""
+class FullMemory(SmartMemory):
+    """Full-featured engram Memory class with scenes, profiles, tasks, projects.
 
-    def __init__(self, config: Optional[MemoryConfig] = None):
-        self.config = config or MemoryConfig()
+    Extends SmartMemory with additional FullMemory-specific features:
+    - SceneProcessor for episodic memory grouping
+    - ProfileProcessor for character/entity profiles
+    - Task and project management (future)
 
-        # Ensure vector store config has dims/collection if missing
-        self.config.vector_store.config.setdefault("collection_name", self.config.collection_name)
-        self.config.vector_store.config.setdefault("embedding_model_dims", self.config.embedding_model_dims)
+    All base features (echo encoding, categories, knowledge graph) are inherited
+    from SmartMemory with lazy initialization via @property.
+    """
 
-        self.db = SQLiteManager(self.config.history_db_path)
-        self.llm = LLMFactory.create(self.config.llm.provider, self.config.llm.config)
-        self.embedder = EmbedderFactory.create(self.config.embedder.provider, self.config.embedder.config)
-        self.vector_store = VectorStoreFactory.create(self.config.vector_store.provider, self.config.vector_store.config)
-        self.fadem_config = self.config.engram
-        self.echo_config = self.config.echo
-        self.scope_config = getattr(self.config, "scope", None)
-        self.distillation_config = getattr(self.config, "distillation", None)
-
-        # Initialize EchoMem processor
-        if self.echo_config.enable_echo:
-            self.echo_processor = EchoProcessor(
-                self.llm,
-                config={
-                    "auto_depth": self.echo_config.auto_depth,
-                    "default_depth": self.echo_config.default_depth,
-                }
-            )
-        else:
-            self.echo_processor = None
-
-        # Initialize CategoryMem processor
-        self.category_config = self.config.category
-        if self.category_config.enable_categories:
-            self.category_processor = CategoryProcessor(
-                llm=self.llm,
-                embedder=self.embedder,
-                config={
-                    "use_llm": self.category_config.use_llm_categorization,
-                    "auto_subcategories": self.category_config.auto_create_subcategories,
-                    "max_depth": self.category_config.max_category_depth,
-                },
-            )
-            # Load existing categories from DB
-            existing_categories = self.db.get_all_categories()
-            if existing_categories:
-                self.category_processor.load_categories(existing_categories)
-        else:
-            self.category_processor = None
-
-        # Initialize Knowledge Graph
-        self.graph_config = self.config.graph
-        if self.graph_config.enable_graph:
-            self.knowledge_graph = KnowledgeGraph(
-                llm=self.llm if self.graph_config.use_llm_extraction else None
-            )
-        else:
-            self.knowledge_graph = None
-
-        # Initialize SceneProcessor
-        self.scene_config = self.config.scene
-        if self.scene_config.enable_scenes:
-            self.scene_processor = SceneProcessor(
-                db=self.db,
-                embedder=self.embedder,
-                llm=self.llm,
-                config={
-                    "scene_time_gap_minutes": self.scene_config.scene_time_gap_minutes,
-                    "scene_topic_threshold": self.scene_config.scene_topic_threshold,
-                    "auto_close_inactive_minutes": self.scene_config.auto_close_inactive_minutes,
-                    "max_scene_memories": self.scene_config.max_scene_memories,
-                    "use_llm_summarization": self.scene_config.use_llm_summarization,
-                    "summary_regenerate_threshold": self.scene_config.summary_regenerate_threshold,
-                },
-            )
-        else:
-            self.scene_processor = None
-
-        # Initialize ProfileProcessor
-        self.profile_config = self.config.profile
-        if self.profile_config.enable_profiles:
-            self.profile_processor = ProfileProcessor(
-                db=self.db,
-                embedder=self.embedder,
-                llm=self.llm,
-                config={
-                    "auto_detect_profiles": self.profile_config.auto_detect_profiles,
-                    "use_llm_extraction": self.profile_config.use_llm_extraction,
-                    "narrative_regenerate_threshold": self.profile_config.narrative_regenerate_threshold,
-                    "self_profile_auto_create": self.profile_config.self_profile_auto_create,
-                    "max_facts_per_profile": self.profile_config.max_facts_per_profile,
-                },
-            )
-        else:
-            self.profile_processor = None
-
-        # Parallel executor for I/O-bound LLM/embedding calls
-        self.parallel_config = getattr(self.config, "parallel", None)
+    def __init__(self, config: Optional[MemoryConfig] = None, preset: Optional[str] = None):
+        # Use default full() config if neither config nor preset provided
+        if config is None and preset is None:
+            config = MemoryConfig.full()
+        # Initialize parent SmartMemory (handles db, llm, embedder, etc.)
+        super().__init__(config=config, preset=preset)
+        # Only FullMemory-specific lazy init
+        self._scene_processor: Optional[SceneProcessor] = None
+        self._profile_processor: Optional[ProfileProcessor] = None
+        self._task_manager: Optional[Any] = None
+        self._project_manager: Optional[Any] = None
+        # Parallel executor (lazy: created only when config enables it)
         self._executor: Optional[ParallelExecutor] = None
-        if self.parallel_config and self.parallel_config.enable_parallel:
-            self._executor = ParallelExecutor(
-                max_workers=self.parallel_config.max_workers
+        if self.config.parallel.enable_parallel:
+            self._executor = ParallelExecutor(max_workers=self.config.parallel.max_workers)
+
+    @property
+    def scene_processor(self) -> Optional[SceneProcessor]:
+        """Lazy-initialized SceneProcessor (only if scenes enabled in config)."""
+        if self._scene_processor is None and self.config.scene.enable_scenes:
+            self._scene_processor = SceneProcessor(
+                db=self.db,
+                embedder=self.embedder,
+                llm=self.llm,
+                config={
+                    "scene_time_gap_minutes": self.config.scene.scene_time_gap_minutes,
+                    "scene_topic_threshold": self.config.scene.scene_topic_threshold,
+                    "auto_close_inactive_minutes": self.config.scene.auto_close_inactive_minutes,
+                    "max_scene_memories": self.config.scene.max_scene_memories,
+                    "use_llm_summarization": self.config.scene.use_llm_summarization,
+                    "summary_regenerate_threshold": self.config.scene.summary_regenerate_threshold,
+                },
             )
+        return self._scene_processor
+
+    @property
+    def profile_processor(self) -> Optional[ProfileProcessor]:
+        """Lazy-initialized ProfileProcessor (only if profiles enabled in config)."""
+        if self._profile_processor is None and self.config.profile.enable_profiles:
+            self._profile_processor = ProfileProcessor(
+                db=self.db,
+                embedder=self.embedder,
+                llm=self.llm,
+                config={
+                    "auto_detect_profiles": self.config.profile.auto_detect_profiles,
+                    "use_llm_extraction": self.config.profile.use_llm_extraction,
+                    "narrative_regenerate_threshold": self.config.profile.narrative_regenerate_threshold,
+                    "self_profile_auto_create": self.config.profile.self_profile_auto_create,
+                    "max_facts_per_profile": self.config.profile.max_facts_per_profile,
+                },
+            )
+        return self._profile_processor
 
     def close(self) -> None:
         """Release all resources held by the Memory instance."""
-        if hasattr(self, '_executor') and self._executor is not None:
+        # Shutdown parallel executor if it was created
+        if self._executor is not None:
             self._executor.shutdown()
             self._executor = None
-        if hasattr(self, 'vector_store') and self.vector_store is not None:
+        # Release vector store
+        if self.vector_store is not None:
             self.vector_store.close()
-        if hasattr(self, 'db') and self.db is not None:
+        # Release database
+        if self.db is not None:
             self.db.close()
 
     def __repr__(self) -> str:
-        return f"Memory(db={self.db!r}, echo={self.echo_config.enable_echo}, scenes={self.scene_config.enable_scenes})"
+        return f"FullMemory(db={self.db!r}, echo={self.config.echo.enable_echo}, scenes={self.config.scene.enable_scenes})"
 
-    @classmethod
-    def from_config(cls, config_dict: Dict[str, Any]):
-        return cls(MemoryConfig(**config_dict))
+    # _cached_embed inherited from SmartMemory
+
+    # from_config inherited from SmartMemory
 
     def add(
         self,
@@ -3001,3 +2966,7 @@ class Memory(MemoryBase):
     def get_decay_log(self, limit: int = 20) -> List[Dict[str, Any]]:
         """Get recent decay history for dashboard sparkline."""
         return self.db.get_decay_log_entries(limit=limit)
+
+
+# Backward-compatible alias — existing code that imports Memory still works.
+Memory = FullMemory

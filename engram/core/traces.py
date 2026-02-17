@@ -15,10 +15,7 @@ from typing import TYPE_CHECKING, List, Tuple
 if TYPE_CHECKING:
     from engram.configs.base import DistillationConfig
 
-try:
-    from engram_accel import decay_traces_batch as _rs_decay_traces_batch
-except ImportError:
-    _rs_decay_traces_batch = None
+from engram_accel import decay_traces_batch as _rs_decay_traces_batch
 
 
 def initialize_traces(
@@ -81,26 +78,15 @@ def decay_traces_batch(
     access_counts: List[int],
     config: "DistillationConfig",
 ) -> List[Tuple[float, float, float]]:
-    """Batch version of decay_traces (Rust-accelerated with Python fallback)."""
-    if _rs_decay_traces_batch is not None:
-        return _rs_decay_traces_batch(
-            traces,
-            elapsed_days,
-            [int(a) for a in access_counts],
-            config.s_fast_decay_rate,
-            config.s_mid_decay_rate,
-            config.s_slow_decay_rate,
-        )
-    # Python fallback
-    results = []
-    for (sf, sm, ss), ed, ac in zip(traces, elapsed_days, access_counts):
-        dampening = 1.0 + 0.5 * math.log1p(ac)
-        results.append((
-            max(0.0, min(1.0, sf * math.exp(-config.s_fast_decay_rate * ed / dampening))),
-            max(0.0, min(1.0, sm * math.exp(-config.s_mid_decay_rate * ed / dampening))),
-            max(0.0, min(1.0, ss * math.exp(-config.s_slow_decay_rate * ed / dampening))),
-        ))
-    return results
+    """Batch version of decay_traces (Rust-accelerated)."""
+    return _rs_decay_traces_batch(
+        traces,
+        elapsed_days,
+        [int(a) for a in access_counts],
+        config.s_fast_decay_rate,
+        config.s_mid_decay_rate,
+        config.s_slow_decay_rate,
+    )
 
 
 def cascade_traces(

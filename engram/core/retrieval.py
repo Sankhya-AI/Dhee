@@ -6,15 +6,7 @@ Requires engram-accel (Rust) for tokenize and BM25 operations.
 import math
 from typing import Dict, List, Any, Optional, Set
 
-try:
-    from engram_accel import tokenize as _rs_tokenize, bm25_score_batch as _rs_bm25_batch
-except ImportError:
-    import re as _re
-
-    def _rs_tokenize(text):
-        return _re.findall(r'\w+', text.lower())
-
-    _rs_bm25_batch = None
+from engram_accel import tokenize as _rs_tokenize, bm25_score_batch as _rs_bm25_batch
 
 
 def composite_score(similarity: float, strength: float) -> float:
@@ -72,18 +64,8 @@ def bm25_score_batch(
     k1: float = 1.5,
     b: float = 0.75,
 ) -> List[float]:
-    """Batch BM25 scoring for N documents (Rust-accelerated with Python fallback)."""
-    if _rs_bm25_batch is not None:
-        return _rs_bm25_batch(query_terms, documents, total_docs, avg_doc_len, k1, b)
-    query_set = set(query_terms)
-    return [
-        calculate_bm25_score(
-            query_set, doc,
-            {t: sum(1 for d in documents if t in d) for t in query_set},
-            total_docs, avg_doc_len, k1, b,
-        )
-        for doc in documents
-    ]
+    """Batch BM25 scoring for N documents (Rust-accelerated)."""
+    return _rs_bm25_batch(query_terms, documents, total_docs, avg_doc_len, k1, b)
 
 
 def calculate_keyword_score(
