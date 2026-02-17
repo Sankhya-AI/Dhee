@@ -29,8 +29,19 @@ class WebConfig:
 class CoordinationConfig:
     enabled: bool = False
     auto_route: bool = True
+    auto_execute: bool = False
     log_events: bool = True
     default_capabilities: dict[str, dict] = field(default_factory=dict)
+
+
+@dataclass
+class WarRoomBridgeConfig:
+    enabled: bool = False
+    auto_pick: bool = True              # Auto-pick top task on /start
+    auto_failover: bool = True          # Auto-switch agent on rate limit
+    monitor_agent: str = ""             # Default monitor agent name
+    decision_timeout_minutes: int = 30
+    max_participants: int = 10
 
 
 @dataclass
@@ -44,6 +55,7 @@ class BridgeConfig:
     channel: str = "telegram"
     web: WebConfig = field(default_factory=WebConfig)
     coordination: CoordinationConfig = field(default_factory=CoordinationConfig)
+    warroom: WarRoomBridgeConfig = field(default_factory=WarRoomBridgeConfig)
 
     @staticmethod
     def _resolve_env(value: str) -> str:
@@ -101,8 +113,20 @@ def load_config(path: str = "~/.engram/bridge.json") -> BridgeConfig:
     coordination = CoordinationConfig(
         enabled=coord_raw.get("enabled", False),
         auto_route=coord_raw.get("auto_route", True),
+        auto_execute=coord_raw.get("auto_execute", False),
         log_events=coord_raw.get("log_events", True),
         default_capabilities=coord_raw.get("default_capabilities", {}),
+    )
+
+    # War room config
+    wr_raw = raw.get("warroom", {})
+    warroom = WarRoomBridgeConfig(
+        enabled=wr_raw.get("enabled", False),
+        auto_pick=wr_raw.get("auto_pick", True),
+        auto_failover=wr_raw.get("auto_failover", True),
+        monitor_agent=wr_raw.get("monitor_agent", ""),
+        decision_timeout_minutes=wr_raw.get("decision_timeout_minutes", 30),
+        max_participants=wr_raw.get("max_participants", 10),
     )
 
     return BridgeConfig(
@@ -115,4 +139,5 @@ def load_config(path: str = "~/.engram/bridge.json") -> BridgeConfig:
         channel=raw.get("channel", "telegram"),
         web=web,
         coordination=coordination,
+        warroom=warroom,
     )

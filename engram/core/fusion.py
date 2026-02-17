@@ -32,7 +32,10 @@ def fuse_memories(memories: List[Dict[str, Any]], llm, custom_prompt: Optional[s
 
     try:
         response = llm.generate(prompt)
-        data = json.loads(response.strip())
+        json_start = response.find("{")
+        if json_start < 0:
+            raise json.JSONDecodeError("No JSON object found", response, 0)
+        data, _ = json.JSONDecoder().raw_decode(response, json_start)
         fused_content = data.get("consolidated_memory", "")
     except (json.JSONDecodeError, ValueError, TypeError) as e:
         logger.warning("Fusion LLM parsing failed: %s", e)

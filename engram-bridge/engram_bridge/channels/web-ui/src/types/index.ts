@@ -222,3 +222,32 @@ export interface KanbanSort {
   field: SortField;
   direction: SortDirection;
 }
+
+// ── War Room types ──
+
+export type WarRoomState = "open" | "discussing" | "deciding" | "decided" | "delivering" | "closed";
+
+export interface WarRoom {
+  id: string;
+  wr_topic: string;
+  wr_agenda: string;
+  wr_state: WarRoomState;
+  wr_task_id: string;
+  wr_monitor_agent: string;
+  wr_participants: string[];
+  wr_decision_text: string;
+  wr_action_items: string[];
+  wr_created_by: string;
+  wr_created_at: string;
+  wr_message_count: number;
+}
+
+export interface WarRoomMessage {
+  id: string;
+  content: string;
+  wrmsg_room_id: string;
+  wrmsg_sender: string;
+  wrmsg_message_type: "message" | "proposal" | "vote" | "decision" | "action_item" | "system";
+  wrmsg_sequence: number;
+  wrmsg_timestamp: string;
+}

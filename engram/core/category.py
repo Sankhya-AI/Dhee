@@ -442,11 +442,10 @@ class CategoryProcessor:
         try:
             response = self.llm.generate(prompt)
 
-            # Parse JSON response
+            # Parse JSON response — use raw_decode to ignore trailing LLM text
             json_start = response.find("{")
-            json_end = response.rfind("}") + 1
-            if json_start >= 0 and json_end > json_start:
-                data = json.loads(response[json_start:json_end])
+            if json_start >= 0:
+                data, _ = json.JSONDecoder().raw_decode(response, json_start)
 
                 action = data.get("action", "use_existing")
                 confidence = float(data.get("confidence", 0.5))

@@ -5,6 +5,7 @@ This server exposes engram's core memory capabilities as MCP tools.
 Governance, handoff, and active memory tools live in engram-enterprise.
 """
 
+import importlib
 import json
 import logging
 import os
@@ -158,12 +159,102 @@ server = Server("engram-memory")
 _tools_cache: Optional[List[Tool]] = None
 
 
+# ── Power Package Auto-Discovery ──
+
+_POWER_PACKAGES = [
+    ("engram_router", "engram_router.mcp_tools"),
+    ("engram_identity", "engram_identity.mcp_tools"),
+    ("engram_heartbeat", "engram_heartbeat.mcp_tools"),
+    ("engram_policy", "engram_policy.mcp_tools"),
+    ("engram_skills", "engram_skills.mcp_tools"),
+    ("engram_spawn", "engram_spawn.mcp_tools"),
+    ("engram_resilience", "engram_resilience.mcp_tools"),
+    ("engram_metamemory", "engram_metamemory.mcp_tools"),
+    ("engram_prospective", "engram_prospective.mcp_tools"),
+    ("engram_procedural", "engram_procedural.mcp_tools"),
+    ("engram_reconsolidation", "engram_reconsolidation.mcp_tools"),
+    ("engram_failure", "engram_failure.mcp_tools"),
+    ("engram_working", "engram_working.mcp_tools"),
+    ("engram_warroom", "engram_warroom.mcp_tools"),
+]
+
+_POWER_HANDLER_MAP = [
+    ("_router_tools", "_router_handlers", "dict"),
+    ("_identity_tools", "_identity_handlers", "fn"),
+    ("_heartbeat_tools", "_heartbeat_handler", "fn"),
+    ("_policy_tools", "_policy_handler", "fn"),
+    ("_skills_tools", "_skills_handler", "fn"),
+    ("_spawn_tools", "_spawn_handler", "fn"),
+    ("_resilience_tools", "_resilience_handler", "fn"),
+    ("_metamemory_tools", "_metamemory_handler", "fn"),
+    ("_prospective_tools", "_prospective_handler", "fn"),
+    ("_procedural_tools", "_procedural_handler", "fn"),
+    ("_reconsolidation_tools", "_reconsolidation_handler", "fn"),
+    ("_failure_tools", "_failure_handler", "fn"),
+    ("_working_tools", "_working_handler", "fn"),
+    ("_warroom_tools", "_warroom_handler", "fn"),
+]
+
+_power_tool_handlers: Dict[str, Callable] = {}
+_power_discovered = False
+
+
+def _discover_power_tools(srv: Server, memory: "Memory") -> None:
+    """Auto-discover and register MCP tools from installed power packages."""
+    global _power_discovered
+    if _power_discovered:
+        return
+    _power_discovered = True
+
+    for pkg_name, module_path in _POWER_PACKAGES:
+        try:
+            mod = importlib.import_module(module_path)
+            mod.register_tools(srv, memory)
+            logger.info("Loaded MCP tools from %s", pkg_name)
+        except ImportError:
+            pass  # package not installed — skip
+        except Exception as e:
+            logger.warning("Failed to load MCP tools from %s: %s", pkg_name, e)
+
+    # Consolidate all handlers into a single dispatch dict
+    for tools_attr, handler_attr, handler_type in _POWER_HANDLER_MAP:
+        tool_defs = getattr(srv, tools_attr, None)
+        handler = getattr(srv, handler_attr, None)
+        if not tool_defs or not handler:
+            continue
+        if handler_type == "dict":
+            for name in tool_defs:
+                if name in handler:
+                    _power_tool_handlers[name] = handler[name]
+        else:
+            for name in tool_defs:
+                _power_tool_handlers[name] = (lambda h, n: lambda args: h(n, args))(handler, name)
+
+
+def _get_power_tool_defs() -> Dict[str, dict]:
+    """Collect all power tool definitions from server attributes."""
+    defs = {}
+    for tools_attr, _, _ in _POWER_HANDLER_MAP:
+        tool_dict = getattr(server, tools_attr, None)
+        if tool_dict:
+            defs.update(tool_dict)
+    return defs
+
+
 @server.list_tools()
 async def list_tools() -> List[Tool]:
     """List available engram tools."""
     global _tools_cache
     if _tools_cache is not None:
         return list(_tools_cache)
+
+    # Auto-discover power packages
+    try:
+        memory = get_memory()
+        _discover_power_tools(server, memory)
+    except Exception as e:
+        logger.warning("Power tool discovery failed: %s", e)
+
     tools = [
         Tool(
             name="add_memory",
@@ -576,7 +667,124 @@ async def list_tools() -> List[Tool]:
                 },
             }
         ),
+        # ---- Salience tools ----
+        Tool(
+            name="tag_salience",
+            description="Compute and tag a memory's emotional salience (valence + arousal).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "memory_id": {"type": "string", "description": "Memory ID to tag"},
+                    "use_llm": {"type": "boolean", "description": "Use LLM for more accurate scoring", "default": False},
+                },
+                "required": ["memory_id"],
+            }
+        ),
+        Tool(
+            name="search_by_salience",
+            description="Find high-salience (emotionally significant) memories.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "min_salience": {"type": "number", "description": "Minimum salience score (0-1)", "default": 0.3},
+                    "limit": {"type": "integer", "default": 20},
+                },
+            }
+        ),
+        Tool(
+            name="get_salience_stats",
+            description="Get statistics on salience tagging across memories.",
+            inputSchema={
+                "type": "object",
+                "properties": {"user_id": {"type": "string"}},
+            }
+        ),
+        # ---- Causal tools ----
+        Tool(
+            name="add_causal_link",
+            description="Add a causal relationship between two memories (caused_by, led_to, prevents, enables, requires).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "source_id": {"type": "string", "description": "Source memory ID"},
+                    "target_id": {"type": "string", "description": "Target memory ID"},
+                    "relation_type": {
+                        "type": "string",
+                        "enum": ["caused_by", "led_to", "prevents", "enables", "requires"],
+                        "description": "Type of causal relationship",
+                    },
+                },
+                "required": ["source_id", "target_id", "relation_type"],
+            }
+        ),
+        Tool(
+            name="get_causal_chain",
+            description="Traverse causal links from a memory (what caused it, or what it caused).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "memory_id": {"type": "string", "description": "Starting memory ID"},
+                    "direction": {
+                        "type": "string",
+                        "enum": ["backward", "forward"],
+                        "description": "backward=what caused this, forward=what this caused",
+                        "default": "backward",
+                    },
+                    "depth": {"type": "integer", "description": "Max traversal depth", "default": 5},
+                },
+                "required": ["memory_id"],
+            }
+        ),
+        Tool(
+            name="query_causes",
+            description="Get both causes and effects for a memory.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "memory_id": {"type": "string", "description": "Memory ID to query"},
+                    "depth": {"type": "integer", "default": 3},
+                },
+                "required": ["memory_id"],
+            }
+        ),
+        # ---- AGI Loop tools ----
+        Tool(
+            name="get_agi_status",
+            description="Get the status of all AGI cognitive subsystems.",
+            inputSchema={
+                "type": "object",
+                "properties": {"user_id": {"type": "string"}},
+            }
+        ),
+        Tool(
+            name="run_agi_cycle",
+            description="Run one iteration of the full AGI cognitive cycle (consolidate, decay, reconsolidate, etc).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "context": {"type": "string", "description": "Current context for reconsolidation"},
+                },
+            }
+        ),
+        Tool(
+            name="get_system_health",
+            description="Report health status across all cognitive subsystems.",
+            inputSchema={
+                "type": "object",
+                "properties": {"user_id": {"type": "string"}},
+            }
+        ),
     ]
+    # Append tools from installed power packages
+    for name, defn in _get_power_tool_defs().items():
+        tools.append(Tool(
+            name=name,
+            description=defn["description"],
+            inputSchema=defn["inputSchema"],
+        ))
+
     _tools_cache = tools
     return list(tools)
 
@@ -1011,6 +1219,150 @@ def _handle_get_pending_tasks(memory: "Memory", arguments: Dict[str, Any]) -> An
     return {"tasks": tasks, "total": len(tasks)}
 
 
+# ---- Salience tools ----
+
+@_tool_handler("tag_salience")
+def _handle_tag_salience(memory: "Memory", arguments: Dict[str, Any]) -> Any:
+    from engram.core.salience import compute_salience
+    memory_id = arguments.get("memory_id", "")
+    mem = memory.get(memory_id)
+    if not mem:
+        return {"error": "Memory not found"}
+    content = mem.get("memory", "")
+    salience = compute_salience(content, llm=getattr(memory, "llm", None),
+                                use_llm=arguments.get("use_llm", False))
+    md = mem.get("metadata", {}) or {}
+    md.update(salience)
+    memory.update(memory_id, {"metadata": md})
+    return {"memory_id": memory_id, **salience}
+
+
+@_tool_handler("search_by_salience")
+def _handle_search_by_salience(memory: "Memory", arguments: Dict[str, Any]) -> Any:
+    user_id = arguments.get("user_id", "default")
+    min_salience = float(arguments.get("min_salience", 0.3))
+    try:
+        limit = max(1, min(100, int(arguments.get("limit", 20))))
+    except (ValueError, TypeError):
+        limit = 20
+    all_mem = memory.get_all(user_id=user_id, limit=limit * 3)
+    items = all_mem.get("results", [])
+    results = []
+    for m in items:
+        md = m.get("metadata", {}) or {}
+        score = md.get("sal_salience_score", 0.0)
+        if score >= min_salience:
+            results.append({
+                "id": m["id"],
+                "memory": m.get("memory", ""),
+                "salience_score": score,
+                "valence": md.get("sal_valence", 0.0),
+                "arousal": md.get("sal_arousal", 0.0),
+            })
+    results.sort(key=lambda x: x["salience_score"], reverse=True)
+    return {"results": results[:limit], "total": len(results)}
+
+
+@_tool_handler("get_salience_stats")
+def _handle_get_salience_stats(memory: "Memory", arguments: Dict[str, Any]) -> Any:
+    user_id = arguments.get("user_id", "default")
+    all_mem = memory.get_all(user_id=user_id, limit=500)
+    items = all_mem.get("results", [])
+    tagged = 0
+    total_salience = 0.0
+    high_salience = 0
+    for m in items:
+        md = m.get("metadata", {}) or {}
+        score = md.get("sal_salience_score")
+        if score is not None:
+            tagged += 1
+            total_salience += score
+            if score >= 0.5:
+                high_salience += 1
+    return {
+        "total_memories": len(items),
+        "salience_tagged": tagged,
+        "avg_salience": round(total_salience / tagged, 3) if tagged else 0.0,
+        "high_salience_count": high_salience,
+    }
+
+
+# ---- Causal tools ----
+
+@_tool_handler("add_causal_link")
+def _handle_add_causal_link(memory: "Memory", arguments: Dict[str, Any]) -> Any:
+    from engram.core.graph import RelationType
+    source_id = arguments.get("source_id", "")
+    target_id = arguments.get("target_id", "")
+    rel_type = arguments.get("relation_type", "caused_by")
+    if not hasattr(memory, "knowledge_graph") or not memory.knowledge_graph:
+        return {"error": "Knowledge graph not available"}
+    try:
+        rt = RelationType(rel_type)
+    except ValueError:
+        return {"error": f"Invalid relation type: {rel_type}"}
+    rel = memory.knowledge_graph.add_relationship(source_id, target_id, rt)
+    return rel.to_dict()
+
+
+@_tool_handler("get_causal_chain")
+def _handle_get_causal_chain(memory: "Memory", arguments: Dict[str, Any]) -> Any:
+    memory_id = arguments.get("memory_id", "")
+    direction = arguments.get("direction", "backward")
+    depth = min(10, max(1, int(arguments.get("depth", 5))))
+    if not hasattr(memory, "knowledge_graph") or not memory.knowledge_graph:
+        return {"error": "Knowledge graph not available"}
+    chain = memory.knowledge_graph.get_causal_chain(memory_id, direction, depth)
+    return {
+        "memory_id": memory_id,
+        "direction": direction,
+        "chain": [
+            {"memory_id": mid, "depth": d, "path": [r.to_dict() for r in path]}
+            for mid, d, path in chain
+        ],
+        "length": len(chain),
+    }
+
+
+@_tool_handler("query_causes")
+def _handle_query_causes(memory: "Memory", arguments: Dict[str, Any]) -> Any:
+    memory_id = arguments.get("memory_id", "")
+    depth = min(10, max(1, int(arguments.get("depth", 3))))
+    if not hasattr(memory, "knowledge_graph") or not memory.knowledge_graph:
+        return {"error": "Knowledge graph not available"}
+    backward = memory.knowledge_graph.get_causal_chain(memory_id, "backward", depth)
+    forward = memory.knowledge_graph.get_causal_chain(memory_id, "forward", depth)
+    return {
+        "memory_id": memory_id,
+        "causes": [{"memory_id": mid, "depth": d} for mid, d, _ in backward],
+        "effects": [{"memory_id": mid, "depth": d} for mid, d, _ in forward],
+    }
+
+
+# ---- AGI Loop tools ----
+
+@_tool_handler("get_agi_status")
+def _handle_get_agi_status(memory: "Memory", arguments: Dict[str, Any]) -> Any:
+    from engram.core.agi_loop import get_system_health
+    return get_system_health(memory, user_id=arguments.get("user_id", "default"))
+
+
+@_tool_handler("run_agi_cycle")
+def _handle_run_agi_cycle(memory: "Memory", arguments: Dict[str, Any]) -> Any:
+    from engram.core.agi_loop import run_agi_cycle
+    return run_agi_cycle(
+        memory,
+        user_id=arguments.get("user_id", "default"),
+        context=arguments.get("context"),
+    )
+
+
+@_tool_handler("get_system_health")
+def _handle_get_system_health(memory: "Memory", arguments: Dict[str, Any]) -> Any:
+    from engram.core.agi_loop import get_system_health
+    return get_system_health(memory, user_id=arguments.get("user_id", "default"))
+
+
 _MEMORY_FREE_TOOLS = {"get_last_session", "save_session_digest"}
 
 
@@ -1023,6 +1375,8 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
         handler = _TOOL_HANDLERS.get(name)
         if handler:
             result = handler(memory, arguments)
+        elif name in _power_tool_handlers:
+            result = _power_tool_handlers[name](arguments)
         else:
             result = {"error": f"Unknown tool: {name}"}
 

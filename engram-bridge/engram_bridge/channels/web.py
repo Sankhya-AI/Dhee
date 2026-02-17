@@ -339,6 +339,9 @@ class WebChannel(BaseChannel):
         self._project_manager = None  # set when Engram memory is available
         self._memory = None
         self._coordinator = None  # set by Bridge.start() when coordination enabled
+        self._warroom = None       # set by Bridge.start() when warroom enabled
+        self._monitor_role = None  # set by Bridge.start() when warroom enabled
+        self._bridge_config = None  # set by Bridge.start() for settings API
 
         self.app = FastAPI(title="engram-bridge", docs_url=None, redoc_url=None)
         self._setup_routes()
@@ -348,7 +351,6 @@ class WebChannel(BaseChannel):
         from engram.memory.projects import ProjectManager
         self._memory = memory
         self._project_manager = ProjectManager(memory)
-        self.tasks = EngramTaskStore(memory)
 
     def _next_message_id(self) -> int:
         self._message_counter += 1
@@ -451,6 +453,76 @@ class WebChannel(BaseChannel):
                 "has_projects": channel._project_manager is not None,
                 "connections": len(channel._connections),
             })
+
+        # ── REST API — Bridge config ──
+
+        @app.get("/api/config")
+        async def get_config():
+            """Return bridge configuration for the settings UI."""
+            cfg = channel._bridge_config
+            if not cfg:
+                return JSONResponse({"default_agent": "", "coordination": {}, "warroom": {}, "agents": {}})
+            from dataclasses import asdict
+            return JSONResponse({
+                "default_agent": cfg.default_agent,
+                "coordination": {
+                    "enabled": cfg.coordination.enabled,
+                    "auto_route": cfg.coordination.auto_route,
+                    "auto_execute": cfg.coordination.auto_execute,
+                },
+                "warroom": {
+                    "enabled": cfg.warroom.enabled,
+                    "monitor_agent": cfg.warroom.monitor_agent,
+                    "auto_pick": cfg.warroom.auto_pick,
+                    "auto_failover": cfg.warroom.auto_failover,
+                },
+                "agents": {
+                    name: {"type": a.type, "model": a.model}
+                    for name, a in (cfg.agents or {}).items()
+                } if cfg.agents else {},
+            })
+
+        @app.post("/api/config")
+        async def update_config(request: Request):
+            """Update bridge config (persists to disk)."""
+            cfg = channel._bridge_config
+            if not cfg:
+                return JSONResponse({"error": "No config"}, status_code=503)
+            data = await request.json()
+            # Update supported fields
+            changed = False
+            if "default_agent" in data and data["default_agent"] != cfg.default_agent:
+                cfg.default_agent = data["default_agent"]
+                changed = True
+            if "warroom" in data:
+                wr = data["warroom"]
+                if "monitor_agent" in wr:
+                    cfg.warroom.monitor_agent = wr["monitor_agent"]
+                    changed = True
+            if "coordination" in data:
+                co = data["coordination"]
+                if "auto_execute" in co:
+                    cfg.coordination.auto_execute = bool(co["auto_execute"])
+                    changed = True
+            if changed:
+                # Persist to disk
+                try:
+                    config_path = Path.home() / ".engram" / "bridge.json"
+                    if config_path.exists():
+                        raw = json.loads(config_path.read_text())
+                    else:
+                        raw = {}
+                    raw["default_agent"] = cfg.default_agent
+                    if "warroom" not in raw:
+                        raw["warroom"] = {}
+                    raw["warroom"]["monitor_agent"] = cfg.warroom.monitor_agent
+                    if "coordination" not in raw:
+                        raw["coordination"] = {}
+                    raw["coordination"]["auto_execute"] = cfg.coordination.auto_execute
+                    config_path.write_text(json.dumps(raw, indent=2))
+                except Exception as e:
+                    logger.warning("Failed to persist config: %s", e)
+            return JSONResponse({"ok": True})
 
         # ── REST API — Project endpoints ──
 
@@ -994,6 +1066,109 @@ class WebChannel(BaseChannel):
             events.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
             return JSONResponse(events[:limit])
 
+        # ── REST API — War Room endpoints ──
+
+        @app.get("/api/warrooms")
+        async def list_warrooms():
+            if not channel._warroom:
+                return JSONResponse({"error": "War room not enabled"}, status_code=503)
+            return JSONResponse(channel._warroom.list_active())
+
+        @app.post("/api/warrooms")
+        async def create_warroom(request: Request):
+            if not channel._warroom:
+                return JSONResponse({"error": "War room not enabled"}, status_code=503)
+            data = await request.json()
+            room = channel._warroom.create(
+                topic=data.get("topic", "Untitled"),
+                agenda=data.get("agenda", ""),
+                task_id=data.get("task_id", ""),
+                participants=data.get("participants"),
+                monitor_agent=data.get("monitor_agent", ""),
+                created_by=data.get("created_by", "api"),
+            )
+            channel._broadcast_ws("warroom_created", {"room": room})
+            return JSONResponse(room, status_code=201)
+
+        @app.get("/api/warrooms/{room_id}")
+        async def get_warroom(room_id: str):
+            if not channel._warroom:
+                return JSONResponse({"error": "War room not enabled"}, status_code=503)
+            room = channel._warroom.get(room_id)
+            if not room:
+                return JSONResponse({"error": "Not found"}, status_code=404)
+            return JSONResponse(room)
+
+        @app.get("/api/warrooms/{room_id}/messages")
+        async def get_warroom_messages(
+            room_id: str,
+            limit: int = Query(default=50),
+            since: str = Query(default=""),
+        ):
+            if not channel._warroom:
+                return JSONResponse({"error": "War room not enabled"}, status_code=503)
+            messages = channel._warroom.get_messages(room_id, since=since, limit=limit)
+            return JSONResponse(messages)
+
+        @app.post("/api/warrooms/{room_id}/messages")
+        async def post_warroom_message(room_id: str, request: Request):
+            if not channel._warroom:
+                return JSONResponse({"error": "War room not enabled"}, status_code=503)
+            data = await request.json()
+            msg = channel._warroom.post_message(
+                room_id=room_id,
+                sender=data.get("sender", "api"),
+                content=data.get("content", ""),
+                message_type=data.get("message_type", "message"),
+            )
+            channel._broadcast_ws("warroom_message", {"message": msg})
+            return JSONResponse(msg, status_code=201)
+
+        @app.post("/api/warrooms/{room_id}/monitor")
+        async def set_warroom_monitor(room_id: str, request: Request):
+            if not channel._warroom:
+                return JSONResponse({"error": "War room not enabled"}, status_code=503)
+            data = await request.json()
+            agent_name = data.get("agent_name", "")
+            if not agent_name:
+                return JSONResponse({"error": "agent_name required"}, status_code=400)
+            result = channel._warroom.set_monitor(room_id, agent_name)
+            if "error" in result:
+                return JSONResponse(result, status_code=404)
+            channel._broadcast_ws("warroom_monitor_changed", result)
+            return JSONResponse(result)
+
+        @app.post("/api/warrooms/{room_id}/transition")
+        async def transition_warroom(room_id: str, request: Request):
+            if not channel._warroom:
+                return JSONResponse({"error": "War room not enabled"}, status_code=503)
+            data = await request.json()
+            new_state = data.get("new_state", "")
+            if not new_state:
+                return JSONResponse({"error": "new_state required"}, status_code=400)
+            result = channel._warroom.transition(room_id, new_state, by=data.get("by", "api"))
+            if "error" in result:
+                return JSONResponse(result, status_code=400)
+            channel._broadcast_ws("warroom_state_changed", result)
+            return JSONResponse(result)
+
+        @app.post("/api/warrooms/{room_id}/decide")
+        async def warroom_decide(room_id: str, request: Request):
+            if not channel._warroom:
+                return JSONResponse({"error": "War room not enabled"}, status_code=503)
+            data = await request.json()
+            decision_text = data.get("decision_text", "")
+            if not decision_text:
+                return JSONResponse({"error": "decision_text required"}, status_code=400)
+            result = channel._warroom.set_decision(
+                room_id, decision_text,
+                action_items=data.get("action_items"),
+            )
+            if "error" in result:
+                return JSONResponse(result, status_code=404)
+            channel._broadcast_ws("warroom_decided", result)
+            return JSONResponse(result)
+
         # ── WebSocket ──
 
         @app.websocket("/ws")
@@ -1095,6 +1270,69 @@ class WebChannel(BaseChannel):
                             )
                             if self._on_message:
                                 asyncio.create_task(self._on_message(incoming))
+                        continue
+
+                    # War room WebSocket messages
+                    if msg_type == "warroom_create" and self._warroom:
+                        room = self._warroom.create(
+                            topic=data.get("topic", ""),
+                            agenda=data.get("agenda", ""),
+                            task_id=data.get("task_id", ""),
+                            participants=data.get("participants"),
+                            monitor_agent=data.get("monitor_agent", ""),
+                            created_by=f"ws:{user_id}",
+                        )
+                        self._broadcast_ws("warroom_created", {"room": room})
+                        continue
+
+                    if msg_type == "warroom_message" and self._warroom:
+                        msg_result = self._warroom.post_message(
+                            room_id=data.get("room_id", ""),
+                            sender=data.get("sender", f"user:{user_id}"),
+                            content=data.get("content", ""),
+                            message_type=data.get("message_type", "message"),
+                        )
+                        self._broadcast_ws("warroom_message", {"message": msg_result})
+                        continue
+
+                    if msg_type == "warroom_transition" and self._warroom:
+                        result = self._warroom.transition(
+                            data.get("room_id", ""),
+                            data.get("new_state", ""),
+                            by=f"ws:{user_id}",
+                        )
+                        if "error" not in result:
+                            self._broadcast_ws("warroom_state_changed", result)
+                        else:
+                            await ws.send_json({"type": "error", "content": result["error"]})
+                        continue
+
+                    if msg_type == "warroom_set_monitor" and self._warroom:
+                        result = self._warroom.set_monitor(
+                            data.get("room_id", ""),
+                            data.get("agent_name", ""),
+                        )
+                        if "error" not in result:
+                            self._broadcast_ws("warroom_monitor_changed", result)
+                        else:
+                            await ws.send_json({"type": "error", "content": result["error"]})
+                        continue
+
+                    if msg_type == "warroom_decide" and self._warroom:
+                        result = self._warroom.set_decision(
+                            data.get("room_id", ""),
+                            data.get("decision_text", ""),
+                            action_items=data.get("action_items"),
+                        )
+                        if "error" not in result:
+                            self._broadcast_ws("warroom_decided", result)
+                        else:
+                            await ws.send_json({"type": "error", "content": result["error"]})
+                        continue
+
+                    if msg_type == "warroom_list" and self._warroom:
+                        rooms = self._warroom.list_active()
+                        await ws.send_json({"type": "warroom_list", "rooms": rooms})
                         continue
 
                     text = data.get("text", "").strip()
@@ -1218,18 +1456,19 @@ class WebChannel(BaseChannel):
             logger.warning("Failed to send stats to chat_id=%d: %s", chat_id, e)
 
     async def send_task_update(self, chat_id: int, task_id: str, update_type: str, data: dict) -> None:
-        """Send a task-specific update to a client (conversation entry, process, file change)."""
+        """Send a task-specific update to a client (conversation entry, process, file change).
+
+        If the target chat_id has no direct connection (e.g. auto-execute background session),
+        broadcast to all connected clients so the dashboard stays up to date.
+        """
+        payload = json.dumps({"type": update_type, "task_id": task_id, **data})
         ws = self._connections.get(chat_id)
-        if not ws:
-            return
-        try:
-            await ws.send_json({
-                "type": update_type,
-                "task_id": task_id,
-                **data,
-            })
-        except Exception as e:
-            logger.warning("Failed to send task update to chat_id=%d: %s", chat_id, e)
+        if ws:
+            await self._safe_send(ws, payload)
+        else:
+            # No direct connection — broadcast to all (background/auto-execute session)
+            for conn in self._connections.values():
+                asyncio.create_task(self._safe_send(conn, payload))
 
         # Persist in task store
         if update_type == "task_text":

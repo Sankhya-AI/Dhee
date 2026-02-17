@@ -37,6 +37,15 @@
 ### Dashboard
 
 <p align="center">
+  <img src="docs/demo/demo.gif" alt="Engram Dashboard Demo" width="720">
+  <br>
+  <em>Kanban board, memory inspector, agent coordination, and chat.</em>
+</p>
+
+<details>
+<summary><b>Individual views</b></summary>
+
+<p align="center">
   <img src="docs/screenshots/board-kanban.png" alt="Kanban Board" width="720">
   <br>
   <em>Kanban board — drag-and-drop task management across statuses</em>
@@ -47,9 +56,6 @@
   <br>
   <em>Agents tab — memory-based orchestration with semantic routing and capability matching</em>
 </p>
-
-<details>
-<summary><b>More views</b></summary>
 
 <p align="center">
   <img src="docs/screenshots/memory-view.png" alt="Memory Browser" width="720">

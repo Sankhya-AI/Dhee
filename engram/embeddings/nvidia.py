@@ -37,7 +37,7 @@ class NvidiaEmbedder(BaseEmbedder):
         """Build extra_body for E5/embedqa models."""
         if "e5" in self.model or "embedqa" in self.model:
             input_type = "query" if memory_action in ("search", "forget") else "passage"
-            return {"input_type": input_type, "truncate": "NONE"}
+            return {"input_type": input_type, "truncate": "END"}
         return {}
 
     def embed(self, text: str, memory_action: Optional[str] = None) -> List[float]:
