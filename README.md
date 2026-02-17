@@ -133,7 +133,8 @@ You have three agents configured: Claude Code for deep reasoning, Codex for fast
 | **No episodic memory** | Vector search only | CAST scenes — time/place/topic clustering |
 | **No consolidation** | Store everything as-is | CLS sleep cycles — episodic to semantic distillation |
 | **No real-time coordination** | Polling or nothing | Active memory signal bus — agents see each other instantly |
-| **Concurrent access** | Single-process locks | sqlite-vec WAL — multiple agents, one DB |
+| **Agents don't learn** | Retrain or nothing | Skill-policy memory — agents accumulate reusable skills |
+| **Concurrent access** | Single-process locks | zvec HNSW — multiple agents, directory-based collections |
 
 ---
 
@@ -155,6 +156,35 @@ Agent capabilities are stored as memories: *"claude-code: Advanced coding agent.
 
 No new database tables. No separate routing service. The same `Memory.add()` / `Memory.search()` that stores user conversations also stores agent profiles and routes tasks.
 
+### Skill Memory — the self-improvement loop
+
+Agents learn from experience. When an agent completes a task, Engram records the trajectory (actions, tools, results). Successful trajectories accumulate. The Skill Miner analyzes clusters of similar trajectories and extracts reusable **skills** — validated procedures stored as SKILL.md files with YAML frontmatter.
+
+Skills have confidence scores that update on success/failure (Bayesian, asymmetric — failures penalize more). High-confidence skills are automatically suggested when matching tasks arrive. The loop:
+
+```
+Agent works → Trajectory recorded → Miner extracts patterns → Skills stored
+  ↑                                                               |
+  └── Agent applies skill → Outcome logged → Confidence updated ──┘
+```
+
+```python
+from engram import SmartMemory
+
+m = SmartMemory(preset="smart")
+
+# Search for relevant skills
+skills = m.search_skills("fix python import error")
+
+# Apply a skill — returns injectable recipe
+result = m.apply_skill(skill_id)
+
+# Report outcome — updates confidence
+m.log_skill_outcome(skill_id, success=True)
+```
+
+Skills are discovered from `~/.engram/skills/` and `{repo}/.engram/skills/`. Six MCP tools: `search_skills`, `apply_skill`, `log_skill_outcome`, `record_trajectory_step`, `mine_skills`, `get_skill_stats`.
+
 ### Handoff
 
 When an agent pauses (rate limit, crash, tool switch), it saves a session digest: task summary, decisions made, files touched, TODOs remaining. The next agent loads it and continues. If no digest was saved, Engram falls back to parsing the conversation logs automatically.
@@ -171,6 +201,8 @@ When an agent pauses (rate limit, crash, tool switch), it saves a session digest
 | **CLS Distillation** | Sleep-cycle replay: episodic to semantic fact extraction |
 | **Multi-trace** | Benna-Fusi model — fast/mid/slow decay traces per memory |
 | **Intent routing** | Episodic vs semantic query classification |
+| **Skill Memory** | SKILL.md files — discover, apply, and mine reusable agent skills |
+| **Skill Miner** | Trajectory recording → pattern extraction → skill compilation |
 | **Orchestrator** | Agent registry + semantic task routing + CAS claim/release |
 | **Handoff bus** | Session digests, checkpoints, JSONL log fallback |
 | **Active Memory** | Real-time signal bus with TTL tiers |
@@ -206,7 +238,7 @@ memory.add("User prefers Python over TypeScript", user_id="u1")
 results = memory.search("programming preferences", user_id="u1")
 ```
 
-**18 MCP tools** — memory CRUD, semantic search, episodic scenes, profiles, decay, session handoff. One command configures Claude Code, Cursor, and Codex:
+**14 MCP tools** — memory CRUD, semantic search, session handoff, skill search/apply/mine, trajectory recording. One command configures Claude Code, Cursor, and Codex:
 
 ```bash
 engram install
@@ -342,13 +374,14 @@ Works with any tool-calling agent via REST: `engram-api` starts a server at `htt
 ```
 ├── engram/                  # engram-memory — core Python package
 │   ├── core/                #   decay, echo, category, scenes, distillation, traces
-│   ├── memory/              #   Memory class (orchestrates all layers)
+│   ├── memory/              #   CoreMemory → SmartMemory → FullMemory
+│   ├── skills/              #   skill schema, store, discovery, executor, miner, trajectories
 │   ├── llms/                #   LLM providers (gemini, openai, nvidia, ollama)
 │   ├── embeddings/          #   embedding providers
-│   ├── vector_stores/       #   sqlite-vec, in-memory
+│   ├── vector_stores/       #   zvec, sqlite-vec, in-memory
 │   ├── db/                  #   SQLite persistence
 │   ├── api/                 #   REST API endpoints
-│   ├── mcp_server.py        #   MCP server (18 tools)
+│   ├── mcp_server.py        #   MCP server (14 tools)
 │   └── cli.py               #   CLI interface
 ├── engram-bus/              # engram-bus — agent communication
 │   └── engram_bus/          #   bus, pub/sub, handoff store, TCP server

@@ -254,6 +254,10 @@ class FullMemory(SmartMemory):
         self._profile_processor: Optional[ProfileProcessor] = None
         self._task_manager: Optional[Any] = None
         self._project_manager: Optional[Any] = None
+        # Trajectory recording and skill mining
+        self._trajectory_store: Optional[Any] = None
+        self._skill_miner: Optional[Any] = None
+        self._active_recorders: Dict[str, Any] = {}
         # Parallel executor (lazy: created only when config enables it)
         self._executor: Optional[ParallelExecutor] = None
         if self.config.parallel.enable_parallel:
@@ -295,6 +299,163 @@ class FullMemory(SmartMemory):
                 },
             )
         return self._profile_processor
+
+    @property
+    def trajectory_store(self):
+        """Lazy-initialized TrajectoryStore for persisting agent trajectories."""
+        if self._trajectory_store is None:
+            from engram.skills.trajectory import TrajectoryStore
+            self._trajectory_store = TrajectoryStore(
+                db=self.db,
+                embedder=self.embedder,
+                vector_store=self.vector_store,
+            )
+        return self._trajectory_store
+
+    @property
+    def skill_miner(self):
+        """Lazy-initialized SkillMiner for extracting skills from trajectories."""
+        skill_cfg = getattr(self.config, "skill", None)
+        if self._skill_miner is None and skill_cfg and skill_cfg.enable_mining:
+            from engram.skills.miner import SkillMiner
+            self._skill_miner = SkillMiner(
+                trajectory_store=self.trajectory_store,
+                skill_store=self.skill_store,
+                llm=self.llm,
+                embedder=self.embedder,
+                mutation_rate=skill_cfg.mutation_rate,
+            )
+        return self._skill_miner
+
+    def start_trajectory(
+        self,
+        task_description: str,
+        user_id: str = "default",
+        agent_id: str = "default",
+    ) -> str:
+        """Start recording a new trajectory for the given task.
+
+        Returns the recorder ID to be used with record_trajectory_step()
+        and complete_trajectory().
+        """
+        from engram.skills.trajectory import TrajectoryRecorder
+        recorder = TrajectoryRecorder(
+            task_description=task_description,
+            user_id=user_id,
+            agent_id=agent_id,
+        )
+        self._active_recorders[recorder.id] = recorder
+        return recorder.id
+
+    def record_trajectory_step(
+        self,
+        recorder_id: str,
+        action: str,
+        tool: str = "",
+        args: Optional[Dict[str, Any]] = None,
+        result_summary: str = "",
+        error: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Record a step in an active trajectory."""
+        recorder = self._active_recorders.get(recorder_id)
+        if recorder is None:
+            return {"error": f"No active recorder: {recorder_id}"}
+
+        step = recorder.record_step(
+            action=action,
+            tool=tool,
+            args=args,
+            result_summary=result_summary,
+            error=error,
+        )
+        return {
+            "recorder_id": recorder_id,
+            "step_count": len(recorder.steps),
+            "action": action,
+            "tool": tool,
+        }
+
+    def complete_trajectory(
+        self,
+        recorder_id: str,
+        success: bool,
+        outcome_summary: str = "",
+    ) -> Dict[str, Any]:
+        """Finalize a trajectory recording and persist it.
+
+        Returns the trajectory data.
+        """
+        recorder = self._active_recorders.pop(recorder_id, None)
+        if recorder is None:
+            return {"error": f"No active recorder: {recorder_id}"}
+
+        trajectory = recorder.finalize(
+            success=success,
+            outcome_summary=outcome_summary,
+        )
+        self.trajectory_store.save(trajectory)
+
+        return {
+            "trajectory_id": trajectory.id,
+            "task_description": trajectory.task_description,
+            "step_count": len(trajectory.steps),
+            "success": success,
+            "outcome_summary": outcome_summary,
+            "trajectory_hash": trajectory.trajectory_hash_val,
+        }
+
+    def mine_skills(
+        self,
+        task_query: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Run a skill mining cycle.
+
+        Analyzes successful trajectories and extracts reusable skills.
+        Returns info about mined skills.
+        """
+        if self.skill_miner is None:
+            return {"error": "Skill mining not enabled", "skills_mined": 0}
+
+        mined = self.skill_miner.mine(
+            task_query=task_query,
+            user_id=user_id,
+        )
+        return {
+            "skills_mined": len(mined),
+            "skills": [
+                {
+                    "id": s.id,
+                    "name": s.name,
+                    "description": s.description,
+                    "confidence": s.confidence,
+                    "source": s.source,
+                    "tags": s.tags,
+                }
+                for s in mined
+            ],
+        }
+
+    def get_skill_stats(self) -> Dict[str, Any]:
+        """Get statistics about skills and trajectories."""
+        skills = self.skill_store.list_all() if self.skill_store else []
+        trajectories = self.trajectory_store.find_successful(limit=1000) if self._trajectory_store else []
+
+        total_skills = len(skills)
+        authored = sum(1 for s in skills if s.source == "authored")
+        mined = sum(1 for s in skills if s.source == "mined")
+        imported = sum(1 for s in skills if s.source == "imported")
+        avg_confidence = sum(s.confidence for s in skills) / max(1, total_skills)
+
+        return {
+            "total_skills": total_skills,
+            "authored_skills": authored,
+            "mined_skills": mined,
+            "imported_skills": imported,
+            "avg_confidence": round(avg_confidence, 4),
+            "total_successful_trajectories": len(trajectories),
+            "active_recorders": len(self._active_recorders),
+        }
 
     def close(self) -> None:
         """Release all resources held by the Memory instance."""

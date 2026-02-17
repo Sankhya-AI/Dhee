@@ -22,6 +22,7 @@ def minimal_config():
         MemoryConfig,
         SceneConfig,
         ProfileConfig,
+        SkillConfig,
         VectorStoreConfig,
     )
 
@@ -50,6 +51,7 @@ def minimal_config():
         graph=KnowledgeGraphConfig(enable_graph=False),
         scene=SceneConfig(enable_scenes=False),
         profile=ProfileConfig(enable_profiles=False),
+        skill=SkillConfig(enable_skills=False, enable_mining=False),
     )
 
 
@@ -65,6 +67,7 @@ def smart_config():
         MemoryConfig,
         SceneConfig,
         ProfileConfig,
+        SkillConfig,
         VectorStoreConfig,
     )
     from engram.utils.factory import _detect_provider
@@ -89,13 +92,13 @@ def smart_config():
         dims = 384
         embedder_config = {"embedding_dims": 384}
 
-    # Use sqlite_vec for persistent storage when a real provider is available
-    use_sqlite_vec = embedder_provider != "simple"
-    if use_sqlite_vec:
+    # Use zvec for persistent storage when a real provider is available
+    use_zvec = embedder_provider != "simple"
+    if use_zvec:
         vs = VectorStoreConfig(
-            provider="sqlite_vec",
+            provider="zvec",
             config={
-                "path": os.path.join(data_dir, "sqlite_vec.db"),
+                "path": os.path.join(data_dir, "zvec"),
                 "collection_name": "engram_memories",
                 "embedding_model_dims": dims,
             },
@@ -125,6 +128,7 @@ def smart_config():
         graph=KnowledgeGraphConfig(enable_graph=True, use_llm_extraction=False),
         scene=SceneConfig(enable_scenes=False),
         profile=ProfileConfig(enable_profiles=False),
+        skill=SkillConfig(enable_skills=True, enable_mining=False),
     )
 
 
@@ -135,10 +139,13 @@ def full_config():
         ProfileConfig,
     )
 
+    from engram.configs.base import SkillConfig
+
     config = smart_config()
     config.scene = SceneConfig(enable_scenes=True)
     config.profile = ProfileConfig(enable_profiles=True)
     config.echo.enable_echo = True
     config.category.enable_categories = True
     config.graph.enable_graph = True
+    config.skill = SkillConfig(enable_skills=True, enable_mining=True)
     return config

@@ -27,15 +27,11 @@ from engram.core.traces import (
     initialize_traces,
 )
 from engram.db.sqlite import SQLiteManager
+from engram.skills.hashing import content_hash as _content_hash
 from engram.utils.factory import EmbedderFactory, VectorStoreFactory
 from engram.utils.math import cosine_similarity_batch
 
 logger = logging.getLogger(__name__)
-
-
-def _content_hash(content: str) -> str:
-    """SHA-256 hash of normalized content for deduplication."""
-    return hashlib.sha256(content.strip().lower().encode("utf-8")).hexdigest()
 
 
 class CoreMemory:

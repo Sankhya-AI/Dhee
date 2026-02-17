@@ -6,16 +6,16 @@ from pydantic import BaseModel, Field, field_validator
 from engram.configs.active import ActiveMemoryConfig
 
 
-_VALID_VECTOR_PROVIDERS = {"memory", "sqlite_vec"}
+_VALID_VECTOR_PROVIDERS = {"memory", "sqlite_vec", "zvec"}
 _VALID_LLM_PROVIDERS = {"gemini", "openai", "nvidia", "ollama", "mock"}
 _VALID_EMBEDDER_PROVIDERS = {"gemini", "openai", "nvidia", "ollama", "simple"}
 
 
 class VectorStoreConfig(BaseModel):
-    provider: str = Field(default="sqlite_vec")
+    provider: str = Field(default="zvec")
     config: Dict[str, Any] = Field(
         default_factory=lambda: {
-            "path": os.path.join(os.path.expanduser("~"), ".engram", "sqlite_vec.db"),
+            "path": os.path.join(os.path.expanduser("~"), ".engram", "zvec"),
             "collection_name": "fadem_memories",
         }
     )
@@ -325,6 +325,26 @@ class CausalInlineConfig(BaseModel):
     auto_detect_causal_language: bool = True
 
 
+class SkillConfig(BaseModel):
+    """Configuration for the skill-learning agent memory system."""
+    enable_skills: bool = True
+    skill_collection_name: str = "engram_skills"
+    min_confidence_for_auto_apply: float = 0.3
+    enable_mining: bool = True
+    min_trajectory_steps: int = 3
+    mutation_rate: float = 0.05
+
+    @field_validator("min_confidence_for_auto_apply", "mutation_rate")
+    @classmethod
+    def _clamp_unit_float(cls, v: float) -> float:
+        return min(1.0, max(0.0, float(v)))
+
+    @field_validator("min_trajectory_steps")
+    @classmethod
+    def _positive_int(cls, v: int) -> int:
+        return max(1, int(v))
+
+
 class TaskConfig(BaseModel):
     """Configuration for tasks as first-class Engram memories."""
     enable_tasks: bool = True
@@ -432,6 +452,7 @@ class MemoryConfig(BaseModel):
     distillation: DistillationConfig = Field(default_factory=DistillationConfig)
     parallel: ParallelConfig = Field(default_factory=ParallelConfig)
     batch: BatchConfig = Field(default_factory=BatchConfig)
+    skill: SkillConfig = Field(default_factory=SkillConfig)
     task: TaskConfig = Field(default_factory=TaskConfig)
     metamemory: MetamemoryInlineConfig = Field(default_factory=MetamemoryInlineConfig)
     prospective: ProspectiveInlineConfig = Field(default_factory=ProspectiveInlineConfig)

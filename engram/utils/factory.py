@@ -114,4 +114,17 @@ class VectorStoreFactory:
             from engram.vector_stores.sqlite_vec import SqliteVecStore
 
             return SqliteVecStore(config)
+        if provider == "zvec":
+            try:
+                from engram.vector_stores.zvec_store import ZvecStore
+                return ZvecStore(config)
+            except ImportError:
+                logger.warning("zvec not installed, falling back to sqlite_vec")
+                try:
+                    from engram.vector_stores.sqlite_vec import SqliteVecStore
+                    return SqliteVecStore(config)
+                except ImportError:
+                    logger.warning("sqlite_vec not installed, falling back to in-memory")
+                    from engram.vector_stores.memory import InMemoryVectorStore
+                    return InMemoryVectorStore(config)
         raise ValueError(f"Unsupported vector store provider: {provider}")

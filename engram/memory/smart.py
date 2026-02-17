@@ -45,10 +45,14 @@ class SmartMemory(CoreMemory):
         # LLM — created eagerly since echo/category need it
         self.llm = LLMFactory.create(self.config.llm.provider, self.config.llm.config)
 
+        self.skill_config = getattr(self.config, "skill", None)
+
         # Lazy-init processors (only created on first use)
         self._echo_processor = None
         self._category_processor = None
         self._knowledge_graph = None
+        self._skill_store = None
+        self._skill_executor = None
 
     @property
     def echo_processor(self):
@@ -90,6 +94,65 @@ class SmartMemory(CoreMemory):
                 llm=self.llm if self.graph_config.use_llm_extraction else None
             )
         return self._knowledge_graph
+
+    @property
+    def skill_store(self):
+        if self._skill_store is None and self.skill_config and self.skill_config.enable_skills:
+            from engram.skills.discovery import discover_skill_dirs
+            from engram.skills.store import SkillStore
+            skill_dirs = discover_skill_dirs()
+            self._skill_store = SkillStore(
+                skill_dirs=skill_dirs,
+                embedder=self.embedder,
+                vector_store=None,  # Skills use text search in SmartMemory (no separate collection)
+                collection_name=self.skill_config.skill_collection_name,
+            )
+            self._skill_store.sync_from_filesystem()
+        return self._skill_store
+
+    @property
+    def skill_executor(self):
+        if self._skill_executor is None and self.skill_store is not None:
+            from engram.skills.executor import SkillExecutor
+            self._skill_executor = SkillExecutor(self.skill_store)
+        return self._skill_executor
+
+    def search_skills(
+        self,
+        query: str,
+        limit: int = 5,
+        tags: Optional[List[str]] = None,
+        min_confidence: float = 0.0,
+    ) -> List[Dict[str, Any]]:
+        """Search for skills by semantic query."""
+        if self.skill_executor is None:
+            return []
+        return self.skill_executor.search(
+            query=query, limit=limit, tags=tags, min_confidence=min_confidence,
+        )
+
+    def apply_skill(
+        self,
+        skill_id: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Apply a skill by ID, returning the recipe for injection."""
+        if self.skill_executor is None:
+            return {"error": "Skills not enabled", "injected": False}
+        return self.skill_executor.apply(skill_id, context)
+
+    def log_skill_outcome(
+        self,
+        skill_id: str,
+        success: bool,
+        notes: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Log success/failure for a skill and update its confidence."""
+        if self.skill_store is None:
+            return {"error": "Skills not enabled"}
+        from engram.skills.outcomes import OutcomeTracker
+        tracker = OutcomeTracker(self.skill_store)
+        return tracker.log_outcome(skill_id, success, notes)
 
     def add(
         self,

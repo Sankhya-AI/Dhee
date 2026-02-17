@@ -98,6 +98,38 @@ def calculate_keyword_score(
     return score
 
 
+def build_sparse_vector(text: str, dim: int = 30000) -> Dict[int, float]:
+    """Build a sparse BM25-like weight vector from text.
+
+    Tokenizes via Rust, hashes tokens to sparse indices, and returns
+    a dict mapping index → weight. Useful for hybrid dense+sparse search
+    if the vector store supports sparse fields.
+    """
+    import hashlib as _hashlib
+
+    tokens = tokenize(text)
+    if not tokens:
+        return {}
+
+    # Term frequency
+    tf: Dict[str, int] = {}
+    for token in tokens:
+        tf[token] = tf.get(token, 0) + 1
+
+    sparse: Dict[int, float] = {}
+    doc_len = len(tokens)
+    for token, count in tf.items():
+        # Hash token to a sparse index
+        h = int(_hashlib.md5(token.encode("utf-8")).hexdigest(), 16)
+        idx = h % dim
+        # BM25-like weight: tf / (tf + 1)
+        weight = count / (count + 1.0)
+        # Accumulate in case of hash collision
+        sparse[idx] = sparse.get(idx, 0.0) + weight
+
+    return sparse
+
+
 def hybrid_score(
     semantic_score: float,
     keyword_score: float,

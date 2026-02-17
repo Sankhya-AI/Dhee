@@ -1,14 +1,20 @@
-"""Engram MCP Server — 8 tools, minimal boilerplate.
+"""Engram MCP Server — 14 tools, minimal boilerplate.
 
 Tools:
-1. remember        — Quick-save (content → memory, infer=False)
-2. search_memory   — Semantic search
-3. get_memory      — Fetch by ID
-4. get_all_memories — List with filters
-5. engram_context  — Session-start digest (top memories)
-6. get_last_session — Handoff: load prior session
-7. save_session_digest — Handoff: save current session
-8. get_memory_stats — Quick health check
+ 1. remember             — Quick-save (content → memory, infer=False)
+ 2. search_memory        — Semantic search
+ 3. get_memory           — Fetch by ID
+ 4. get_all_memories     — List with filters
+ 5. engram_context       — Session-start digest (top memories)
+ 6. get_last_session     — Handoff: load prior session
+ 7. save_session_digest  — Handoff: save current session
+ 8. get_memory_stats     — Quick health check
+ 9. search_skills        — Semantic search over skills
+10. apply_skill          — Inject skill recipe into context
+11. log_skill_outcome    — Report success/failure for a skill
+12. record_trajectory_step — Record a step in active trajectory
+13. mine_skills          — Run skill mining cycle
+14. get_skill_stats      — Statistics about skills and trajectories
 """
 
 import json
@@ -96,10 +102,10 @@ def get_memory_instance() -> Memory:
 
     vec_db_path = os.environ.get(
         "FADEM_VEC_DB_PATH",
-        os.path.join(os.path.expanduser("~"), ".engram", "sqlite_vec.db"),
+        os.path.join(os.path.expanduser("~"), ".engram", "zvec"),
     )
 
-    # Use in-memory vector store for simple embedder (dims mismatch with sqlite_vec)
+    # Use in-memory vector store for simple embedder (no persistent storage needed)
     if embedder_config.provider == "simple":
         vector_store_config = VectorStoreConfig(
             provider="memory",
@@ -110,7 +116,7 @@ def get_memory_instance() -> Memory:
         )
     else:
         vector_store_config = VectorStoreConfig(
-            provider="sqlite_vec",
+            provider="zvec",
             config={
                 "path": vec_db_path,
                 "collection_name": os.environ.get("FADEM_COLLECTION", "fadem_memories"),
@@ -266,6 +272,87 @@ TOOLS = [
             },
         },
     ),
+    Tool(
+        name="search_skills",
+        description="Search for reusable skills by semantic query. Returns matching skills with confidence scores and metadata.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "What kind of skill are you looking for"},
+                "limit": {"type": "integer", "description": "Maximum number of results (default: 5)"},
+                "tags": {"type": "array", "items": {"type": "string"}, "description": "Filter by tags"},
+                "min_confidence": {"type": "number", "description": "Minimum confidence threshold (default: 0.0)"},
+            },
+            "required": ["query"],
+        },
+    ),
+    Tool(
+        name="apply_skill",
+        description="Apply a skill by ID. Returns the skill recipe as injectable markdown for agent context.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "skill_id": {"type": "string", "description": "The ID of the skill to apply"},
+            },
+            "required": ["skill_id"],
+        },
+    ),
+    Tool(
+        name="log_skill_outcome",
+        description="Report success or failure for a skill. Updates the skill's confidence score based on outcome.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "skill_id": {"type": "string", "description": "The ID of the skill to log outcome for"},
+                "success": {"type": "boolean", "description": "Whether the skill application was successful"},
+                "notes": {"type": "string", "description": "Optional notes about the outcome"},
+            },
+            "required": ["skill_id", "success"],
+        },
+    ),
+    Tool(
+        name="record_trajectory_step",
+        description="Record an action step in the active trajectory. Use start_trajectory first (via mine_skills with task_description) to begin recording.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "recorder_id": {"type": "string", "description": "The recorder ID returned by start_trajectory"},
+                "action": {"type": "string", "description": "The action performed (e.g., 'search', 'edit', 'test')"},
+                "tool": {"type": "string", "description": "The tool used (e.g., 'grep', 'write', 'pytest')"},
+                "args": {"type": "object", "description": "Arguments passed to the tool"},
+                "result_summary": {"type": "string", "description": "Brief summary of the result"},
+                "error": {"type": "string", "description": "Error message if the step failed"},
+            },
+            "required": ["recorder_id", "action"],
+        },
+    ),
+    Tool(
+        name="mine_skills",
+        description="Run a skill mining cycle. Analyzes successful trajectories and extracts reusable skills. Can also start/complete trajectory recording.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["mine", "start_trajectory", "complete_trajectory"],
+                    "description": "Action to perform: 'mine' runs mining, 'start_trajectory' begins recording, 'complete_trajectory' finalizes recording",
+                },
+                "task_query": {"type": "string", "description": "Filter trajectories by task description (for mining)"},
+                "task_description": {"type": "string", "description": "Task description (for start_trajectory)"},
+                "recorder_id": {"type": "string", "description": "Recorder ID (for complete_trajectory)"},
+                "success": {"type": "boolean", "description": "Whether the task succeeded (for complete_trajectory)"},
+                "outcome_summary": {"type": "string", "description": "Brief outcome description (for complete_trajectory)"},
+            },
+        },
+    ),
+    Tool(
+        name="get_skill_stats",
+        description="Get statistics about skills and trajectories including counts, confidence averages, and active recordings.",
+        inputSchema={
+            "type": "object",
+            "properties": {},
+        },
+    ),
 ]
 
 
@@ -413,6 +500,68 @@ def _handle_get_memory_stats(memory, args):
     )
 
 
+def _handle_search_skills(memory, args):
+    try:
+        limit = max(1, min(50, int(args.get("limit", 5))))
+    except (ValueError, TypeError):
+        limit = 5
+    min_conf = float(args.get("min_confidence", 0.0))
+    return memory.search_skills(
+        query=args.get("query", ""),
+        limit=limit,
+        tags=args.get("tags"),
+        min_confidence=min_conf,
+    )
+
+
+def _handle_apply_skill(memory, args):
+    return memory.apply_skill(
+        skill_id=args.get("skill_id", ""),
+    )
+
+
+def _handle_log_skill_outcome(memory, args):
+    return memory.log_skill_outcome(
+        skill_id=args.get("skill_id", ""),
+        success=args.get("success", False),
+        notes=args.get("notes"),
+    )
+
+
+def _handle_record_trajectory_step(memory, args):
+    return memory.record_trajectory_step(
+        recorder_id=args.get("recorder_id", ""),
+        action=args.get("action", ""),
+        tool=args.get("tool", ""),
+        args=args.get("args"),
+        result_summary=args.get("result_summary", ""),
+        error=args.get("error"),
+    )
+
+
+def _handle_mine_skills(memory, args):
+    action = args.get("action", "mine")
+    if action == "start_trajectory":
+        recorder_id = memory.start_trajectory(
+            task_description=args.get("task_description", ""),
+        )
+        return {"recorder_id": recorder_id}
+    elif action == "complete_trajectory":
+        return memory.complete_trajectory(
+            recorder_id=args.get("recorder_id", ""),
+            success=args.get("success", False),
+            outcome_summary=args.get("outcome_summary", ""),
+        )
+    else:
+        return memory.mine_skills(
+            task_query=args.get("task_query"),
+        )
+
+
+def _handle_get_skill_stats(memory, args):
+    return memory.get_skill_stats()
+
+
 HANDLERS = {
     "remember": _handle_remember,
     "search_memory": _handle_search_memory,
@@ -422,6 +571,12 @@ HANDLERS = {
     "get_last_session": _handle_get_last_session,
     "save_session_digest": _handle_save_session_digest,
     "get_memory_stats": _handle_get_memory_stats,
+    "search_skills": _handle_search_skills,
+    "apply_skill": _handle_apply_skill,
+    "log_skill_outcome": _handle_log_skill_outcome,
+    "record_trajectory_step": _handle_record_trajectory_step,
+    "mine_skills": _handle_mine_skills,
+    "get_skill_stats": _handle_get_skill_stats,
 }
 
 _MEMORY_FREE_TOOLS = {"get_last_session", "save_session_digest"}
