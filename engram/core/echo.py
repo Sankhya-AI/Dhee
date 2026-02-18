@@ -412,22 +412,48 @@ class EchoProcessor:
         text = (response or "").strip()
         if not text:
             return text
-        fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
+        # Strip <think>...</think> blocks (Qwen 3.x thinking models)
+        text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(r"<think>[\s\S]*$", "", text, flags=re.IGNORECASE).strip()
+        if not text:
+            return text
+        # Handle any code fence type: ```json, ```python, ```, etc.
+        fence_match = re.search(r"```\w*\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
         if fence_match:
-            return fence_match.group(1).strip()
-        # Use raw_decode to extract the first complete JSON object,
-        # ignoring any trailing LLM commentary.
-        start = text.find("{")
-        if start != -1:
+            inner = fence_match.group(1).strip()
+            # If the code block contains Python code rather than JSON, extract JSON from it
+            json_in_code = re.search(r"(\{[\s\S]*\})", inner)
+            if json_in_code:
+                inner = json_in_code.group(1)
+            return inner
+        # Try to find JSON objects and pick the one that looks like an echo output
+        decoder = json.JSONDecoder()
+        candidates = []
+        idx = 0
+        while idx < len(text):
+            # Look for start of object or array
+            obj_start = text.find("{", idx)
+            arr_start = text.find("[", idx)
+            start = min(s for s in (obj_start, arr_start) if s != -1) if any(s != -1 for s in (obj_start, arr_start)) else -1
+            if start == -1:
+                break
             try:
-                obj, end = json.JSONDecoder().raw_decode(text, start)
-                return json.dumps(obj)
+                obj, end = decoder.raw_decode(text, start)
+                candidates.append(obj)
+                idx = end
             except json.JSONDecodeError:
-                pass
-            # Fallback: bracket matching
-            end = text.rfind("}")
-            if end > start:
-                return text[start:end + 1].strip()
+                idx = start + 1
+        # Prefer the candidate that has echo-like keys
+        echo_keys = {"paraphrases", "keywords", "importance"}
+        for candidate in candidates:
+            if isinstance(candidate, dict) and echo_keys & set(candidate.keys()):
+                return json.dumps(candidate)
+            if isinstance(candidate, list) and candidate and isinstance(candidate[0], dict):
+                if echo_keys & set(candidate[0].keys()):
+                    return json.dumps(candidate[0])
+        # Fall back to first candidate
+        if candidates:
+            return json.dumps(candidates[0])
         return text
 
     def _repair_json(self, text: str) -> str:
@@ -435,6 +461,13 @@ class EchoProcessor:
             return text
         # Remove trailing commas before } or ]
         repaired = re.sub(r",(\s*[}\]])", r"\1", text)
+        # Fix template-literal values: "field": ["str"] or "field": "str" placeholders
+        repaired = re.sub(r':\s*\["str"\]', ': []', repaired)
+        repaired = re.sub(r':\s*"str"', ': ""', repaired)
+        # Fix schema descriptions leaking into values: "0.0-1.0" → 0.5
+        repaired = re.sub(r'"0\.0-1\.0"', '0.5', repaired)
+        # Remove // style comments (not valid JSON)
+        repaired = re.sub(r'\s*//[^\n]*', '', repaired)
         return repaired
 
     def _load_json_dict(self, text: str) -> Optional[Dict[str, Any]]:
@@ -450,7 +483,12 @@ class EchoProcessor:
                     return None
             else:
                 return None
-        return data if isinstance(data, dict) else None
+        if isinstance(data, dict):
+            return data
+        # Handle list responses: LLM sometimes returns [{ echo }, ...] instead of { echo }
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            return data[0]
+        return None
 
     def _normalize_echo_dict(self, data: Dict[str, Any]) -> Dict[str, Any]:
         normalized = dict(data)
@@ -458,6 +496,21 @@ class EchoProcessor:
             normalized["paraphrases"] = normalized.pop("paraphrase")
         if "questions" not in normalized and "question_form" in normalized:
             normalized["questions"] = normalized.get("question_form")
+        # Handle LLM returning session metadata as top-level keys (not echo data)
+        echo_keys = {"paraphrases", "keywords", "importance"}
+        if not (echo_keys & set(normalized.keys())):
+            # This dict doesn't look like echo output — check for nested echo data
+            for key, val in normalized.items():
+                if isinstance(val, dict) and echo_keys & set(val.keys()):
+                    return self._normalize_echo_dict(val)
+            # Try "results" key for batch-style responses
+            if "results" in normalized and isinstance(normalized["results"], list):
+                if normalized["results"] and isinstance(normalized["results"][0], dict):
+                    return self._normalize_echo_dict(normalized["results"][0])
+        # Ensure required fields have defaults if still missing
+        normalized.setdefault("paraphrases", [])
+        normalized.setdefault("keywords", [])
+        normalized.setdefault("importance", 0.5)
         return normalized
 
     def process_batch(

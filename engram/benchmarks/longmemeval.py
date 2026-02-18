@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -15,11 +16,12 @@ from pathlib import Path
 from statistics import mean
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from engram import Memory
+from engram import FullMemory as Memory
 from engram.configs.base import (
     CategoryMemConfig,
     EchoMemConfig,
     EmbedderConfig,
+    EnrichmentConfig,
     KnowledgeGraphConfig,
     LLMConfig,
     MemoryConfig,
@@ -28,6 +30,7 @@ from engram.configs.base import (
     VectorStoreConfig,
 )
 
+logger = logging.getLogger(__name__)
 
 SESSION_ID_PATTERN = re.compile(r"^Session ID:\s*(?P<session_id>\S+)\s*$", re.MULTILINE)
 HISTORY_HEADER = "User Transcript:"
@@ -170,8 +173,14 @@ def build_memory(
         graph=KnowledgeGraphConfig(enable_graph=full_potential),
         scene=SceneConfig(use_llm_summarization=full_potential, enable_scenes=full_potential),
         profile=ProfileConfig(use_llm_extraction=full_potential, enable_profiles=full_potential),
+        enrichment=EnrichmentConfig(enable_unified=full_potential),
     )
-    return Memory(config)
+    mem = Memory(config)
+    # FullMemory features (categories, scenes, profiles) need FullSQLiteManager
+    if full_potential:
+        from engram.db.sqlite import FullSQLiteManager
+        mem.db = FullSQLiteManager(history_db_path)
+    return mem
 
 
 def build_context_text(results: Sequence[Dict[str, Any]], max_chars: int) -> str:
@@ -263,20 +272,23 @@ def run_longmemeval(args: argparse.Namespace) -> Dict[str, Any]:
                 sessions = entry.get("haystack_sessions") or []
                 for sess_id, sess_date, sess_turns in zip(session_ids, session_dates, sessions):
                     payload = format_session_memory(str(sess_id), str(sess_date), sess_turns or [])
-                    memory.add(
-                        messages=payload,
-                        user_id=args.user_id,
-                        metadata={
-                            "session_id": str(sess_id),
-                            "session_date": str(sess_date),
-                            "question_id": question_id,
-                        },
-                        categories=["longmemeval", "session"],
-                        infer=False,
-                    )
+                    try:
+                        memory.add(
+                            messages=payload,
+                            user_id=args.user_id,
+                            metadata={
+                                "session_id": str(sess_id),
+                                "session_date": str(sess_date),
+                                "question_id": question_id,
+                            },
+                            categories=["longmemeval", "session"],
+                            infer=False,
+                        )
+                    except Exception as e:
+                        logger.warning("Skipping session %s for question %s: %s", sess_id, question_id, e)
 
                 query = str(entry.get("question", "")).strip()
-                search_payload = memory.search_with_context(
+                search_payload = memory.search(
                     query=query,
                     user_id=args.user_id,
                     limit=args.top_k,
@@ -313,6 +325,7 @@ def run_longmemeval(args: argparse.Namespace) -> Dict[str, Any]:
                     include_debug_fields=args.include_debug_fields,
                 )
                 out_f.write(json.dumps(output_row, ensure_ascii=False) + "\n")
+                out_f.flush()
 
                 if retrieval_f is not None:
                     retrieval_row = {
@@ -322,10 +335,11 @@ def run_longmemeval(args: argparse.Namespace) -> Dict[str, Any]:
                         "metrics": metrics,
                     }
                     retrieval_f.write(json.dumps(retrieval_row, ensure_ascii=False) + "\n")
+                    retrieval_f.flush()
 
                 processed += 1
                 if args.print_every > 0 and processed % args.print_every == 0:
-                    print(f"[LongMemEval] processed={processed} question_id={question_id}")
+                    print(f"[LongMemEval] processed={processed} question_id={question_id}", flush=True)
         finally:
             if retrieval_f is not None:
                 retrieval_f.close()

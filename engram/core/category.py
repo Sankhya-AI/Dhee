@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -441,6 +442,10 @@ class CategoryProcessor:
 
         try:
             response = self.llm.generate(prompt)
+
+            # Strip <think>...</think> blocks (Qwen 3.x thinking models)
+            response = re.sub(r"<think>[\s\S]*?</think>", "", response, flags=re.IGNORECASE).strip()
+            response = re.sub(r"<think>[\s\S]*$", "", response, flags=re.IGNORECASE).strip()
 
             # Parse JSON response — use raw_decode to ignore trailing LLM text
             json_start = response.find("{")

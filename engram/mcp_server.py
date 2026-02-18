@@ -1,4 +1,4 @@
-"""Engram MCP Server — 14 tools, minimal boilerplate.
+"""Engram MCP Server — 18 tools, minimal boilerplate.
 
 Tools:
  1. remember             — Quick-save (content → memory, infer=False)
@@ -15,6 +15,10 @@ Tools:
 12. record_trajectory_step — Record a step in active trajectory
 13. mine_skills          — Run skill mining cycle
 14. get_skill_stats      — Statistics about skills and trajectories
+15. search_skills_structural — Find skills by structural similarity
+16. analyze_skill_gaps   — Show what transfers vs what needs experimentation
+17. decompose_skill      — Trigger structural decomposition of a flat skill
+18. apply_skill_with_bindings — Apply skill with slot values, includes gap analysis
 """
 
 import json
@@ -299,13 +303,28 @@ TOOLS = [
     ),
     Tool(
         name="log_skill_outcome",
-        description="Report success or failure for a skill. Updates the skill's confidence score based on outcome.",
+        description="Report success or failure for a skill. Updates the skill's confidence score based on outcome. Optionally accepts per-step outcomes for granular feedback.",
         inputSchema={
             "type": "object",
             "properties": {
                 "skill_id": {"type": "string", "description": "The ID of the skill to log outcome for"},
                 "success": {"type": "boolean", "description": "Whether the skill application was successful"},
                 "notes": {"type": "string", "description": "Optional notes about the outcome"},
+                "step_outcomes": {
+                    "type": "array",
+                    "description": "Optional per-step outcomes for granular feedback",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "step_index": {"type": "integer", "description": "Index of the step (0-based)"},
+                            "success": {"type": "boolean", "description": "Whether this step succeeded"},
+                            "failure_type": {"type": "string", "enum": ["structural", "slot"], "description": "Type of failure"},
+                            "failed_slot": {"type": "string", "description": "Which slot caused the failure"},
+                            "notes": {"type": "string", "description": "Notes about this step's outcome"},
+                        },
+                        "required": ["step_index", "success"],
+                    },
+                },
             },
             "required": ["skill_id", "success"],
         },
@@ -351,6 +370,66 @@ TOOLS = [
         inputSchema={
             "type": "object",
             "properties": {},
+        },
+    ),
+    Tool(
+        name="search_skills_structural",
+        description="Find skills by structural similarity to given steps. Decomposes the query steps into a recipe template and matches against skills with structural decomposition.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "query_steps": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Steps to find structurally similar skills for (e.g., ['Build Go app', 'Run go test', 'Deploy to GCP'])",
+                },
+                "limit": {"type": "integer", "description": "Maximum number of results (default: 5)"},
+                "min_similarity": {"type": "number", "description": "Minimum structural similarity threshold 0.0-1.0 (default: 0.3)"},
+            },
+            "required": ["query_steps"],
+        },
+    ),
+    Tool(
+        name="analyze_skill_gaps",
+        description="Analyze what transfers from a skill to a new target context. Shows proven bindings, untested bindings, and missing slots with recommendations.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "skill_id": {"type": "string", "description": "The ID of the skill to analyze"},
+                "target_context": {
+                    "type": "object",
+                    "description": "Target context with slot values (e.g., {'language': 'go', 'deploy_target': 'gcp'})",
+                    "additionalProperties": {"type": "string"},
+                },
+            },
+            "required": ["skill_id", "target_context"],
+        },
+    ),
+    Tool(
+        name="decompose_skill",
+        description="Trigger structural decomposition of a flat skill into recipe + ingredients. Extracts slots and creates structured step templates.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "skill_id": {"type": "string", "description": "The ID of the skill to decompose"},
+            },
+            "required": ["skill_id"],
+        },
+    ),
+    Tool(
+        name="apply_skill_with_bindings",
+        description="Apply a skill with specific slot values. Renders steps with bindings and includes gap analysis showing proven vs untested components.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "skill_id": {"type": "string", "description": "The ID of the skill to apply"},
+                "bindings": {
+                    "type": "object",
+                    "description": "Slot bindings (e.g., {'language': 'go', 'test_framework': 'go test', 'deploy_target': 'gcp'})",
+                    "additionalProperties": {"type": "string"},
+                },
+            },
+            "required": ["skill_id", "bindings"],
         },
     ),
 ]
@@ -525,6 +604,7 @@ def _handle_log_skill_outcome(memory, args):
         skill_id=args.get("skill_id", ""),
         success=args.get("success", False),
         notes=args.get("notes"),
+        step_outcomes=args.get("step_outcomes"),
     )
 
 
@@ -562,6 +642,40 @@ def _handle_get_skill_stats(memory, args):
     return memory.get_skill_stats()
 
 
+def _handle_search_skills_structural(memory, args):
+    query_steps = args.get("query_steps", [])
+    try:
+        limit = max(1, min(50, int(args.get("limit", 5))))
+    except (ValueError, TypeError):
+        limit = 5
+    min_sim = float(args.get("min_similarity", 0.3))
+    return memory.search_skills_structural(
+        query_steps=query_steps,
+        limit=limit,
+        min_similarity=min_sim,
+    )
+
+
+def _handle_analyze_skill_gaps(memory, args):
+    return memory.analyze_skill_gaps(
+        skill_id=args.get("skill_id", ""),
+        target_context=args.get("target_context", {}),
+    )
+
+
+def _handle_decompose_skill(memory, args):
+    return memory.decompose_skill(
+        skill_id=args.get("skill_id", ""),
+    )
+
+
+def _handle_apply_skill_with_bindings(memory, args):
+    return memory.apply_skill(
+        skill_id=args.get("skill_id", ""),
+        bindings=args.get("bindings", {}),
+    )
+
+
 HANDLERS = {
     "remember": _handle_remember,
     "search_memory": _handle_search_memory,
@@ -577,6 +691,10 @@ HANDLERS = {
     "record_trajectory_step": _handle_record_trajectory_step,
     "mine_skills": _handle_mine_skills,
     "get_skill_stats": _handle_get_skill_stats,
+    "search_skills_structural": _handle_search_skills_structural,
+    "analyze_skill_gaps": _handle_analyze_skill_gaps,
+    "decompose_skill": _handle_decompose_skill,
+    "apply_skill_with_bindings": _handle_apply_skill_with_bindings,
 }
 
 _MEMORY_FREE_TOOLS = {"get_last_session", "save_session_digest"}

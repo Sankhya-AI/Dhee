@@ -165,6 +165,59 @@ class SkillStore:
                 return skill
         return None
 
+    def search_structural(
+        self,
+        query_steps: List[str],
+        limit: int = 5,
+        min_similarity: float = 0.3,
+    ) -> List[Skill]:
+        """Search for skills by structural similarity to given steps."""
+        from engram.skills.structure import (
+            extract_slots_heuristic,
+            structural_similarity,
+        )
+
+        _, query_structured = extract_slots_heuristic(query_steps)
+
+        scored: List[tuple] = []
+        for skill in self._cache.values():
+            structure = skill.get_structure()
+            if structure is None:
+                continue
+            sim = structural_similarity(query_structured, structure.structured_steps)
+            if sim >= min_similarity:
+                scored.append((sim, skill))
+
+        # Also check filesystem for skills not yet cached
+        self.sync_from_filesystem()
+        for skill in self._cache.values():
+            structure = skill.get_structure()
+            if structure is None:
+                continue
+            # Avoid re-scoring already scored skills
+            if any(s.id == skill.id for _, s in scored):
+                continue
+            sim = structural_similarity(query_structured, structure.structured_steps)
+            if sim >= min_similarity:
+                scored.append((sim, skill))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [skill for _, skill in scored[:limit]]
+
+    def get_by_structural_signature(self, sig_hash: str) -> Optional[Skill]:
+        """Find skill by structural signature hash (structural dedup check)."""
+        for skill in self._cache.values():
+            structure = skill.get_structure()
+            if structure and structure.structural_signature == sig_hash:
+                return skill
+
+        self.sync_from_filesystem()
+        for skill in self._cache.values():
+            structure = skill.get_structure()
+            if structure and structure.structural_signature == sig_hash:
+                return skill
+        return None
+
     def delete(self, skill_id: str) -> bool:
         """Delete a skill from filesystem and index."""
         self._cache.pop(skill_id, None)

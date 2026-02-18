@@ -42,6 +42,18 @@ class Skill:
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
     last_used_at: Optional[str] = None
+    structure: Optional[Dict[str, Any]] = None  # Serialized SkillStructure
+
+    def get_structure(self) -> Optional["SkillStructure"]:
+        """Lazy-deserialize the structure field into a SkillStructure."""
+        if self.structure is None:
+            return None
+        from engram.skills.structure import SkillStructure
+        return SkillStructure.from_dict(self.structure)
+
+    def set_structure(self, structure: "SkillStructure") -> None:
+        """Serialize a SkillStructure and store it."""
+        self.structure = structure.to_dict()
 
     def __post_init__(self):
         if not self.signature_hash:
@@ -72,6 +84,8 @@ class Skill:
             "updated_at": self.updated_at,
             "last_used_at": self.last_used_at,
         }
+        if self.structure is not None:
+            frontmatter["structure"] = self.structure
         yaml_str = yaml.dump(frontmatter, default_flow_style=False, sort_keys=False)
         body = self.body_markdown or self._generate_body()
         return f"---\n{yaml_str}---\n\n{body}\n"
@@ -116,6 +130,7 @@ class Skill:
             created_at=fm.get("created_at", datetime.now(timezone.utc).isoformat()),
             updated_at=fm.get("updated_at", datetime.now(timezone.utc).isoformat()),
             last_used_at=fm.get("last_used_at"),
+            structure=fm.get("structure"),
         )
 
     def _generate_body(self) -> str:
@@ -137,7 +152,7 @@ class Skill:
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
-        return {
+        d = {
             "id": self.id,
             "name": self.name,
             "description": self.description,
@@ -153,6 +168,9 @@ class Skill:
             "updated_at": self.updated_at,
             "last_used_at": self.last_used_at,
         }
+        if self.structure is not None:
+            d["structure"] = self.structure
+        return d
 
 
 @dataclass

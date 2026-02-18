@@ -52,6 +52,8 @@ class SkillMiner:
         embedder: Any = None,
         mutation_rate: float = 0.05,
         min_cluster_size: int = 2,
+        auto_decompose: bool = True,
+        use_llm_decomposition: bool = True,
     ):
         self._trajectory_store = trajectory_store
         self._skill_store = skill_store
@@ -59,6 +61,8 @@ class SkillMiner:
         self._embedder = embedder
         self._mutation_rate = mutation_rate
         self._min_cluster_size = min_cluster_size
+        self._auto_decompose = auto_decompose
+        self._use_llm_decomposition = use_llm_decomposition
 
     def mine(
         self,
@@ -249,6 +253,10 @@ class SkillMiner:
         # Apply mutation
         skill = self._maybe_mutate(skill)
 
+        # Structural decomposition
+        if self._auto_decompose:
+            skill = self._add_structure(skill, cluster)
+
         return skill
 
     def _mine_heuristic(self, cluster: List[Trajectory]) -> Optional[Skill]:
@@ -282,6 +290,58 @@ class SkillMiner:
         )
 
         skill = self._maybe_mutate(skill)
+
+        # Structural decomposition
+        if self._auto_decompose:
+            skill = self._add_structure(skill, cluster)
+
+        return skill
+
+    def _add_structure(self, skill: Skill, cluster: List[Trajectory]) -> Skill:
+        """Add structural decomposition to a mined skill.
+
+        Extracts slots (via LLM or heuristic), populates known_bindings
+        from trajectory cluster, and computes structural signature.
+        """
+        if not skill.steps:
+            return skill
+
+        try:
+            from engram.skills.structure import (
+                SkillStructure,
+                extract_slots_heuristic,
+                extract_slots_llm,
+            )
+
+            if self._use_llm_decomposition and self._llm:
+                slots, structured_steps = extract_slots_llm(
+                    name=skill.name,
+                    description=skill.description,
+                    steps=skill.steps,
+                    tags=skill.tags,
+                    llm=self._llm,
+                )
+            else:
+                slots, structured_steps = extract_slots_heuristic(
+                    skill.steps, skill.tags,
+                )
+
+            # Populate known_bindings from slot examples discovered during extraction
+            known_bindings: Dict[str, List[str]] = {}
+            for slot in slots:
+                if slot.examples:
+                    known_bindings[slot.name] = list(slot.examples)
+
+            structure = SkillStructure(
+                slots=slots,
+                structured_steps=structured_steps,
+                known_bindings=known_bindings,
+            )
+            structure.compute_structural_signature()
+            skill.set_structure(structure)
+        except Exception as e:
+            logger.warning("Structural decomposition failed for '%s': %s", skill.name, e)
+
         return skill
 
     def _maybe_mutate(self, skill: Skill) -> Skill:

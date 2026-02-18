@@ -33,9 +33,9 @@ class LLMConfig(BaseModel):
     provider: str = Field(default="nvidia")
     config: Dict[str, Any] = Field(
         default_factory=lambda: {
-            "model": "meta/llama-3.1-8b-instruct",
+            "model": "qwen/qwen3.5-397b-a17b",
             "temperature": 0.2,
-            "max_tokens": 1024,
+            "max_tokens": 4096,
         }
     )
 
@@ -333,8 +333,15 @@ class SkillConfig(BaseModel):
     enable_mining: bool = True
     min_trajectory_steps: int = 3
     mutation_rate: float = 0.05
+    # Structural intelligence
+    enable_structural: bool = True
+    use_llm_decomposition: bool = True
+    structural_similarity_threshold: float = 0.4
+    auto_decompose_on_mine: bool = True
+    auto_decompose_on_import: bool = True
 
-    @field_validator("min_confidence_for_auto_apply", "mutation_rate")
+    @field_validator("min_confidence_for_auto_apply", "mutation_rate",
+                     "structural_similarity_threshold")
     @classmethod
     def _clamp_unit_float(cls, v: float) -> float:
         return min(1.0, max(0.0, float(v)))
@@ -364,6 +371,20 @@ class TaskConfig(BaseModel):
         if v not in allowed:
             return "normal"
         return v
+
+
+class EnrichmentConfig(BaseModel):
+    """Configuration for unified enrichment (single LLM call for echo+category+entities+profiles)."""
+    enable_unified: bool = False        # Off by default for backward compat
+    fallback_to_individual: bool = True  # On parse failure, fall back to individual calls
+    include_entities: bool = True        # Include entity extraction in unified call
+    include_profiles: bool = True        # Include profile extraction in unified call
+    max_batch_size: int = 10             # Max memories per unified batch call
+
+    @field_validator("max_batch_size")
+    @classmethod
+    def _clamp_batch_size(cls, v: int) -> int:
+        return min(50, max(1, int(v)))
 
 
 class BatchConfig(BaseModel):
@@ -452,6 +473,7 @@ class MemoryConfig(BaseModel):
     distillation: DistillationConfig = Field(default_factory=DistillationConfig)
     parallel: ParallelConfig = Field(default_factory=ParallelConfig)
     batch: BatchConfig = Field(default_factory=BatchConfig)
+    enrichment: EnrichmentConfig = Field(default_factory=EnrichmentConfig)
     skill: SkillConfig = Field(default_factory=SkillConfig)
     task: TaskConfig = Field(default_factory=TaskConfig)
     metamemory: MetamemoryInlineConfig = Field(default_factory=MetamemoryInlineConfig)

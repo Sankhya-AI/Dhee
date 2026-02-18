@@ -135,11 +135,11 @@ def smart_config():
 def full_config():
     """Everything: scenes, profiles, graph, tasks. Needs API key or Ollama."""
     from engram.configs.base import (
+        EnrichmentConfig,
         SceneConfig,
         ProfileConfig,
+        SkillConfig,
     )
-
-    from engram.configs.base import SkillConfig
 
     config = smart_config()
     config.scene = SceneConfig(enable_scenes=True)
@@ -148,4 +148,5 @@ def full_config():
     config.category.enable_categories = True
     config.graph.enable_graph = True
     config.skill = SkillConfig(enable_skills=True, enable_mining=True)
+    config.enrichment = EnrichmentConfig(enable_unified=True)
     return config

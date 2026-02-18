@@ -51,6 +51,7 @@ class SmartMemory(CoreMemory):
         self._echo_processor = None
         self._category_processor = None
         self._knowledge_graph = None
+        self._unified_enrichment = None
         self._skill_store = None
         self._skill_executor = None
 
@@ -96,6 +97,20 @@ class SmartMemory(CoreMemory):
         return self._knowledge_graph
 
     @property
+    def unified_enrichment(self):
+        enrichment_config = getattr(self.config, "enrichment", None)
+        if self._unified_enrichment is None and enrichment_config and enrichment_config.enable_unified:
+            from engram.core.enrichment import UnifiedEnrichmentProcessor
+            self._unified_enrichment = UnifiedEnrichmentProcessor(
+                llm=self.llm,
+                echo_processor=self.echo_processor,
+                category_processor=self.category_processor,
+                knowledge_graph=self.knowledge_graph,
+                profile_processor=getattr(self, "profile_processor", None),
+            )
+        return self._unified_enrichment
+
+    @property
     def skill_store(self):
         if self._skill_store is None and self.skill_config and self.skill_config.enable_skills:
             from engram.skills.discovery import discover_skill_dirs
@@ -131,28 +146,113 @@ class SmartMemory(CoreMemory):
             query=query, limit=limit, tags=tags, min_confidence=min_confidence,
         )
 
-    def apply_skill(
-        self,
-        skill_id: str,
-        context: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """Apply a skill by ID, returning the recipe for injection."""
-        if self.skill_executor is None:
-            return {"error": "Skills not enabled", "injected": False}
-        return self.skill_executor.apply(skill_id, context)
-
     def log_skill_outcome(
         self,
         skill_id: str,
         success: bool,
         notes: Optional[str] = None,
+        step_outcomes: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
-        """Log success/failure for a skill and update its confidence."""
+        """Log success/failure for a skill and update its confidence.
+
+        If step_outcomes is provided (list of dicts with step_index, success,
+        failure_type, failed_slot, notes), per-step confidence is updated too.
+        """
         if self.skill_store is None:
             return {"error": "Skills not enabled"}
-        from engram.skills.outcomes import OutcomeTracker
+        from engram.skills.outcomes import OutcomeTracker, StepOutcome
         tracker = OutcomeTracker(self.skill_store)
-        return tracker.log_outcome(skill_id, success, notes)
+        parsed_step_outcomes = None
+        if step_outcomes:
+            parsed_step_outcomes = [StepOutcome.from_dict(so) for so in step_outcomes]
+        return tracker.log_outcome(skill_id, success, notes, parsed_step_outcomes)
+
+    def apply_skill(
+        self,
+        skill_id: str,
+        context: Optional[Dict[str, Any]] = None,
+        bindings: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """Apply a skill by ID, optionally with structural bindings."""
+        if self.skill_executor is None:
+            return {"error": "Skills not enabled", "injected": False}
+        return self.skill_executor.apply(skill_id, context, bindings)
+
+    def search_skills_structural(
+        self,
+        query_steps: List[str],
+        limit: int = 5,
+        min_similarity: float = 0.3,
+    ) -> List[Dict[str, Any]]:
+        """Search for skills by structural similarity to given steps."""
+        if self.skill_executor is None:
+            return []
+        return self.skill_executor.search_structural(
+            query_steps=query_steps,
+            limit=limit,
+            min_similarity=min_similarity,
+        )
+
+    def analyze_skill_gaps(
+        self,
+        skill_id: str,
+        target_context: Dict[str, str],
+    ) -> Dict[str, Any]:
+        """Analyze what transfers from a skill to a target context."""
+        if self.skill_store is None:
+            return {"error": "Skills not enabled"}
+        skill = self.skill_store.get(skill_id)
+        if skill is None:
+            return {"error": f"Skill not found: {skill_id}"}
+        structure = skill.get_structure()
+        if structure is None:
+            return {"error": "Skill has no structural decomposition"}
+        from engram.skills.structure import analyze_gaps
+        report = analyze_gaps(structure, target_context, skill.confidence)
+        report.skill_id = skill_id
+        return report.to_dict()
+
+    def decompose_skill(self, skill_id: str) -> Dict[str, Any]:
+        """Trigger structural decomposition of a flat skill."""
+        if self.skill_store is None:
+            return {"error": "Skills not enabled"}
+        skill = self.skill_store.get(skill_id)
+        if skill is None:
+            return {"error": f"Skill not found: {skill_id}"}
+        if skill.get_structure() is not None:
+            return {"skill_id": skill_id, "status": "already_decomposed"}
+
+        from engram.skills.structure import (
+            SkillStructure,
+            extract_slots_heuristic,
+            extract_slots_llm,
+        )
+        skill_cfg = getattr(self, "skill_config", None)
+        use_llm = skill_cfg and skill_cfg.use_llm_decomposition and hasattr(self, "llm") and self.llm
+        if use_llm:
+            slots, steps = extract_slots_llm(
+                skill.name, skill.description, skill.steps, skill.tags, self.llm,
+            )
+        else:
+            slots, steps = extract_slots_heuristic(skill.steps, skill.tags)
+
+        known_bindings = {s.name: list(s.examples) for s in slots if s.examples}
+        structure = SkillStructure(
+            slots=slots,
+            structured_steps=steps,
+            known_bindings=known_bindings,
+        )
+        structure.compute_structural_signature()
+        skill.set_structure(structure)
+        self.skill_store.save(skill)
+
+        return {
+            "skill_id": skill_id,
+            "status": "decomposed",
+            "slots": [s.name for s in slots],
+            "step_count": len(steps),
+            "structural_signature": structure.structural_signature,
+        }
 
     def add(
         self,

@@ -61,3 +61,21 @@ def skill_signature_hash(
         "tags": sorted(str(t).strip().lower() for t in tags),
     }
     return hashlib.sha256(stable_json(obj).encode("utf-8")).hexdigest()
+
+
+def structural_signature_hash(
+    step_templates: Sequence[str],
+    step_roles: Sequence[str],
+    slot_names: Sequence[str],
+) -> str:
+    """SHA-256 hash of normalized templates + roles + sorted slot names.
+
+    Two skills with the same structural signature share the same recipe
+    structure, even if their slot values differ.
+    """
+    obj = {
+        "templates": [str(t).strip().lower() for t in step_templates],
+        "roles": [str(r).strip().lower() for r in step_roles],
+        "slot_names": sorted(str(n).strip().lower() for n in slot_names),
+    }
+    return hashlib.sha256(stable_json(obj).encode("utf-8")).hexdigest()

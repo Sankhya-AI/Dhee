@@ -355,11 +355,20 @@ class FullMemory(SmartMemory):
         args: Optional[Dict[str, Any]] = None,
         result_summary: str = "",
         error: Optional[str] = None,
+        slot_values: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
-        """Record a step in an active trajectory."""
+        """Record a step in an active trajectory.
+
+        If slot_values are provided, they are stored in state_snapshot
+        for later structural mining.
+        """
         recorder = self._active_recorders.get(recorder_id)
         if recorder is None:
             return {"error": f"No active recorder: {recorder_id}"}
+
+        state_snapshot = None
+        if slot_values:
+            state_snapshot = {"slot_values": slot_values}
 
         step = recorder.record_step(
             action=action,
@@ -367,6 +376,7 @@ class FullMemory(SmartMemory):
             args=args,
             result_summary=result_summary,
             error=error,
+            state_snapshot=state_snapshot,
         )
         return {
             "recorder_id": recorder_id,
@@ -1051,65 +1061,128 @@ class FullMemory(SmartMemory):
             and not mem_categories
         )
 
-        # Site 1: Parallel echo encoding + category detection
-        _use_parallel = (
-            self._executor is not None
-            and self.parallel_config
-            and self.parallel_config.parallel_add
-            and _should_categorize
-            and self.echo_processor
+        # Pre-extracted data from unified enrichment (used to skip redundant post-store calls)
+        _unified_entities = None   # List[Entity] or None
+        _unified_profiles = None   # List[ProfileUpdate] or None
+
+        # Determine echo depth for unified path check
+        _depth_for_echo = EchoDepth(echo_depth) if echo_depth else None
+        if _depth_for_echo is None and self.echo_processor and hasattr(self.echo_processor, '_assess_depth'):
+            try:
+                _depth_for_echo = self.echo_processor._assess_depth(content)
+            except Exception:
+                _depth_for_echo = EchoDepth.MEDIUM
+
+        # Site 0: Unified enrichment (single LLM call for echo+category+entities+profiles)
+        _use_unified = (
+            self.unified_enrichment is not None
             and self.echo_config.enable_echo
+            and _depth_for_echo != EchoDepth.SHALLOW  # shallow is LLM-free
         )
 
-        if _use_parallel:
-            # Run echo and category detection in parallel (both only read content)
-            def _do_echo():
-                depth_override = EchoDepth(echo_depth) if echo_depth else None
-                return self.echo_processor.process(content, depth=depth_override)
+        if _use_unified:
+            enrichment_config = getattr(self.config, "enrichment", None)
+            existing_cats = None
+            if self.category_processor:
+                cats = self.category_processor.get_all_categories()
+                if cats:
+                    existing_cats = "\n".join(
+                        f"- {c['id']}: {c['name']} — {c.get('description', '')}"
+                        for c in cats[:30]
+                    )
 
-            def _do_category():
-                return self.category_processor.detect_category(
-                    content,
-                    metadata=mem_metadata,
-                    use_llm=self.category_config.use_llm_categorization,
-                )
-
-            echo_result_p, category_match = self._executor.run_parallel([
-                (_do_echo, ()),
-                (_do_category, ()),
-            ])
+            enrichment = self.unified_enrichment.enrich(
+                content=content,
+                depth=_depth_for_echo or EchoDepth.MEDIUM,
+                existing_categories=existing_cats,
+                include_entities=enrichment_config.include_entities if enrichment_config else True,
+                include_profiles=enrichment_config.include_profiles if enrichment_config else True,
+            )
 
             # Apply echo result
-            effective_strength = initial_strength * echo_result_p.strength_multiplier
-            mem_metadata.update(echo_result_p.to_metadata())
-            if not mem_categories and echo_result_p.category:
-                mem_categories = [echo_result_p.category]
+            echo_result = enrichment.echo_result
+            if echo_result:
+                effective_strength = initial_strength * echo_result.strength_multiplier
+                mem_metadata.update(echo_result.to_metadata())
+                if not mem_categories and echo_result.category:
+                    mem_categories = [echo_result.category]
+            else:
+                effective_strength = initial_strength
 
             # Apply category result
-            mem_categories = [category_match.category_id]
-            mem_metadata["category_confidence"] = category_match.confidence
-            mem_metadata["category_auto"] = True
+            if enrichment.category_match and not mem_categories:
+                mem_categories = [enrichment.category_match.category_id]
+                mem_metadata["category_confidence"] = enrichment.category_match.confidence
+                mem_metadata["category_auto"] = True
 
-            # Generate embedding (depends on echo result, must be serial)
-            primary_text = self._select_primary_text(content, echo_result_p)
+            # Stash entities + profiles for post-store hooks
+            _unified_entities = enrichment.entities
+            _unified_profiles = enrichment.profile_updates
+
+            # Generate embedding
+            primary_text = self._select_primary_text(content, echo_result)
             embedding = self.embedder.embed(primary_text, memory_action="add")
-            echo_result = echo_result_p
+
         else:
-            # Sequential path (original behavior)
-            if _should_categorize:
-                category_match = self.category_processor.detect_category(
-                    content,
-                    metadata=mem_metadata,
-                    use_llm=self.category_config.use_llm_categorization,
-                )
+            # Site 1: Parallel echo encoding + category detection
+            _use_parallel = (
+                self._executor is not None
+                and self.parallel_config
+                and self.parallel_config.parallel_add
+                and _should_categorize
+                and self.echo_processor
+                and self.echo_config.enable_echo
+            )
+
+            if _use_parallel:
+                # Run echo and category detection in parallel (both only read content)
+                def _do_echo():
+                    depth_override = EchoDepth(echo_depth) if echo_depth else None
+                    return self.echo_processor.process(content, depth=depth_override)
+
+                def _do_category():
+                    return self.category_processor.detect_category(
+                        content,
+                        metadata=mem_metadata,
+                        use_llm=self.category_config.use_llm_categorization,
+                    )
+
+                echo_result_p, category_match = self._executor.run_parallel([
+                    (_do_echo, ()),
+                    (_do_category, ()),
+                ])
+
+                # Apply echo result
+                effective_strength = initial_strength * echo_result_p.strength_multiplier
+                mem_metadata.update(echo_result_p.to_metadata())
+                if not mem_categories and echo_result_p.category:
+                    mem_categories = [echo_result_p.category]
+
+                # Apply category result
                 mem_categories = [category_match.category_id]
                 mem_metadata["category_confidence"] = category_match.confidence
                 mem_metadata["category_auto"] = True
 
-            # Encode memory (echo + embedding).
-            echo_result, effective_strength, mem_categories, embedding = self._encode_memory(
-                content, echo_depth, mem_categories, mem_metadata, initial_strength,
-            )
+                # Generate embedding (depends on echo result, must be serial)
+                primary_text = self._select_primary_text(content, echo_result_p)
+                embedding = self.embedder.embed(primary_text, memory_action="add")
+                echo_result = echo_result_p
+            else:
+                # Sequential path (original behavior)
+                if _should_categorize:
+                    category_match = self.category_processor.detect_category(
+                        content,
+                        metadata=mem_metadata,
+                        use_llm=self.category_config.use_llm_categorization,
+                    )
+                    mem_categories = [category_match.category_id]
+                    mem_metadata["category_confidence"] = category_match.confidence
+                    mem_metadata["category_auto"] = True
+
+                # Encode memory (echo + embedding).
+                echo_result, effective_strength, mem_categories, embedding = self._encode_memory(
+                    content, echo_depth, mem_categories, mem_metadata, initial_strength,
+                )
 
         nearest, similarity = self._nearest_memory(embedding, store_filters)
         repeated_threshold = max(self.fadem_config.conflict_similarity_threshold - 0.05, 0.7)
@@ -1277,11 +1350,22 @@ class FullMemory(SmartMemory):
                 )
 
         if self.knowledge_graph:
-            self.knowledge_graph.extract_entities(
-                content=content,
-                memory_id=effective_memory_id,
-                use_llm=self.graph_config.use_llm_extraction,
-            )
+            if _unified_entities is not None:
+                # Use pre-extracted entities from unified enrichment
+                for entity in _unified_entities:
+                    existing = self.knowledge_graph._get_or_create_entity(
+                        entity.name, entity.entity_type,
+                    )
+                    existing.memory_ids.add(effective_memory_id)
+                self.knowledge_graph.memory_entities[effective_memory_id] = {
+                    e.name for e in _unified_entities
+                }
+            else:
+                self.knowledge_graph.extract_entities(
+                    content=content,
+                    memory_id=effective_memory_id,
+                    use_llm=self.graph_config.use_llm_extraction,
+                )
             if self.graph_config.auto_link_entities:
                 self.knowledge_graph.link_by_shared_entities(effective_memory_id)
 
@@ -1293,7 +1377,16 @@ class FullMemory(SmartMemory):
 
         if self.profile_processor:
             try:
-                self._update_profiles(effective_memory_id, content, mem_metadata, user_id)
+                if _unified_profiles is not None and _unified_profiles:
+                    # Use pre-extracted profiles from unified enrichment
+                    for profile_update in _unified_profiles:
+                        self.profile_processor.apply_update(
+                            profile_update=profile_update,
+                            memory_id=effective_memory_id,
+                            user_id=user_id or "default",
+                        )
+                else:
+                    self._update_profiles(effective_memory_id, content, mem_metadata, user_id)
             except Exception as e:
                 logger.warning("Profile update failed for %s: %s", effective_memory_id, e)
 

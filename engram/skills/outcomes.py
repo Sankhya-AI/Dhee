@@ -8,8 +8,9 @@ This ensures skills must prove themselves before reaching high confidence.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from engram.skills.schema import Skill
 from engram.skills.store import SkillStore
@@ -19,6 +20,36 @@ logger = logging.getLogger(__name__)
 # Asymmetric weights: failures penalize more than successes reward
 SUCCESS_WEIGHT = 0.10
 FAILURE_WEIGHT = 0.15
+
+
+@dataclass
+class StepOutcome:
+    """Granular outcome for a single step within a skill execution."""
+
+    step_index: int = 0
+    success: bool = True
+    failure_type: Optional[str] = None  # "structural" | "slot"
+    failed_slot: Optional[str] = None
+    notes: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "step_index": self.step_index,
+            "success": self.success,
+            "failure_type": self.failure_type,
+            "failed_slot": self.failed_slot,
+            "notes": self.notes,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "StepOutcome":
+        return cls(
+            step_index=int(data.get("step_index", 0)),
+            success=data.get("success", True),
+            failure_type=data.get("failure_type"),
+            failed_slot=data.get("failed_slot"),
+            notes=data.get("notes"),
+        )
 
 
 def compute_confidence(success_count: int, fail_count: int) -> float:
@@ -58,8 +89,12 @@ class OutcomeTracker:
         skill_id: str,
         success: bool,
         notes: Optional[str] = None,
+        step_outcomes: Optional[List[StepOutcome]] = None,
     ) -> Dict[str, Any]:
         """Log a skill outcome and update confidence.
+
+        If step_outcomes are provided and the skill has structure,
+        per-step confidence/counts are updated too.
 
         Returns updated skill stats.
         """
@@ -73,6 +108,26 @@ class OutcomeTracker:
         else:
             skill.fail_count += 1
 
+        # Granular per-step feedback
+        step_updates = []
+        if step_outcomes and skill.structure is not None:
+            from engram.skills.structure import SkillStructure
+            structure = SkillStructure.from_dict(skill.structure)
+            for so in step_outcomes:
+                if 0 <= so.step_index < len(structure.structured_steps):
+                    step = structure.structured_steps[so.step_index]
+                    if so.success:
+                        step.success_count += 1
+                    else:
+                        step.fail_count += 1
+                    step.confidence = compute_confidence(step.success_count, step.fail_count)
+                    step_updates.append({
+                        "step_index": so.step_index,
+                        "template": step.template,
+                        "new_confidence": round(step.confidence, 4),
+                    })
+            skill.structure = structure.to_dict()
+
         # Recompute confidence
         old_confidence = skill.confidence
         skill.confidence = compute_confidence(skill.success_count, skill.fail_count)
@@ -81,7 +136,7 @@ class OutcomeTracker:
         # Persist
         self._store.save(skill)
 
-        return {
+        result = {
             "skill_id": skill.id,
             "skill_name": skill.name,
             "success": success,
@@ -91,3 +146,6 @@ class OutcomeTracker:
             "fail_count": skill.fail_count,
             "notes": notes,
         }
+        if step_updates:
+            result["step_updates"] = step_updates
+        return result
