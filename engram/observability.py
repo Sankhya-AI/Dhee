@@ -1,24 +1,49 @@
-"""Engram Observability — lightweight no-op stub.
+"""Engram Observability — compatibility-safe no-op implementation.
 
-Full observability (Prometheus export, structured logging, etc.)
-lives in engram-enterprise.
+Core Engram does not require metrics infrastructure at runtime, but enterprise
+and API layers import symbols from this module. Keep this interface stable and
+side-effect free so those imports always succeed.
 """
+
+from __future__ import annotations
+
+import logging
+from contextlib import contextmanager
+from typing import Any, Dict, Iterator
+
+logger = logging.getLogger("engram")
 
 
 class _NoOpMetrics:
     """Drop-in replacement that silently discards all metric calls."""
 
-    def record_add(self, *a, **kw): pass
-    def record_search(self, *a, **kw): pass
-    def record_decay(self, *a, **kw): pass
-    def record_get(self, *a, **kw): pass
-    def record_delete(self, *a, **kw): pass
-    def record_masked_hits(self, *a, **kw): pass
-    def record_staged_commit(self, *a, **kw): pass
-    def record_commit_approval(self, *a, **kw): pass
-    def record_commit_rejection(self, *a, **kw): pass
-    def record_ref_protected_skip(self, *a, **kw): pass
-    def get_summary(self): return {}
+    def __getattr__(self, _: str):
+        def _noop(*args, **kwargs):
+            return None
+
+        return _noop
+
+    @contextmanager
+    def measure(self, *args, **kwargs) -> Iterator[None]:
+        yield
+
+    def get_summary(self) -> Dict[str, Any]:
+        return {}
 
 
 metrics = _NoOpMetrics()
+
+
+def add_metrics_routes(app: Any) -> None:
+    """Register a lightweight /metrics endpoint if FastAPI is available."""
+    try:
+        routes = getattr(app, "routes", [])
+        if any(getattr(route, "path", None) == "/metrics" for route in routes):
+            return
+
+        @app.get("/metrics")
+        async def _metrics_endpoint() -> Dict[str, Any]:
+            return metrics.get_summary()
+    except Exception:
+        # Keep observability strictly non-blocking.
+        return

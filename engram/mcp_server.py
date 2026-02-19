@@ -1,4 +1,4 @@
-"""Engram MCP Server — 18 tools, minimal boilerplate.
+"""Engram MCP Server — 19 tools, minimal boilerplate.
 
 Tools:
  1. remember             — Quick-save (content → memory, infer=False)
@@ -19,6 +19,7 @@ Tools:
 16. analyze_skill_gaps   — Show what transfers vs what needs experimentation
 17. decompose_skill      — Trigger structural decomposition of a flat skill
 18. apply_skill_with_bindings — Apply skill with slot values, includes gap analysis
+19. enrich_pending       — Batch-enrich deferred memories
 """
 
 import json
@@ -176,6 +177,17 @@ TOOLS = [
             "properties": {
                 "content": {"type": "string", "description": "The fact or preference to remember"},
                 "categories": {"type": "array", "items": {"type": "string"}, "description": "Optional categories to tag this memory with (e.g., ['preferences', 'coding'])"},
+                "context": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "role": {"type": "string"},
+                            "content": {"type": "string"},
+                        },
+                    },
+                    "description": "Recent conversation turns (sliding window) for richer memory context",
+                },
             },
             "required": ["content"],
         },
@@ -432,6 +444,17 @@ TOOLS = [
             "required": ["skill_id", "bindings"],
         },
     ),
+    Tool(
+        name="enrich_pending",
+        description="Batch-enrich memories stored with deferred enrichment. Runs echo, category, entity, and profile extraction in batched LLM calls. Use after bulk ingestion to retroactively enrich memories.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "batch_size": {"type": "integer", "description": "Memories per LLM call (default: 10)"},
+                "max_batches": {"type": "integer", "description": "Max batches to process (default: 5)"},
+            },
+        },
+    ),
 ]
 
 
@@ -445,6 +468,7 @@ def _handle_remember(memory, args):
         categories=args.get("categories"),
         source_app="claude-code",
         infer=False,
+        context_messages=args.get("context"),
     )
 
 
@@ -676,6 +700,21 @@ def _handle_apply_skill_with_bindings(memory, args):
     )
 
 
+def _handle_enrich_pending(memory, args):
+    try:
+        batch_size = max(1, min(50, int(args.get("batch_size", 10))))
+    except (ValueError, TypeError):
+        batch_size = 10
+    try:
+        max_batches = max(1, min(100, int(args.get("max_batches", 5))))
+    except (ValueError, TypeError):
+        max_batches = 5
+    return memory.enrich_pending(
+        batch_size=batch_size,
+        max_batches=max_batches,
+    )
+
+
 HANDLERS = {
     "remember": _handle_remember,
     "search_memory": _handle_search_memory,
@@ -695,6 +734,7 @@ HANDLERS = {
     "analyze_skill_gaps": _handle_analyze_skill_gaps,
     "decompose_skill": _handle_decompose_skill,
     "apply_skill_with_bindings": _handle_apply_skill_with_bindings,
+    "enrich_pending": _handle_enrich_pending,
 }
 
 _MEMORY_FREE_TOOLS = {"get_last_session", "save_session_digest"}

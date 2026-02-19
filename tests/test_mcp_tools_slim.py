@@ -1,23 +1,38 @@
-"""Verify MCP server has exactly 8 tools."""
+"""Verify MCP server tool contract."""
 
 from engram import mcp_server
 
+EXPECTED_TOOL_NAMES = {
+    "remember",
+    "search_memory",
+    "get_memory",
+    "get_all_memories",
+    "engram_context",
+    "get_last_session",
+    "save_session_digest",
+    "get_memory_stats",
+    "search_skills",
+    "apply_skill",
+    "log_skill_outcome",
+    "record_trajectory_step",
+    "mine_skills",
+    "get_skill_stats",
+    "search_skills_structural",
+    "analyze_skill_gaps",
+    "decompose_skill",
+    "apply_skill_with_bindings",
+    "enrich_pending",
+}
+
 
 class TestMCPToolsSlim:
-    def test_exactly_8_tools(self):
+    def test_expected_tool_contract(self):
         tools = mcp_server.TOOLS
-        assert len(tools) == 8, f"Expected 8 tools, got {len(tools)}: {[t.name for t in tools]}"
-
-    def test_core_tools_present(self):
         tool_names = [t.name for t in mcp_server.TOOLS]
-        assert "remember" in tool_names
-        assert "search_memory" in tool_names
-        assert "get_memory" in tool_names
-        assert "get_all_memories" in tool_names
-        assert "get_memory_stats" in tool_names
-        assert "engram_context" in tool_names
-        assert "get_last_session" in tool_names
-        assert "save_session_digest" in tool_names
+        assert len(tools) == len(EXPECTED_TOOL_NAMES), (
+            f"Expected {len(EXPECTED_TOOL_NAMES)} tools, got {len(tools)}: {tool_names}"
+        )
+        assert set(tool_names) == EXPECTED_TOOL_NAMES
 
     def test_no_duplicate_tool_names(self):
         tool_names = [t.name for t in mcp_server.TOOLS]

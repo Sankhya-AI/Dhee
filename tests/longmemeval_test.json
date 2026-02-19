@@ -1,0 +1,33 @@
+[
+  {
+    "question_id": "test_q1",
+    "question": "What programming language does the user prefer for machine learning projects?",
+    "haystack_session_ids": ["sess_001", "sess_002", "sess_003", "sess_004"],
+    "haystack_dates": ["2024-01-15", "2024-02-20", "2024-03-10", "2024-04-05"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "I've been thinking about getting into machine learning"},
+        {"role": "assistant", "content": "That's exciting! What interests you most about ML?"},
+        {"role": "user", "content": "I want to build models for image classification. Which language should I start with?"},
+        {"role": "assistant", "content": "Python is the most popular choice for ML. It has great libraries like TensorFlow and PyTorch."}
+      ],
+      [
+        {"role": "user", "content": "I'm setting up my development environment for ML work"},
+        {"role": "assistant", "content": "Great! Make sure to install Python 3.10 and set up a virtual environment."},
+        {"role": "user", "content": "Should I use Conda or venv?"},
+        {"role": "assistant", "content": "Both work well. Conda is convenient for data science as it comes with many scientific packages pre-installed."}
+      ],
+      [
+        {"role": "user", "content": "I'm struggling with deploying my models to production"},
+        {"role": "assistant", "content": "What framework are you currently using with Python?"},
+        {"role": "user", "content": "I'm using PyTorch with FastAPI for serving predictions. It's working well."}
+      ],
+      [
+        {"role": "user", "content": "Can you help me optimize a neural network?"},
+        {"role": "assistant", "content": "What kind of optimization are you looking for - training speed or model size?"},
+        {"role": "user", "content": "Training speed mainly. My Python training scripts are taking too long on large datasets."}
+      ]
+    ],
+    "answer_session_ids": ["sess_001", "sess_003"]
+  }
+]

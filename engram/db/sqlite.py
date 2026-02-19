@@ -19,6 +19,7 @@ VALID_MEMORY_COLUMNS = frozenset({
     "access_count", "last_accessed", "immutable", "expiration_date",
     "scene_id", "user_id", "agent_id", "run_id", "app_id",
     "memory_type", "s_fast", "s_mid", "s_slow", "content_hash",
+    "conversation_context", "enrichment_status",
 })
 
 VALID_SCENE_COLUMNS = frozenset({
@@ -534,10 +535,6 @@ class CoreSQLiteManager(_SQLiteBase):
             return count
 
 
-# Backward compatibility alias
-SQLiteManager = CoreSQLiteManager
-
-
 class FullSQLiteManager(CoreSQLiteManager):
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -881,6 +878,26 @@ class FullSQLiteManager(CoreSQLiteManager):
         # Content-hash dedup column (idempotent).
         self._ensure_content_hash_column(conn)
 
+        # Deferred enrichment columns (idempotent).
+        self._ensure_deferred_enrichment_columns(conn)
+
+    def _ensure_deferred_enrichment_columns(self, conn: sqlite3.Connection) -> None:
+        """Add conversation_context and enrichment_status columns for deferred enrichment."""
+        if self._is_migration_applied(conn, "v2_deferred_enrichment"):
+            return
+        self._migrate_add_column_conn(conn, "memories", "conversation_context", "TEXT")
+        self._migrate_add_column_conn(conn, "memories", "enrichment_status", "TEXT DEFAULT 'complete'")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_enrichment_status ON memories(enrichment_status)"
+        )
+        # Backfill: existing memories are already enriched.
+        conn.execute(
+            "UPDATE memories SET enrichment_status = 'complete' WHERE enrichment_status IS NULL"
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version) VALUES ('v2_deferred_enrichment')"
+        )
+
     def _ensure_content_hash_column(self, conn: sqlite3.Connection) -> None:
         """Add content_hash column + index for SHA-256 dedup."""
         if self._is_migration_applied(conn, "v2_content_hash"):
@@ -962,8 +979,9 @@ class FullSQLiteManager(CoreSQLiteManager):
                     last_accessed, embedding, related_memories, source_memories, tombstone,
                     confidentiality_scope, namespace, source_type, source_app, source_event_id, decay_lambda,
                     status, importance, sensitivity,
-                    memory_type, s_fast, s_mid, s_slow, content_hash
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    memory_type, s_fast, s_mid, s_slow, content_hash,
+                    conversation_context, enrichment_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     memory_id,
@@ -1000,6 +1018,8 @@ class FullSQLiteManager(CoreSQLiteManager):
                     memory_data.get("s_mid"),
                     memory_data.get("s_slow"),
                     memory_data.get("content_hash"),
+                    memory_data.get("conversation_context"),
+                    memory_data.get("enrichment_status", "complete"),
                 ),
             )
 
@@ -1068,6 +1088,8 @@ class FullSQLiteManager(CoreSQLiteManager):
                 memory_data.get("s_fast"),
                 memory_data.get("s_mid"),
                 memory_data.get("s_slow"),
+                memory_data.get("conversation_context"),
+                memory_data.get("enrichment_status", "complete"),
             ))
             history_rows.append((
                 memory_id, "ADD", None, memory_data.get("memory"), None, None, None, None,
@@ -1083,8 +1105,9 @@ class FullSQLiteManager(CoreSQLiteManager):
                     last_accessed, embedding, related_memories, source_memories, tombstone,
                     confidentiality_scope, namespace, source_type, source_app, source_event_id, decay_lambda,
                     status, importance, sensitivity,
-                    memory_type, s_fast, s_mid, s_slow
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    memory_type, s_fast, s_mid, s_slow,
+                    conversation_context, enrichment_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 insert_rows,
             )
@@ -1330,6 +1353,60 @@ class FullSQLiteManager(CoreSQLiteManager):
                 "UPDATE memories SET strength = ?, updated_at = ? WHERE id = ?",
                 [(strength, now, memory_id) for memory_id, strength in updates.items()],
             )
+
+    def get_pending_enrichment(self, user_id: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+        """Return memories with enrichment_status='pending', ordered oldest first."""
+        with self._get_connection() as conn:
+            if user_id:
+                rows = conn.execute(
+                    "SELECT * FROM memories WHERE enrichment_status = 'pending' AND user_id = ? "
+                    "AND tombstone = 0 ORDER BY created_at ASC LIMIT ?",
+                    (user_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM memories WHERE enrichment_status = 'pending' "
+                    "AND tombstone = 0 ORDER BY created_at ASC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            return [self._row_to_dict(row) for row in rows]
+
+    def update_enrichment_status(self, memory_id: str, status: str) -> None:
+        """Mark a memory's enrichment_status (e.g. 'complete')."""
+        now = _utcnow_iso()
+        with self._get_connection() as conn:
+            conn.execute(
+                "UPDATE memories SET enrichment_status = ?, updated_at = ? WHERE id = ?",
+                (status, now, memory_id),
+            )
+
+    def update_enrichment_bulk(self, updates: List[Dict[str, Any]]) -> None:
+        """Batch-update enrichment results for multiple memories.
+
+        Each dict: {id, metadata, categories, enrichment_status}.
+        """
+        if not updates:
+            return
+        now = _utcnow_iso()
+        with self._get_connection() as conn:
+            for upd in updates:
+                mid = upd["id"]
+                sets = ["updated_at = ?"]
+                params: list = [now]
+                if "metadata" in upd:
+                    sets.append("metadata = ?")
+                    params.append(json.dumps(upd["metadata"]))
+                if "categories" in upd:
+                    sets.append("categories = ?")
+                    params.append(json.dumps(upd["categories"]))
+                if "enrichment_status" in upd:
+                    sets.append("enrichment_status = ?")
+                    params.append(upd["enrichment_status"])
+                params.append(mid)
+                conn.execute(
+                    f"UPDATE memories SET {', '.join(sets)} WHERE id = ?",
+                    params,
+                )
 
     _MEMORY_JSON_FIELDS = ("metadata", "categories", "related_memories", "source_memories")
 
@@ -2070,3 +2147,9 @@ class FullSQLiteManager(CoreSQLiteManager):
             return json.loads(value)
         except Exception:
             return default
+
+
+# Backward compatibility alias
+# Keep SQLiteManager mapped to the full-capability manager so legacy call sites
+# that expect category/scene/profile APIs continue to work.
+SQLiteManager = FullSQLiteManager

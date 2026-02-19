@@ -511,6 +511,7 @@ class FullMemory(SmartMemory):
         scope: Optional[str] = None,
         source_app: Optional[str] = None,
         memory_id: Optional[str] = None,
+        context_messages: Optional[List[Dict[str, str]]] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         processed_metadata, effective_filters = build_filters_and_metadata(
@@ -570,6 +571,7 @@ class FullMemory(SmartMemory):
                 initial_strength=initial_strength,
                 echo_depth=echo_depth,
                 memory_id=memory_id,
+                context_messages=context_messages,
             )
             if result is not None:
                 results.append(result)
@@ -1153,6 +1155,7 @@ class FullMemory(SmartMemory):
         initial_strength: float,
         echo_depth: Optional[str],
         memory_id: Optional[str] = None,
+        context_messages: Optional[List[Dict[str, str]]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Process and store a single memory item. Returns result dict or None if skipped."""
         content = mem.get("content", "").strip()
@@ -1202,6 +1205,31 @@ class FullMemory(SmartMemory):
                 "reason": "ephemeral",
                 "memory": content,
             }
+
+        # --- Deferred enrichment: lite path (0 LLM calls) ---
+        enrichment_config = getattr(self.config, "enrichment", None)
+        if enrichment_config and enrichment_config.defer_enrichment:
+            return self._process_single_memory_lite(
+                content=content,
+                mem_metadata=mem_metadata,
+                mem_categories=mem_categories,
+                context_messages=context_messages,
+                user_id=user_id,
+                agent_id=agent_id,
+                run_id=run_id,
+                app_id=app_id,
+                effective_filters=effective_filters,
+                agent_category=agent_category,
+                connector_id=connector_id,
+                scope=scope,
+                source_app=source_app,
+                immutable=immutable,
+                expiration_date=expiration_date,
+                initial_layer=initial_layer,
+                initial_strength=initial_strength,
+                explicit_remember=explicit_remember,
+                memory_id=memory_id,
+            )
 
         # Resolve store identifiers and scope metadata.
         store_agent_id, store_run_id, store_app_id, store_filters = self._resolve_memory_metadata(
@@ -1607,6 +1635,409 @@ class FullMemory(SmartMemory):
             "memory_type": memory_type,
         }
 
+    def _process_single_memory_lite(
+        self,
+        *,
+        content: str,
+        mem_metadata: Dict[str, Any],
+        mem_categories: List[str],
+        context_messages: Optional[List[Dict[str, str]]],
+        user_id: Optional[str],
+        agent_id: Optional[str],
+        run_id: Optional[str],
+        app_id: Optional[str],
+        effective_filters: Dict[str, Any],
+        agent_category: Optional[str],
+        connector_id: Optional[str],
+        scope: Optional[str],
+        source_app: Optional[str],
+        immutable: bool,
+        expiration_date: Optional[str],
+        initial_layer: str,
+        initial_strength: float,
+        explicit_remember: bool,
+        memory_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Lite processing path for deferred enrichment — 0 LLM calls.
+
+        Stores the memory with regex-extracted keywords, context-enriched
+        embedding, and enrichment_status='pending'. All heavy LLM processing
+        (echo, category, conflict, entities, profiles) is deferred to
+        enrich_pending().
+        """
+        # Resolve store identifiers and scope metadata.
+        store_agent_id, store_run_id, store_app_id, store_filters = self._resolve_memory_metadata(
+            content=content,
+            mem_metadata=mem_metadata,
+            explicit_remember=explicit_remember,
+            agent_id=agent_id,
+            run_id=run_id,
+            app_id=app_id,
+            effective_filters=effective_filters,
+            agent_category=agent_category,
+            connector_id=connector_id,
+            scope=scope,
+            source_app=source_app,
+        )
+
+        high_confidence = explicit_remember or looks_high_confidence(content, mem_metadata)
+
+        # --- Regex keyword extraction (0 LLM calls) ---
+        extracted_keywords: List[str] = []
+        content_lower = content.lower()
+
+        # Extract preference/routine/goal hints
+        for regex, tag in [
+            (_PREFERENCE_HINT_RE, "preference"),
+            (_ROUTINE_HINT_RE, "routine"),
+            (_GOAL_HINT_RE, "goal"),
+        ]:
+            if regex.search(content):
+                extracted_keywords.append(tag)
+
+        # Simple word tokenization for top keywords (skip stopwords)
+        _STOPWORDS = {
+            "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+            "have", "has", "had", "do", "does", "did", "will", "would", "could",
+            "should", "may", "might", "can", "shall", "to", "of", "in", "for",
+            "on", "with", "at", "by", "from", "as", "into", "through", "during",
+            "before", "after", "above", "below", "between", "and", "but", "or",
+            "nor", "not", "so", "yet", "both", "either", "neither", "each",
+            "every", "all", "any", "few", "more", "most", "other", "some", "such",
+            "no", "only", "own", "same", "than", "too", "very", "just", "i", "me",
+            "my", "we", "our", "you", "your", "he", "she", "it", "they", "them",
+            "this", "that", "these", "those", "am", "his", "her", "its",
+        }
+        words = re.findall(r"\b[a-z][a-z0-9_-]{2,}\b", content_lower)
+        word_freq: Dict[str, int] = {}
+        for w in words:
+            if w not in _STOPWORDS:
+                word_freq[w] = word_freq.get(w, 0) + 1
+        top_words = sorted(word_freq, key=lambda w: word_freq[w], reverse=True)[:15]
+        extracted_keywords.extend(top_words)
+
+        # Regex entity extraction (names, dates)
+        name_match = _NAME_HINT_RE.search(content)
+        if name_match:
+            extracted_keywords.append(f"name:{name_match.group(1).strip()}")
+
+        mem_metadata["echo_keywords"] = extracted_keywords
+        mem_metadata["enrichment_status"] = "pending"
+
+        # --- Build rich embedding text (content + context summary) ---
+        context_window = getattr(self.config.enrichment, "context_window_turns", 10)
+        context_summary = ""
+        if context_messages:
+            recent = context_messages[-context_window:]
+            context_lines = [
+                f"{m.get('role', 'user')}: {str(m.get('content', ''))[:200]}"
+                for m in recent
+            ]
+            context_summary = " | ".join(context_lines)
+
+        embed_text = content
+        if context_summary:
+            embed_text += f" [Context: {context_summary[:500]}]"
+
+        # --- Generate embedding (1 API call, NOT an LLM call) ---
+        embedding = self.embedder.embed(embed_text, memory_action="add")
+
+        # --- Confidence and layer ---
+        effective_strength = initial_strength
+        if not explicit_remember and not high_confidence:
+            mem_metadata["policy_low_confidence"] = True
+            effective_strength = min(effective_strength, 0.4)
+
+        layer = initial_layer
+        if layer == "auto":
+            layer = "sml"
+
+        # --- Metadata ---
+        confidentiality_scope = str(
+            mem_metadata.get("confidentiality_scope")
+            or mem_metadata.get("privacy_scope")
+            or "work"
+        ).lower()
+        source_type = (
+            mem_metadata.get("source_type")
+            or ("cli" if (source_app or "").lower() == "cli" else "mcp")
+        )
+        namespace_value = str(mem_metadata.get("namespace", "default") or "default").strip() or "default"
+        memory_type = self._classify_memory_type(mem_metadata, mem_metadata.get("role", "user"))
+
+        # Multi-trace strength
+        s_fast_val = s_mid_val = s_slow_val = None
+        if self.distillation_config and self.distillation_config.enable_multi_trace:
+            s_fast_val, s_mid_val, s_slow_val = initialize_traces(effective_strength, is_new=True)
+
+        # Content hash for dedup
+        from engram.memory.core import _content_hash
+        ch = _content_hash(content)
+        existing = self.db.get_memory_by_content_hash(ch, user_id) if hasattr(self.db, 'get_memory_by_content_hash') else None
+        if existing:
+            self.db.increment_access(existing["id"])
+            return {
+                "id": existing["id"],
+                "memory": existing.get("memory", ""),
+                "event": "DEDUPLICATED",
+                "layer": existing.get("layer", "sml"),
+                "strength": existing.get("strength", 1.0),
+            }
+
+        effective_memory_id = memory_id or str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+
+        # Serialize conversation context
+        context_json = None
+        if context_messages:
+            recent = context_messages[-context_window:]
+            context_json = json.dumps(recent)
+
+        memory_data = {
+            "id": effective_memory_id,
+            "memory": content,
+            "user_id": user_id,
+            "agent_id": store_agent_id,
+            "run_id": store_run_id,
+            "app_id": store_app_id,
+            "metadata": mem_metadata,
+            "categories": mem_categories,
+            "immutable": immutable,
+            "expiration_date": expiration_date,
+            "created_at": now,
+            "updated_at": now,
+            "layer": layer,
+            "strength": effective_strength,
+            "access_count": 0,
+            "last_accessed": now,
+            "embedding": embedding,
+            "confidentiality_scope": confidentiality_scope,
+            "source_type": source_type,
+            "source_app": source_app or mem_metadata.get("source_app"),
+            "source_event_id": mem_metadata.get("source_event_id"),
+            "decay_lambda": self.fadem_config.sml_decay_rate,
+            "status": "active",
+            "importance": mem_metadata.get("importance", 0.5),
+            "sensitivity": mem_metadata.get("sensitivity", "normal"),
+            "namespace": namespace_value,
+            "memory_type": memory_type,
+            "s_fast": s_fast_val,
+            "s_mid": s_mid_val,
+            "s_slow": s_slow_val,
+            "content_hash": ch,
+            "conversation_context": context_json,
+            "enrichment_status": "pending",
+        }
+
+        # Build vector index (single primary vector, no echo nodes)
+        base_payload = {
+            "memory_id": effective_memory_id,
+            "user_id": user_id,
+            "agent_id": store_agent_id,
+            "run_id": store_run_id,
+            "app_id": store_app_id,
+            "categories": mem_categories,
+            "text": embed_text,
+            "type": "primary",
+            "memory": content,
+        }
+        vectors = [embedding]
+        payloads = [base_payload]
+        vector_ids = [effective_memory_id]
+
+        self.db.add_memory(memory_data)
+        try:
+            self.vector_store.insert(vectors=vectors, payloads=payloads, ids=vector_ids)
+        except Exception as e:
+            logger.error("Vector insert failed for memory %s (lite), rolling back: %s", effective_memory_id, e)
+            try:
+                self.db.delete_memory(effective_memory_id, use_tombstone=False)
+            except Exception as rollback_err:
+                logger.critical("DB rollback also failed for %s: %s", effective_memory_id, rollback_err)
+            raise
+
+        # Scene assignment still works (embedding-based, no LLM)
+        if self.scene_processor:
+            try:
+                self._assign_to_scene(effective_memory_id, content, embedding, user_id, now)
+            except Exception as e:
+                logger.warning("Scene assignment failed for %s (lite): %s", effective_memory_id, e)
+
+        return {
+            "id": effective_memory_id,
+            "memory": content,
+            "event": "ADD",
+            "layer": layer,
+            "strength": effective_strength,
+            "echo_depth": None,
+            "categories": mem_categories,
+            "namespace": namespace_value,
+            "vector_nodes": 1,
+            "memory_type": memory_type,
+            "enrichment_status": "pending",
+        }
+
+    def enrich_pending(
+        self,
+        user_id: str = "default",
+        batch_size: int = 10,
+        max_batches: int = 5,
+    ) -> Dict[str, Any]:
+        """Batch-enrich memories that were stored with deferred enrichment.
+
+        Uses unified enrichment: 1 LLM call per batch_size memories.
+        Returns {enriched_count, batches, remaining}.
+        """
+        limit = batch_size * max_batches
+        pending = self.db.get_pending_enrichment(user_id=user_id, limit=limit)
+        if not pending:
+            return {"enriched_count": 0, "batches": 0, "remaining": 0}
+
+        enriched_count = 0
+        batches_processed = 0
+
+        for start in range(0, len(pending), batch_size):
+            batch = pending[start:start + batch_size]
+            contents = [m.get("memory", "") for m in batch]
+
+            # Try unified enrichment (single LLM call for the batch)
+            enrichment_results = None
+            if self.unified_enrichment is not None:
+                try:
+                    existing_cats = None
+                    if self.category_processor:
+                        cats = self.category_processor.get_all_categories()
+                        if cats:
+                            existing_cats = "\n".join(
+                                f"- {c['id']}: {c['name']} — {c.get('description', '')}"
+                                for c in cats[:30]
+                            )
+
+                    enrichment_results = self.unified_enrichment.enrich_batch(
+                        contents,
+                        depth=EchoDepth.MEDIUM,
+                        existing_categories=existing_cats,
+                        include_entities=True,
+                        include_profiles=True,
+                    )
+                except Exception as e:
+                    logger.warning("Unified batch enrichment failed in enrich_pending: %s", e)
+                    enrichment_results = None
+
+            # Fallback: individual enrichment per memory
+            if enrichment_results is None:
+                enrichment_results = []
+                for c in contents:
+                    if self.unified_enrichment is not None:
+                        try:
+                            enrichment_results.append(
+                                self.unified_enrichment.enrich(c, depth=EchoDepth.MEDIUM)
+                            )
+                        except Exception:
+                            enrichment_results.append(None)
+                    else:
+                        enrichment_results.append(None)
+
+            # Apply enrichment results and update DB
+            db_updates: List[Dict[str, Any]] = []
+            for mem, enrichment in zip(batch, enrichment_results):
+                mem_id = mem["id"]
+                mem_meta = mem.get("metadata", {}) or {}
+                mem_cats = mem.get("categories", []) or []
+
+                if enrichment:
+                    # Apply echo result
+                    if enrichment.echo_result:
+                        mem_meta.update(enrichment.echo_result.to_metadata())
+                        if not mem_cats and enrichment.echo_result.category:
+                            mem_cats = [enrichment.echo_result.category]
+
+                    # Apply category result
+                    if enrichment.category_match and not mem_cats:
+                        mem_cats = [enrichment.category_match.category_id]
+                        mem_meta["category_confidence"] = enrichment.category_match.confidence
+                        mem_meta["category_auto"] = True
+
+                    # Apply extracted facts to metadata
+                    if enrichment.facts:
+                        mem_meta["enrichment_facts"] = enrichment.facts[:8]
+
+                    # Post-store hooks: entities
+                    if self.knowledge_graph and enrichment.entities:
+                        for entity in enrichment.entities:
+                            existing_ent = self.knowledge_graph._get_or_create_entity(
+                                entity.name, entity.entity_type,
+                            )
+                            existing_ent.memory_ids.add(mem_id)
+                        self.knowledge_graph.memory_entities[mem_id] = {
+                            e.name for e in enrichment.entities
+                        }
+
+                    # Post-store hooks: profiles
+                    if self.profile_processor and enrichment.profile_updates:
+                        for profile_update in enrichment.profile_updates:
+                            try:
+                                self.profile_processor.apply_update(
+                                    profile_update=profile_update,
+                                    memory_id=mem_id,
+                                    user_id=user_id,
+                                )
+                            except Exception as e:
+                                logger.warning("Profile update failed during enrichment for %s: %s", mem_id, e)
+
+                    # Generate fact decomposition vectors
+                    if enrichment.facts:
+                        valid_facts = [
+                            (i, f.strip()) for i, f in enumerate(enrichment.facts[:8])
+                            if f.strip() and len(f.strip()) >= 10
+                        ]
+                        if valid_facts:
+                            try:
+                                fact_texts = [ft for _, ft in valid_facts]
+                                fact_embeddings = self.embedder.embed_batch(fact_texts, memory_action="add")
+                                fact_vectors, fact_payloads, fact_ids = [], [], []
+                                for (i, fact_text), fact_emb in zip(valid_facts, fact_embeddings):
+                                    fact_id = f"{mem_id}__fact_{i}"
+                                    fact_vectors.append(fact_emb)
+                                    fact_payloads.append({
+                                        "memory_id": mem_id,
+                                        "is_fact": True,
+                                        "fact_index": i,
+                                        "fact_text": fact_text,
+                                        "user_id": user_id,
+                                    })
+                                    fact_ids.append(fact_id)
+                                if fact_vectors:
+                                    self.vector_store.insert(
+                                        vectors=fact_vectors,
+                                        payloads=fact_payloads,
+                                        ids=fact_ids,
+                                    )
+                            except Exception as e:
+                                logger.warning("Fact embedding failed during enrichment for %s: %s", mem_id, e)
+
+                mem_meta["enrichment_status"] = "complete"
+                db_updates.append({
+                    "id": mem_id,
+                    "metadata": mem_meta,
+                    "categories": mem_cats,
+                    "enrichment_status": "complete",
+                })
+                enriched_count += 1
+
+            # Batch DB update
+            self.db.update_enrichment_bulk(db_updates)
+            batches_processed += 1
+
+        # Check remaining
+        remaining_count = len(self.db.get_pending_enrichment(user_id=user_id, limit=1))
+
+        return {
+            "enriched_count": enriched_count,
+            "batches": batches_processed,
+            "remaining": remaining_count,
+        }
+
     def search(
         self,
         query: str,
@@ -1900,6 +2331,8 @@ class FullMemory(SmartMemory):
                     "memory_type": mem_type,
                     "query_intent": query_intent.value if query_intent else None,
                     "confidence": metadata.get("mm_confidence"),
+                    "conversation_context": memory.get("conversation_context"),
+                    "enrichment_status": memory.get("enrichment_status", "complete"),
                 }
             )
 

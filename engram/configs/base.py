@@ -33,7 +33,7 @@ class LLMConfig(BaseModel):
     provider: str = Field(default="nvidia")
     config: Dict[str, Any] = Field(
         default_factory=lambda: {
-            "model": "qwen/qwen3.5-397b-a17b",
+            "model": "minimaxai/minimax-m2.1",
             "temperature": 0.2,
             "max_tokens": 4096,
         }
@@ -383,6 +383,10 @@ class EnrichmentConfig(BaseModel):
     include_entities: bool = True        # Include entity extraction in unified call
     include_profiles: bool = True        # Include profile extraction in unified call
     max_batch_size: int = 10             # Max memories per unified batch call
+    # Deferred enrichment: store with 0 LLM calls, enrich later in batch
+    defer_enrichment: bool = False       # When True: 0 LLM calls at ingestion
+    context_window_turns: int = 10       # Store last N conversation turns with each memory
+    enrich_on_access: bool = False       # Auto-enrich pending memories when retrieved in search
 
     @field_validator("max_batch_size")
     @classmethod

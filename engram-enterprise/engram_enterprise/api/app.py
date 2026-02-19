@@ -14,7 +14,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from engram import Memory
+from engram.configs.base import EmbedderConfig, LLMConfig, MemoryConfig, VectorStoreConfig
+from engram.memory.main import Memory
 from engram_enterprise.api.auth import (
     enforce_session_issuer,
     get_token_from_request,
@@ -41,6 +42,7 @@ from engram_enterprise.api.schemas import (
     SessionCreateResponse,
 )
 from engram_enterprise.policy import feature_enabled
+from engram_enterprise.kernel import PersonalMemoryKernel
 from engram.exceptions import FadeMemValidationError
 from engram.observability import add_metrics_routes, logger as structured_logger, metrics
 
@@ -103,6 +105,28 @@ add_metrics_routes(app)
 
 _memory: Optional[Memory] = None
 _memory_lock = threading.Lock()
+_kernel: Optional[PersonalMemoryKernel] = None
+_kernel_lock = threading.Lock()
+
+
+def _fallback_memory_config() -> MemoryConfig:
+    data_dir = os.path.join(os.path.expanduser("~"), ".engram")
+    os.makedirs(data_dir, exist_ok=True)
+    dims = 384
+    return MemoryConfig(
+        llm=LLMConfig(provider="mock", config={}),
+        embedder=EmbedderConfig(provider="simple", config={"embedding_dims": dims}),
+        vector_store=VectorStoreConfig(
+            provider="memory",
+            config={
+                "collection_name": "engram_enterprise",
+                "embedding_model_dims": dims,
+            },
+        ),
+        history_db_path=os.path.join(data_dir, "enterprise_history.db"),
+        collection_name="engram_enterprise",
+        embedding_model_dims=dims,
+    )
 
 
 def get_memory() -> Memory:
@@ -110,12 +134,25 @@ def get_memory() -> Memory:
     if _memory is None:
         with _memory_lock:
             if _memory is None:
-                _memory = Memory()
+                try:
+                    _memory = Memory()
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to initialize default Memory config (%s). "
+                        "Falling back to mock/simple in-memory configuration.",
+                        exc,
+                    )
+                    _memory = Memory(config=_fallback_memory_config())
     return _memory
 
 
 def get_kernel():
-    return get_memory().kernel
+    global _kernel
+    if _kernel is None:
+        with _kernel_lock:
+            if _kernel is None:
+                _kernel = PersonalMemoryKernel(get_memory())
+    return _kernel
 
 
 def _extract_content(messages: Optional[Union[str, List[Dict[str, Any]]]], content: Optional[str]) -> str:
