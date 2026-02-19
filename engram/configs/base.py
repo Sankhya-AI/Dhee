@@ -88,6 +88,9 @@ class EchoMemConfig(BaseModel):
     deep_multiplier: float = 1.6
     # Use question_form embedding for primary vector (better query matching)
     use_question_embedding: bool = True
+    # Echo-augmented embedding: compose primary text from content + echo data
+    # (question_form, keywords, first paraphrase) for richer retrieval vectors
+    use_echo_augmented_embedding: bool = True
 
     @field_validator("default_depth")
     @classmethod

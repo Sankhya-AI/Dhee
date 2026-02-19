@@ -690,38 +690,90 @@ class FullMemory(SmartMemory):
             item_meta.update(item.get("metadata") or {})
             item_metadata_list.append(item_meta)
 
-        # 1. Batch echo encoding
+        # 0. Try unified enrichment (single LLM call for echo+category+entities+profiles)
         echo_results = [None] * len(contents)
-        if self.echo_processor and self.echo_config.enable_echo and batch_config.batch_echo:
-            try:
-                depth_override = EchoDepth(echo_depth) if echo_depth else None
-                echo_results = self.echo_processor.process_batch(
-                    contents, depth=depth_override
-                )
-            except Exception as e:
-                logger.warning("Batch echo failed, processing individually: %s", e)
-                for i, c in enumerate(contents):
-                    if c:
-                        try:
-                            depth_override = EchoDepth(echo_depth) if echo_depth else None
-                            echo_results[i] = self.echo_processor.process(c, depth=depth_override)
-                        except Exception:
-                            pass
-
-        # 2. Batch category detection
         category_results = [None] * len(contents)
-        if (
-            self.category_processor
-            and self.category_config.auto_categorize
-            and batch_config.batch_category
-        ):
+        enrichment_results = [None] * len(contents)  # stash for post-store hooks
+
+        enrichment_config = getattr(self.config, "enrichment", None)
+        _use_unified = (
+            self.unified_enrichment is not None
+            and self.echo_config.enable_echo
+            and batch_config.batch_echo
+        )
+
+        if _use_unified:
             try:
-                category_results = self.category_processor.detect_categories_batch(
-                    contents,
-                    use_llm=self.category_config.use_llm_categorization,
-                )
+                depth_override = EchoDepth(echo_depth) if echo_depth else EchoDepth(self.echo_config.default_depth)
+                existing_cats = None
+                if self.category_processor:
+                    cats = self.category_processor.get_all_categories()
+                    if cats:
+                        existing_cats = "\n".join(
+                            f"- {c['id']}: {c['name']} — {c.get('description', '')}"
+                            for c in cats[:30]
+                        )
+
+                # Process in sub-batches of enrichment_config.max_batch_size
+                enrich_batch_size = enrichment_config.max_batch_size if enrichment_config else 10
+                for start in range(0, len(contents), enrich_batch_size):
+                    end = min(start + enrich_batch_size, len(contents))
+                    sub_contents = contents[start:end]
+                    sub_results = self.unified_enrichment.enrich_batch(
+                        sub_contents,
+                        depth=depth_override,
+                        existing_categories=existing_cats,
+                        include_entities=enrichment_config.include_entities if enrichment_config else True,
+                        include_profiles=enrichment_config.include_profiles if enrichment_config else True,
+                    )
+                    for j, enrichment in enumerate(sub_results):
+                        idx = start + j
+                        if enrichment.echo_result:
+                            echo_results[idx] = enrichment.echo_result
+                        if enrichment.category_match:
+                            category_results[idx] = enrichment.category_match
+                        enrichment_results[idx] = enrichment
+
+                logger.info("Unified batch enrichment completed for %d memories", len(contents))
             except Exception as e:
-                logger.warning("Batch category failed: %s", e)
+                logger.warning("Unified batch enrichment failed, falling back to separate: %s", e)
+                # Reset — let the fallback below handle it
+                echo_results = [None] * len(contents)
+                category_results = [None] * len(contents)
+                enrichment_results = [None] * len(contents)
+                _use_unified = False
+
+        # 1. Batch echo encoding (fallback if unified was not used or failed)
+        if not _use_unified:
+            if self.echo_processor and self.echo_config.enable_echo and batch_config.batch_echo:
+                try:
+                    depth_override = EchoDepth(echo_depth) if echo_depth else None
+                    echo_results = self.echo_processor.process_batch(
+                        contents, depth=depth_override
+                    )
+                except Exception as e:
+                    logger.warning("Batch echo failed, processing individually: %s", e)
+                    for i, c in enumerate(contents):
+                        if c:
+                            try:
+                                depth_override = EchoDepth(echo_depth) if echo_depth else None
+                                echo_results[i] = self.echo_processor.process(c, depth=depth_override)
+                            except Exception:
+                                pass
+
+            # 2. Batch category detection
+            if (
+                self.category_processor
+                and self.category_config.auto_categorize
+                and batch_config.batch_category
+            ):
+                try:
+                    category_results = self.category_processor.detect_categories_batch(
+                        contents,
+                        use_llm=self.category_config.use_llm_categorization,
+                    )
+                except Exception as e:
+                    logger.warning("Batch category failed: %s", e)
 
         # 3. Batch embeddings
         primary_texts = []
@@ -731,7 +783,11 @@ class FullMemory(SmartMemory):
 
         if batch_config.batch_embed:
             try:
-                embeddings = self.embedder.embed_batch(primary_texts, memory_action="add")
+                # Sub-batch to stay within API limits (~50 per call)
+                embeddings: List[List[float]] = []
+                for start in range(0, len(primary_texts), 50):
+                    sub = primary_texts[start:start + 50]
+                    embeddings.extend(self.embedder.embed_batch(sub, memory_action="add"))
             except Exception as e:
                 logger.warning("Batch embed failed, falling back to sequential: %s", e)
                 embeddings = [
@@ -741,6 +797,44 @@ class FullMemory(SmartMemory):
             embeddings = [
                 self.embedder.embed(t, memory_action="add") for t in primary_texts
             ]
+
+        # 3b. Pre-embed all echo node texts (paraphrases, questions, content variants)
+        # so _build_index_vectors can use the cache instead of individual embed() calls.
+        echo_node_texts = []
+        for i, content in enumerate(contents):
+            echo_result = echo_results[i]
+            pt = primary_texts[i]
+            if pt != content:
+                cleaned = content.strip()
+                if cleaned:
+                    echo_node_texts.append(cleaned)
+            if echo_result:
+                for p in echo_result.paraphrases:
+                    cleaned = str(p).strip()
+                    if cleaned:
+                        echo_node_texts.append(cleaned)
+                for q in echo_result.questions:
+                    cleaned = str(q).strip()
+                    if cleaned:
+                        echo_node_texts.append(cleaned)
+
+        embedding_cache: Dict[str, List[float]] = {}
+        if echo_node_texts:
+            # Deduplicate while preserving order for batch embedding
+            unique_texts = list(dict.fromkeys(echo_node_texts))
+            try:
+                # Sub-batch to stay within NVIDIA API limits (~50 per call)
+                all_echo_embeddings: List[List[float]] = []
+                for start in range(0, len(unique_texts), 50):
+                    sub = unique_texts[start:start + 50]
+                    sub_embs = self.embedder.embed_batch(sub, memory_action="add")
+                    all_echo_embeddings.extend(sub_embs)
+                for text, emb in zip(unique_texts, all_echo_embeddings):
+                    embedding_cache[text] = emb
+                logger.info("Batch-embedded %d echo node texts in %d API calls",
+                            len(unique_texts), (len(unique_texts) + 49) // 50)
+            except Exception as e:
+                logger.warning("Batch echo node embedding failed, will embed individually: %s", e)
 
         # 4. Build memory records and batch-insert into DB
         processed_metadata_base, effective_filters = build_filters_and_metadata(
@@ -838,6 +932,7 @@ class FullMemory(SmartMemory):
                 agent_id=agent_id,
                 run_id=run_id,
                 app_id=app_id,
+                embedding_cache=embedding_cache if embedding_cache else None,
             )
             if vectors:
                 vector_batch.append((vectors, payloads, vector_ids))
@@ -870,13 +965,86 @@ class FullMemory(SmartMemory):
             except Exception as e:
                 logger.error("Vector insert failed in batch: %s", e)
 
-        # Post-store hooks
+        # Post-store hooks: category stats
         for i, record in enumerate(memory_records):
             if self.category_processor and record.get("categories"):
                 for cat_id in record["categories"]:
                     self.category_processor.update_category_stats(
                         cat_id, record["strength"], is_addition=True
                     )
+
+        # Post-store hooks: fact decomposition (batch embed + insert)
+        all_fact_texts = []
+        all_fact_meta = []  # (memory_id, fact_index)
+        for i, record in enumerate(memory_records):
+            enrichment = enrichment_results[i] if i < len(enrichment_results) else None
+            if enrichment and enrichment.facts:
+                for fi, fact_text in enumerate(enrichment.facts[:8]):
+                    fact_text = fact_text.strip()
+                    if fact_text and len(fact_text) >= 10:
+                        all_fact_texts.append(fact_text)
+                        all_fact_meta.append((record["id"], fi))
+
+        if all_fact_texts:
+            try:
+                # Sub-batch fact embeddings to stay within API limits
+                fact_embeddings: List[List[float]] = []
+                for fs in range(0, len(all_fact_texts), 50):
+                    sub = all_fact_texts[fs:fs + 50]
+                    fact_embeddings.extend(self.embedder.embed_batch(sub, memory_action="add"))
+                fact_vectors = []
+                fact_payloads = []
+                fact_ids = []
+                for (memory_id, fi), fact_text, fact_emb in zip(all_fact_meta, all_fact_texts, fact_embeddings):
+                    fact_id = f"{memory_id}__fact_{fi}"
+                    fact_vectors.append(fact_emb)
+                    fact_payloads.append({
+                        "memory_id": memory_id,
+                        "is_fact": True,
+                        "fact_index": fi,
+                        "fact_text": fact_text,
+                        "user_id": user_id,
+                        "agent_id": agent_id,
+                    })
+                    fact_ids.append(fact_id)
+                if fact_vectors:
+                    self.vector_store.insert(vectors=fact_vectors, payloads=fact_payloads, ids=fact_ids)
+            except Exception as e:
+                logger.warning("Batch fact embedding/insert failed: %s", e)
+
+        # Post-store hooks: entity linking and profile updates
+        for i, record in enumerate(memory_records):
+            enrichment = enrichment_results[i] if i < len(enrichment_results) else None
+            if not enrichment:
+                continue
+            memory_id = record["id"]
+            content = record.get("memory", "")
+
+            if self.knowledge_graph and enrichment.entities:
+                try:
+                    for entity in enrichment.entities:
+                        existing_ent = self.knowledge_graph._get_or_create_entity(
+                            entity.name, entity.entity_type,
+                        )
+                        existing_ent.memory_ids.add(memory_id)
+                    self.knowledge_graph.memory_entities[memory_id] = {
+                        e.name for e in enrichment.entities
+                    }
+                    if self.graph_config.auto_link_entities:
+                        self.knowledge_graph.link_by_shared_entities(memory_id)
+                except Exception as e:
+                    logger.warning("Entity linking failed for %s: %s", memory_id, e)
+
+            if self.profile_processor and enrichment.profile_updates:
+                try:
+                    for profile_update in enrichment.profile_updates:
+                        self.profile_processor.apply_update(
+                            profile_update=profile_update,
+                            memory_id=memory_id,
+                            user_id=record.get("user_id") or user_id or "default",
+                        )
+                except Exception as e:
+                    logger.warning("Profile update failed for %s: %s", memory_id, e)
 
         return results
 
@@ -1064,6 +1232,7 @@ class FullMemory(SmartMemory):
         # Pre-extracted data from unified enrichment (used to skip redundant post-store calls)
         _unified_entities = None   # List[Entity] or None
         _unified_profiles = None   # List[ProfileUpdate] or None
+        _unified_facts = None      # List[str] or None
 
         # Determine echo depth for unified path check
         _depth_for_echo = EchoDepth(echo_depth) if echo_depth else None
@@ -1115,9 +1284,10 @@ class FullMemory(SmartMemory):
                 mem_metadata["category_confidence"] = enrichment.category_match.confidence
                 mem_metadata["category_auto"] = True
 
-            # Stash entities + profiles for post-store hooks
+            # Stash entities + profiles + facts for post-store hooks
             _unified_entities = enrichment.entities
             _unified_profiles = enrichment.profile_updates
+            _unified_facts = enrichment.facts
 
             # Generate embedding
             primary_text = self._select_primary_text(content, echo_result)
@@ -1341,6 +1511,40 @@ class FullMemory(SmartMemory):
                         effective_memory_id, rollback_err,
                     )
                 raise
+
+        # Fact decomposition: store each extracted fact as a sub-vector for direct retrieval.
+        # Each fact gets its own embedding, linked back to the parent memory.
+        # Uses batch embedding (single API call) for efficiency.
+        if _unified_facts:
+            valid_facts = []
+            for i, fact_text in enumerate(_unified_facts[:8]):  # Cap at 8 facts
+                fact_text = fact_text.strip()
+                if fact_text and len(fact_text) >= 10:
+                    valid_facts.append((i, fact_text))
+
+            if valid_facts:
+                try:
+                    fact_texts = [ft for _, ft in valid_facts]
+                    fact_embeddings = self.embedder.embed_batch(fact_texts, memory_action="add")
+                    fact_vectors = []
+                    fact_payloads = []
+                    fact_ids = []
+                    for (i, fact_text), fact_embedding in zip(valid_facts, fact_embeddings):
+                        fact_id = f"{effective_memory_id}__fact_{i}"
+                        fact_vectors.append(fact_embedding)
+                        fact_payloads.append({
+                            "memory_id": effective_memory_id,
+                            "is_fact": True,
+                            "fact_index": i,
+                            "fact_text": fact_text,
+                            "user_id": user_id,
+                            "agent_id": store_agent_id,
+                        })
+                        fact_ids.append(fact_id)
+                    if fact_vectors:
+                        self.vector_store.insert(vectors=fact_vectors, payloads=fact_payloads, ids=fact_ids)
+                except Exception as e:
+                    logger.warning("Fact embedding/insert failed for %s: %s", effective_memory_id, e)
 
         # Post-store hooks.
         if self.category_processor and mem_categories:
@@ -2367,7 +2571,23 @@ class FullMemory(SmartMemory):
         return "semantic"
 
     def _select_primary_text(self, content: str, echo_result: Optional[EchoResult]) -> str:
-        if self.echo_config.use_question_embedding and echo_result and echo_result.question_form:
+        if not echo_result:
+            return content
+
+        # Echo-augmented embedding: compose content + echo data for richer vectors.
+        # Multiple retrieval paths in one embedding — like the brain's multi-path access.
+        if self.echo_config.use_echo_augmented_embedding:
+            parts = [content[:1500]]  # Keep original content (capped to leave room)
+            if echo_result.question_form:
+                parts.append(echo_result.question_form)
+            if echo_result.keywords:
+                parts.append("Keywords: " + ", ".join(echo_result.keywords[:10]))
+            if echo_result.paraphrases:
+                parts.append(echo_result.paraphrases[0])
+            return "\n".join(parts)
+
+        # Legacy: replace content with question_form only
+        if self.echo_config.use_question_embedding and echo_result.question_form:
             return echo_result.question_form
         return content
 
@@ -2522,6 +2742,7 @@ class FullMemory(SmartMemory):
         agent_id: Optional[str],
         run_id: Optional[str],
         app_id: Optional[str],
+        embedding_cache: Optional[Dict[str, List[float]]] = None,
     ) -> tuple[List[List[float]], List[Dict[str, Any]], List[str]]:
         base_payload = dict(metadata)
         base_payload.update(
@@ -2571,7 +2792,13 @@ class FullMemory(SmartMemory):
             if echo_result and echo_result.category:
                 payload["category"] = echo_result.category
 
-            vectors.append(vector if vector is not None else self.embedder.embed(cleaned, memory_action="add"))
+            if vector is not None:
+                emb = vector
+            elif embedding_cache is not None and cleaned in embedding_cache:
+                emb = embedding_cache[cleaned]
+            else:
+                emb = self.embedder.embed(cleaned, memory_action="add")
+            vectors.append(emb)
             payloads.append(payload)
             vector_ids.append(node_id or str(uuid.uuid4()))
 

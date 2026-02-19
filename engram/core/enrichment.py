@@ -140,6 +140,7 @@ class UnifiedEnrichmentOutput(BaseModel):
     category: UnifiedCategoryOutput = Field(default_factory=UnifiedCategoryOutput)
     entities: List[UnifiedEntityOutput] = []
     profiles: List[UnifiedProfileOutput] = []
+    facts: List[str] = []
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +155,7 @@ class EnrichmentResult:
     category_match: Optional[CategoryMatch] = None
     entities: List[Entity] = field(default_factory=list)
     profile_updates: List[ProfileUpdate] = field(default_factory=list)
+    facts: List[str] = field(default_factory=list)
     raw_response: str = ""
 
 
@@ -284,7 +286,7 @@ class UnifiedEnrichmentProcessor:
         cats = existing_categories or self._format_existing_categories()
         depth_instructions = _DEPTH_INSTRUCTIONS.get(depth, _DEPTH_INSTRUCTIONS[EchoDepth.MEDIUM])
         memories_block = "\n".join(
-            f"[{i}] {c[:500]}" for i, c in enumerate(contents)
+            f"[{i}] {c[:2000]}" for i, c in enumerate(contents)
         )
         return UNIFIED_ENRICHMENT_BATCH_PROMPT.format(
             memories_block=memories_block,
@@ -333,6 +335,7 @@ class UnifiedEnrichmentProcessor:
             category_match=self._to_category_match(unified.category),
             entities=self._to_entities(unified.entities),
             profile_updates=self._to_profile_updates(unified.profiles),
+            facts=[f for f in unified.facts if isinstance(f, str) and f.strip()],
             raw_response=response,
         )
 
@@ -367,6 +370,7 @@ class UnifiedEnrichmentProcessor:
                         category_match=self._to_category_match(unified.category),
                         entities=self._to_entities(unified.entities),
                         profile_updates=self._to_profile_updates(unified.profiles),
+                        facts=[f for f in unified.facts if isinstance(f, str) and f.strip()],
                     ))
                     continue
                 except Exception:

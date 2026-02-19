@@ -18,6 +18,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from engram import FullMemory as Memory
 from engram.configs.base import (
+    BatchConfig,
     CategoryMemConfig,
     EchoMemConfig,
     EmbedderConfig,
@@ -155,7 +156,7 @@ def build_memory(
         "embedding_model_dims": embedding_dims,
     }
 
-    llm_cfg: Dict[str, Any] = {}
+    llm_cfg: Dict[str, Any] = {"max_tokens": 8192, "timeout": 300, "model": "meta/llama-3.3-70b-instruct"}
     if llm_model:
         llm_cfg["model"] = llm_model
     embedder_cfg: Dict[str, Any] = {"embedding_dims": embedding_dims}
@@ -168,12 +169,13 @@ def build_memory(
         embedder=EmbedderConfig(provider=embedder_provider, config=embedder_cfg),
         history_db_path=history_db_path,
         embedding_model_dims=embedding_dims,
-        echo=EchoMemConfig(enable_echo=full_potential),
+        echo=EchoMemConfig(enable_echo=full_potential, default_depth="deep"),
         category=CategoryMemConfig(use_llm_categorization=full_potential, enable_categories=full_potential),
         graph=KnowledgeGraphConfig(enable_graph=full_potential),
         scene=SceneConfig(use_llm_summarization=full_potential, enable_scenes=full_potential),
         profile=ProfileConfig(use_llm_extraction=full_potential, enable_profiles=full_potential),
-        enrichment=EnrichmentConfig(enable_unified=full_potential),
+        enrichment=EnrichmentConfig(enable_unified=full_potential, max_batch_size=10),
+        batch=BatchConfig(enable_batch=full_potential, max_batch_size=50),
     )
     mem = Memory(config)
     # FullMemory features (categories, scenes, profiles) need FullSQLiteManager
@@ -270,28 +272,49 @@ def run_longmemeval(args: argparse.Namespace) -> Dict[str, Any]:
                 session_ids = entry.get("haystack_session_ids") or []
                 session_dates = entry.get("haystack_dates") or []
                 sessions = entry.get("haystack_sessions") or []
+
+                # Build batch items for all sessions
+                batch_items = []
                 for sess_id, sess_date, sess_turns in zip(session_ids, session_dates, sessions):
                     payload = format_session_memory(str(sess_id), str(sess_date), sess_turns or [])
+                    batch_items.append({
+                        "content": payload,
+                        "metadata": {
+                            "session_id": str(sess_id),
+                            "session_date": str(sess_date),
+                            "question_id": question_id,
+                        },
+                        "categories": ["longmemeval", "session"],
+                    })
+
+                # Use add_batch for fewer LLM calls; fallback to sequential on failure
+                if batch_items:
                     try:
-                        memory.add(
-                            messages=payload,
+                        memory.add_batch(
+                            items=batch_items,
                             user_id=args.user_id,
-                            metadata={
-                                "session_id": str(sess_id),
-                                "session_date": str(sess_date),
-                                "question_id": question_id,
-                            },
-                            categories=["longmemeval", "session"],
-                            infer=False,
                         )
                     except Exception as e:
-                        logger.warning("Skipping session %s for question %s: %s", sess_id, question_id, e)
+                        logger.warning("Batch add failed for question %s, retrying sequentially: %s", question_id, e)
+                        for item in batch_items:
+                            try:
+                                memory.add(
+                                    messages=item["content"],
+                                    user_id=args.user_id,
+                                    metadata=item["metadata"],
+                                    categories=item["categories"],
+                                    infer=False,
+                                )
+                            except Exception as e2:
+                                logger.warning("Skipping session for question %s: %s", question_id, e2)
 
                 query = str(entry.get("question", "")).strip()
                 search_payload = memory.search(
                     query=query,
                     user_id=args.user_id,
                     limit=args.top_k,
+                    keyword_search=True,
+                    hybrid_alpha=0.7,
                 )
                 results = search_payload.get("results", [])
 
@@ -383,7 +406,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-questions", type=int, default=-1, help="Cap number of evaluated questions.")
     parser.add_argument("--skip-abstention", action="store_true", help="Skip *_abs questions.")
 
-    parser.add_argument("--top-k", type=int, default=8, help="Number of retrieved memories for context.")
+    parser.add_argument("--top-k", type=int, default=20, help="Number of retrieved memories for context.")
     parser.add_argument("--max-context-chars", type=int, default=12000, help="Maximum context size passed to reader.")
     parser.add_argument("--print-every", type=int, default=25, help="Progress print interval.")
 
