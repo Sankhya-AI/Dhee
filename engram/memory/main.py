@@ -254,6 +254,8 @@ class FullMemory(SmartMemory):
         self._profile_processor: Optional[ProfileProcessor] = None
         self._task_manager: Optional[Any] = None
         self._project_manager: Optional[Any] = None
+        # Neural reranker (lazy init)
+        self._reranker: Optional[Any] = None
         # Trajectory recording and skill mining
         self._trajectory_store: Optional[Any] = None
         self._skill_miner: Optional[Any] = None
@@ -326,6 +328,20 @@ class FullMemory(SmartMemory):
                 mutation_rate=skill_cfg.mutation_rate,
             )
         return self._skill_miner
+
+    @property
+    def reranker(self):
+        """Lazy-initialized neural reranker (only if enabled in config)."""
+        rerank_cfg = getattr(self.config, "rerank", None)
+        if self._reranker is None and rerank_cfg and rerank_cfg.enable_rerank:
+            from engram.retrieval.reranker import create_reranker
+            self._reranker = create_reranker({
+                "provider": rerank_cfg.provider,
+                "model": rerank_cfg.model,
+                "api_key_env": rerank_cfg.api_key_env,
+                **rerank_cfg.config,
+            })
+        return self._reranker
 
     def start_trajectory(
         self,
@@ -2366,6 +2382,28 @@ class FullMemory(SmartMemory):
             self._persist_categories()
 
         results.sort(key=lambda x: x["composite_score"], reverse=True)
+
+        # Neural reranking: cross-encoder second stage on top candidates
+        rerank_cfg = getattr(self.config, "rerank", None)
+        if rerank and self.reranker and results:
+            try:
+                passages = [r.get("memory", "") for r in results[:limit]]
+                reranked = self.reranker.rerank(
+                    query=query,
+                    passages=passages,
+                    top_n=rerank_cfg.top_n if rerank_cfg and rerank_cfg.top_n > 0 else 0,
+                )
+                # Re-order results by reranker logits
+                idx_to_logit = {r["index"]: r["logit"] for r in reranked}
+                for i, result in enumerate(results[:limit]):
+                    result["rerank_logit"] = idx_to_logit.get(i, float("-inf"))
+                results[:limit] = sorted(
+                    results[:limit],
+                    key=lambda x: x.get("rerank_logit", float("-inf")),
+                    reverse=True,
+                )
+            except Exception as e:
+                logger.warning("Reranking failed, using composite_score order: %s", e)
 
         # Metamemory: auto-log knowledge gap when search returns no results
         if not results and self.config.metamemory.auto_log_gaps:

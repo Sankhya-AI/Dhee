@@ -33,11 +33,20 @@ class NvidiaEmbedder(BaseEmbedder):
         self.client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
         self.model = self.config.get("model", "nvidia/nv-embed-v1")
 
-    def _extra_body(self, memory_action: Optional[str] = None) -> dict:
-        """Build extra_body for E5/embedqa models."""
+    def _extra_body(self, memory_action: Optional[str] = None, count: int = 1) -> dict:
+        """Build extra_body for models that need input_type differentiation.
+
+        Args:
+            memory_action: The action type (search, forget, etc.)
+            count: Number of texts in the batch. nemotron-embed requires
+                   modality list length to match input length.
+        """
         if "e5" in self.model or "embedqa" in self.model:
             input_type = "query" if memory_action in ("search", "forget") else "passage"
             return {"input_type": input_type, "truncate": "END"}
+        if "nemotron-embed" in self.model:
+            input_type = "query" if memory_action in ("search", "forget") else "passage"
+            return {"modality": ["text"] * count, "input_type": input_type, "truncate": "END"}
         return {}
 
     def _truncate_if_needed(self, text: str) -> str:
@@ -89,7 +98,7 @@ class NvidiaEmbedder(BaseEmbedder):
         if len(texts) == 1:
             return [self.embed(texts[0], memory_action=memory_action)]
         try:
-            extra_body = self._extra_body(memory_action)
+            extra_body = self._extra_body(memory_action, count=len(texts))
             response = self.client.embeddings.create(
                 input=texts,
                 model=self.model,

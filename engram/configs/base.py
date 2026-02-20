@@ -376,6 +376,16 @@ class TaskConfig(BaseModel):
         return v
 
 
+class RerankConfig(BaseModel):
+    """Configuration for neural reranking (cross-encoder second stage)."""
+    enable_rerank: bool = False
+    provider: str = "nvidia"  # Currently only nvidia supported
+    model: str = "nvidia/llama-3.2-nv-rerankqa-1b-v2"
+    api_key_env: str = "NVIDIA_API_KEY"  # Env var name for API key
+    top_n: int = 0  # Number of results to return after reranking (0 = return all, re-sorted)
+    config: Dict[str, Any] = Field(default_factory=dict)
+
+
 class EnrichmentConfig(BaseModel):
     """Configuration for unified enrichment (single LLM call for echo+category+entities+profiles)."""
     enable_unified: bool = False        # Off by default for backward compat
@@ -481,6 +491,7 @@ class MemoryConfig(BaseModel):
     parallel: ParallelConfig = Field(default_factory=ParallelConfig)
     batch: BatchConfig = Field(default_factory=BatchConfig)
     enrichment: EnrichmentConfig = Field(default_factory=EnrichmentConfig)
+    rerank: RerankConfig = Field(default_factory=RerankConfig)
     skill: SkillConfig = Field(default_factory=SkillConfig)
     task: TaskConfig = Field(default_factory=TaskConfig)
     metamemory: MetamemoryInlineConfig = Field(default_factory=MetamemoryInlineConfig)

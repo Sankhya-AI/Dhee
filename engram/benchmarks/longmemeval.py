@@ -27,6 +27,7 @@ from engram.configs.base import (
     LLMConfig,
     MemoryConfig,
     ProfileConfig,
+    RerankConfig,
     SceneConfig,
     VectorStoreConfig,
 )
@@ -163,6 +164,8 @@ def build_memory(
     embedder_model: Optional[str] = None,
     full_potential: bool = True,
     defer_enrichment: bool = False,
+    enable_rerank: bool = False,
+    rerank_model: Optional[str] = None,
 ) -> Memory:
     """Build Engram Memory for LongMemEval. By default uses full potential (echo, categories, graph, scenes, profiles).
 
@@ -174,12 +177,16 @@ def build_memory(
         "embedding_model_dims": embedding_dims,
     }
 
-    llm_cfg: Dict[str, Any] = {"max_tokens": 8192, "timeout": 300, "model": "meta/llama-3.3-70b-instruct"}
+    llm_cfg: Dict[str, Any] = {"max_tokens": 16384, "timeout": 300, "model": "meta/llama-3.3-70b-instruct"}
     if llm_model:
         llm_cfg["model"] = llm_model
     embedder_cfg: Dict[str, Any] = {"embedding_dims": embedding_dims}
     if embedder_model:
         embedder_cfg["model"] = embedder_model
+
+    rerank_cfg = RerankConfig(enable_rerank=enable_rerank)
+    if rerank_model:
+        rerank_cfg = RerankConfig(enable_rerank=enable_rerank, model=rerank_model)
 
     config = MemoryConfig(
         vector_store=VectorStoreConfig(provider=vector_store_provider, config=vector_cfg),
@@ -194,10 +201,11 @@ def build_memory(
         profile=ProfileConfig(use_llm_extraction=full_potential, enable_profiles=full_potential),
         enrichment=EnrichmentConfig(
             enable_unified=full_potential,
-            max_batch_size=10,
+            max_batch_size=5,
             defer_enrichment=defer_enrichment,
         ),
         batch=BatchConfig(enable_batch=full_potential and not defer_enrichment, max_batch_size=50),
+        rerank=rerank_cfg,
     )
     mem = Memory(config)
     # FullMemory features (categories, scenes, profiles) need FullSQLiteManager
@@ -267,6 +275,8 @@ def run_longmemeval(args: argparse.Namespace) -> Dict[str, Any]:
         embedder_model=args.embedder_model,
         full_potential=args.full_potential,
         defer_enrichment=use_deferred,
+        enable_rerank=getattr(args, "enable_rerank", False),
+        rerank_model=getattr(args, "rerank_model", None),
     )
 
     hf_responder: Optional[HFResponder] = None
@@ -494,6 +504,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vector-store-provider", choices=["memory", "sqlite_vec"], default="memory")
     parser.add_argument("--history-db-path", default="/content/engram-longmemeval.db", help="SQLite db path.")
     parser.add_argument("--defer-enrichment", action="store_true", default=False, help="Use deferred enrichment (0 LLM calls at ingestion, batch enrich after).")
+    parser.add_argument("--enable-rerank", action="store_true", default=False, help="Enable neural reranking (cross-encoder second stage on retrieved results).")
+    parser.add_argument("--rerank-model", default=None, help="Reranker model override (default: nvidia/llama-3.2-nv-rerankqa-1b-v2).")
     args = parser.parse_args()
     args.full_potential = not args.minimal
     args.defer_enrichment = args.defer_enrichment

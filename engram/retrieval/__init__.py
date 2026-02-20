@@ -1,5 +1,10 @@
 """Engram v2 retrieval components."""
 
-from engram.retrieval.dual_search import DualSearchEngine
+try:
+    from engram.retrieval.dual_search import DualSearchEngine
+except ImportError:
+    DualSearchEngine = None
 
-__all__ = ["DualSearchEngine"]
+from engram.retrieval.reranker import NvidiaReranker, create_reranker
+
+__all__ = ["DualSearchEngine", "NvidiaReranker", "create_reranker"]
