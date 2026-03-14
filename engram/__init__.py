@@ -4,26 +4,39 @@
 - EchoMem: Multi-modal encoding for stronger retention
 - CategoryMem: Dynamic hierarchical category organization
 
-Quick Start:
-    from engram import Engram
+Quick Start (zero-config, no API key):
+    from engram import Memory
+    m = Memory()
+    m.add("User prefers Python")
+    results = m.search("programming preferences")
 
-    memory = Engram()
-    memory.add("User prefers Python", user_id="u123")
-    results = memory.search("programming preferences", user_id="u123")
+Tiered Memory Classes:
+    CoreMemory   — lightweight: add/search/delete + decay (no LLM)
+    SmartMemory  — + echo encoding, categories, knowledge graph (needs LLM)
+    FullMemory   — + scenes, profiles, tasks, projects (everything)
+    Memory       — alias for CoreMemory (lightest default)
 """
 
+from engram.memory.core import CoreMemory
+from engram.memory.smart import SmartMemory
+from engram.memory.main import FullMemory
 from engram.simple import Engram
-from engram.memory.main import Memory
 from engram.core.category import CategoryProcessor, Category, CategoryType, CategoryMatch
 from engram.core.echo import EchoProcessor, EchoDepth, EchoResult
 from engram.configs.base import MemoryConfig, FadeMemConfig, EchoMemConfig, CategoryMemConfig, ScopeConfig
 
-__version__ = "0.5.0"
+# Default: CoreMemory (lightest, zero-config)
+Memory = CoreMemory
+
+__version__ = "0.6.0"
 __all__ = [
-    # Simplified interface (recommended)
-    "Engram",
-    # Full interface
+    # Tiered memory classes
+    "CoreMemory",
+    "SmartMemory",
+    "FullMemory",
     "Memory",
+    # Simplified interface
+    "Engram",
     # CategoryMem
     "CategoryProcessor",
     "Category",

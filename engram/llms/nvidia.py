@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 
 class NvidiaLLM(BaseLLM):
-    """LLM provider for NVIDIA API (OpenAI-compatible). Default model: Llama 3.1 8B Instruct."""
+    """LLM provider for NVIDIA API (OpenAI-compatible). Default model: Qwen 3.5 397B."""
 
     def __init__(self, config: Optional[dict] = None):
         super().__init__(config)
@@ -19,21 +19,22 @@ class NvidiaLLM(BaseLLM):
 
         api_key = (
             self.config.get("api_key")
+            or os.getenv("NVIDIA_QWEN_API_KEY")
             or os.getenv("LLAMA_API_KEY")
             or os.getenv("NVIDIA_API_KEY")
         )
         if not api_key:
             raise ValueError(
                 "NVIDIA API key required. Set config['api_key'], "
-                "LLAMA_API_KEY, or NVIDIA_API_KEY env var."
+                "NVIDIA_QWEN_API_KEY, LLAMA_API_KEY, or NVIDIA_API_KEY env var."
             )
 
         base_url = self.config.get("base_url", "https://integrate.api.nvidia.com/v1")
-        timeout = self.config.get("timeout", 60)
+        timeout = self.config.get("timeout", 120)
         self.client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
-        self.model = self.config.get("model", "meta/llama-3.1-8b-instruct")
+        self.model = self.config.get("model", "qwen/qwen3.5-397b-a17b")
         self.temperature = self.config.get("temperature", 0.2)
-        self.max_tokens = self.config.get("max_tokens", 1024)
+        self.max_tokens = self.config.get("max_tokens", 4096)
         self.top_p = self.config.get("top_p", 0.7)
         self.enable_thinking = self.config.get("enable_thinking", False)
 

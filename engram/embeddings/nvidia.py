@@ -33,28 +33,60 @@ class NvidiaEmbedder(BaseEmbedder):
         self.client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
         self.model = self.config.get("model", "nvidia/nv-embed-v1")
 
-    def _extra_body(self, memory_action: Optional[str] = None) -> dict:
-        """Build extra_body for E5/embedqa models."""
+    def _extra_body(self, memory_action: Optional[str] = None, count: int = 1) -> dict:
+        """Build extra_body for models that need input_type differentiation.
+
+        Args:
+            memory_action: The action type (search, forget, etc.)
+            count: Number of texts in the batch. nemotron-embed requires
+                   modality list length to match input length.
+        """
         if "e5" in self.model or "embedqa" in self.model:
             input_type = "query" if memory_action in ("search", "forget") else "passage"
             return {"input_type": input_type, "truncate": "END"}
+        if "nemotron-embed" in self.model:
+            input_type = "query" if memory_action in ("search", "forget") else "passage"
+            return {"modality": ["text"] * count, "input_type": input_type, "truncate": "END"}
         return {}
 
+    def _truncate_if_needed(self, text: str) -> str:
+        """Truncate text to stay within model token limits.
+
+        nv-embed-v1 has a 4096 token limit. Using ~3.5 chars/token as
+        a conservative estimate, cap at 14000 characters.
+        """
+        max_chars = int(self.config.get("max_input_chars", 14000))
+        if len(text) > max_chars:
+            logger.debug("Truncating input from %d to %d chars for embedding", len(text), max_chars)
+            return text[:max_chars]
+        return text
+
     def embed(self, text: str, memory_action: Optional[str] = None) -> List[float]:
-        try:
-            extra_body = self._extra_body(memory_action)
-            response = self.client.embeddings.create(
-                input=[text],
-                model=self.model,
-                encoding_format="float",
-                **({"extra_body": extra_body} if extra_body else {}),
-            )
-            return response.data[0].embedding
-        except Exception as exc:
-            logger.error("NVIDIA embedding failed (model=%s): %s", self.model, exc)
-            raise RuntimeError(
-                f"NVIDIA embedding failed (model={self.model}): {exc}"
-            ) from exc
+        import time as _time
+        text = self._truncate_if_needed(text)
+        max_retries = int(self.config.get("max_retries", 3))
+        last_exc = None
+        for attempt in range(max_retries + 1):
+            try:
+                extra_body = self._extra_body(memory_action)
+                response = self.client.embeddings.create(
+                    input=[text],
+                    model=self.model,
+                    encoding_format="float",
+                    **({"extra_body": extra_body} if extra_body else {}),
+                )
+                return response.data[0].embedding
+            except Exception as exc:
+                last_exc = exc
+                if attempt < max_retries:
+                    delay = min(2 ** attempt, 8)
+                    logger.warning("NVIDIA embed retry %d/%d after %ss: %s", attempt + 1, max_retries, delay, exc)
+                    _time.sleep(delay)
+                else:
+                    logger.error("NVIDIA embedding failed (model=%s): %s", self.model, exc)
+        raise RuntimeError(
+            f"NVIDIA embedding failed (model={self.model}): {last_exc}"
+        ) from last_exc
 
     def embed_batch(
         self, texts: List[str], memory_action: Optional[str] = None
@@ -62,10 +94,11 @@ class NvidiaEmbedder(BaseEmbedder):
         """Native batch embedding — single API call for N texts."""
         if not texts:
             return []
+        texts = [self._truncate_if_needed(t) for t in texts]
         if len(texts) == 1:
             return [self.embed(texts[0], memory_action=memory_action)]
         try:
-            extra_body = self._extra_body(memory_action)
+            extra_body = self._extra_body(memory_action, count=len(texts))
             response = self.client.embeddings.create(
                 input=texts,
                 model=self.model,

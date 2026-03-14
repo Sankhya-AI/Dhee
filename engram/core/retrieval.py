@@ -6,15 +6,7 @@ Requires engram-accel (Rust) for tokenize and BM25 operations.
 import math
 from typing import Dict, List, Any, Optional, Set
 
-try:
-    from engram_accel import tokenize as _rs_tokenize, bm25_score_batch as _rs_bm25_batch
-except ImportError:
-    import re as _re
-
-    def _rs_tokenize(text):
-        return _re.findall(r'\w+', text.lower())
-
-    _rs_bm25_batch = None
+from engram_accel import tokenize as _rs_tokenize, bm25_score_batch as _rs_bm25_batch
 
 
 def composite_score(similarity: float, strength: float) -> float:
@@ -72,18 +64,8 @@ def bm25_score_batch(
     k1: float = 1.5,
     b: float = 0.75,
 ) -> List[float]:
-    """Batch BM25 scoring for N documents (Rust-accelerated with Python fallback)."""
-    if _rs_bm25_batch is not None:
-        return _rs_bm25_batch(query_terms, documents, total_docs, avg_doc_len, k1, b)
-    query_set = set(query_terms)
-    return [
-        calculate_bm25_score(
-            query_set, doc,
-            {t: sum(1 for d in documents if t in d) for t in query_set},
-            total_docs, avg_doc_len, k1, b,
-        )
-        for doc in documents
-    ]
+    """Batch BM25 scoring for N documents (Rust-accelerated)."""
+    return _rs_bm25_batch(query_terms, documents, total_docs, avg_doc_len, k1, b)
 
 
 def calculate_keyword_score(
@@ -114,6 +96,38 @@ def calculate_keyword_score(
 
     score = len(matches) / len(query_terms)
     return score
+
+
+def build_sparse_vector(text: str, dim: int = 30000) -> Dict[int, float]:
+    """Build a sparse BM25-like weight vector from text.
+
+    Tokenizes via Rust, hashes tokens to sparse indices, and returns
+    a dict mapping index → weight. Useful for hybrid dense+sparse search
+    if the vector store supports sparse fields.
+    """
+    import hashlib as _hashlib
+
+    tokens = tokenize(text)
+    if not tokens:
+        return {}
+
+    # Term frequency
+    tf: Dict[str, int] = {}
+    for token in tokens:
+        tf[token] = tf.get(token, 0) + 1
+
+    sparse: Dict[int, float] = {}
+    doc_len = len(tokens)
+    for token, count in tf.items():
+        # Hash token to a sparse index
+        h = int(_hashlib.md5(token.encode("utf-8")).hexdigest(), 16)
+        idx = h % dim
+        # BM25-like weight: tf / (tf + 1)
+        weight = count / (count + 1.0)
+        # Accumulate in case of hash collision
+        sparse[idx] = sparse.get(idx, 0.0) + weight
+
+    return sparse
 
 
 def hybrid_score(

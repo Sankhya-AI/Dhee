@@ -1,8 +1,6 @@
 """Tests for engram-accel Rust acceleration layer.
 
-Tests correctness of both the Rust implementation (if available) and the
-pure-Python fallback. All tests must pass regardless of whether engram_accel
-is installed.
+Tests correctness of the Rust implementation. engram_accel is required.
 """
 
 import math
@@ -13,7 +11,6 @@ from engram.utils.math import (
     cosine_similarity,
     cosine_similarity_batch,
     ACCEL_AVAILABLE,
-    _pure_python_cosine,
 )
 from engram.core.retrieval import tokenize, bm25_score_batch
 
@@ -45,12 +42,17 @@ class TestCosineSimilarity:
 
     def test_high_dimensional(self):
         """Test with 1024-dim vectors (typical embedding size)."""
+        import math as m
         import random
         random.seed(42)
         a = [random.gauss(0, 1) for _ in range(1024)]
         b = [random.gauss(0, 1) for _ in range(1024)]
         result = cosine_similarity(a, b)
-        expected = _pure_python_cosine(a, b)
+        # Manual reference computation
+        dot = sum(x * y for x, y in zip(a, b))
+        na = m.sqrt(sum(x * x for x in a))
+        nb = m.sqrt(sum(x * x for x in b))
+        expected = dot / (na * nb) if na and nb else 0.0
         assert result == pytest.approx(expected, abs=1e-10)
 
     def test_parallel_vectors_different_magnitude(self):
@@ -168,16 +170,12 @@ class TestBM25ScoreBatch:
         assert scores == []
 
 
-# ── Fallback behavior ──────────────────────────────────────────────────
+# ── Rust required ──────────────────────────────────────────────────
 
-class TestFallback:
-    def test_cosine_fallback_works(self):
-        """Even without Rust, cosine_similarity should work."""
-        result = _pure_python_cosine([1.0, 0.0], [1.0, 0.0])
-        assert result == pytest.approx(1.0)
-
-    def test_accel_flag_is_bool(self):
-        assert isinstance(ACCEL_AVAILABLE, bool)
+class TestAccelRequired:
+    def test_accel_is_available(self):
+        """engram_accel Rust extension must be installed."""
+        assert ACCEL_AVAILABLE is True
 
 
 # ── Decay acceleration ─────────────────────────────────────────────────

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -15,19 +16,23 @@ from pathlib import Path
 from statistics import mean
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from engram import Memory
+from engram import FullMemory as Memory
 from engram.configs.base import (
+    BatchConfig,
     CategoryMemConfig,
     EchoMemConfig,
     EmbedderConfig,
+    EnrichmentConfig,
     KnowledgeGraphConfig,
     LLMConfig,
     MemoryConfig,
     ProfileConfig,
+    RerankConfig,
     SceneConfig,
     VectorStoreConfig,
 )
 
+logger = logging.getLogger(__name__)
 
 SESSION_ID_PATTERN = re.compile(r"^Session ID:\s*(?P<session_id>\S+)\s*$", re.MULTILINE)
 HISTORY_HEADER = "User Transcript:"
@@ -39,14 +44,27 @@ def extract_user_only_text(session_turns: Sequence[Dict[str, Any]]) -> str:
     return "\n".join([line for line in lines if line])
 
 
-def format_session_memory(session_id: str, session_date: str, session_turns: Sequence[Dict[str, Any]]) -> str:
-    """Create a memory payload that preserves session metadata in plain text."""
-    user_text = extract_user_only_text(session_turns)
+def format_session_memory(session_id: str, session_date: str, session_turns: Sequence[Dict[str, Any]], include_all_roles: bool = False) -> str:
+    """Create a memory payload that preserves session metadata in plain text.
+
+    When include_all_roles=True, includes both user and assistant turns
+    for richer context in deferred enrichment mode.
+    """
+    if include_all_roles:
+        all_text = []
+        for turn in session_turns:
+            role = turn.get("role", "user")
+            content = str(turn.get("content", "")).strip()
+            if content:
+                all_text.append(f"{role}: {content}")
+        full_text = "\n".join(all_text)
+    else:
+        full_text = extract_user_only_text(session_turns)
     return (
         f"Session ID: {session_id}\n"
         f"Session Date: {session_date}\n"
         f"{HISTORY_HEADER}\n"
-        f"{user_text}"
+        f"{full_text}"
     )
 
 
@@ -145,19 +163,30 @@ def build_memory(
     llm_model: Optional[str] = None,
     embedder_model: Optional[str] = None,
     full_potential: bool = True,
+    defer_enrichment: bool = False,
+    enable_rerank: bool = False,
+    rerank_model: Optional[str] = None,
 ) -> Memory:
-    """Build Engram Memory for LongMemEval. By default uses full potential (echo, categories, graph, scenes, profiles)."""
+    """Build Engram Memory for LongMemEval. By default uses full potential (echo, categories, graph, scenes, profiles).
+
+    When defer_enrichment=True, ingestion uses 0 LLM calls (store fast), and
+    enrichment is done in batch after all sessions are loaded.
+    """
     vector_cfg: Dict[str, Any] = {
         "collection_name": "engram_longmemeval",
         "embedding_model_dims": embedding_dims,
     }
 
-    llm_cfg: Dict[str, Any] = {}
+    llm_cfg: Dict[str, Any] = {"max_tokens": 16384, "timeout": 300, "model": "meta/llama-3.3-70b-instruct"}
     if llm_model:
         llm_cfg["model"] = llm_model
     embedder_cfg: Dict[str, Any] = {"embedding_dims": embedding_dims}
     if embedder_model:
         embedder_cfg["model"] = embedder_model
+
+    rerank_cfg = RerankConfig(enable_rerank=enable_rerank)
+    if rerank_model:
+        rerank_cfg = RerankConfig(enable_rerank=enable_rerank, model=rerank_model)
 
     config = MemoryConfig(
         vector_store=VectorStoreConfig(provider=vector_store_provider, config=vector_cfg),
@@ -165,13 +194,25 @@ def build_memory(
         embedder=EmbedderConfig(provider=embedder_provider, config=embedder_cfg),
         history_db_path=history_db_path,
         embedding_model_dims=embedding_dims,
-        echo=EchoMemConfig(enable_echo=full_potential),
+        echo=EchoMemConfig(enable_echo=full_potential, default_depth="deep"),
         category=CategoryMemConfig(use_llm_categorization=full_potential, enable_categories=full_potential),
         graph=KnowledgeGraphConfig(enable_graph=full_potential),
         scene=SceneConfig(use_llm_summarization=full_potential, enable_scenes=full_potential),
         profile=ProfileConfig(use_llm_extraction=full_potential, enable_profiles=full_potential),
+        enrichment=EnrichmentConfig(
+            enable_unified=full_potential,
+            max_batch_size=5,
+            defer_enrichment=defer_enrichment,
+        ),
+        batch=BatchConfig(enable_batch=full_potential and not defer_enrichment, max_batch_size=50),
+        rerank=rerank_cfg,
     )
-    return Memory(config)
+    mem = Memory(config)
+    # FullMemory features (categories, scenes, profiles) need FullSQLiteManager
+    if full_potential:
+        from engram.db.sqlite import FullSQLiteManager
+        mem.db = FullSQLiteManager(history_db_path)
+    return mem
 
 
 def build_context_text(results: Sequence[Dict[str, Any]], max_chars: int) -> str:
@@ -223,6 +264,7 @@ def run_longmemeval(args: argparse.Namespace) -> Dict[str, Any]:
     if args.skip_abstention:
         selected = [entry for entry in selected if "_abs" not in str(entry.get("question_id", ""))]
 
+    use_deferred = getattr(args, "defer_enrichment", False)
     memory = build_memory(
         llm_provider=args.llm_provider,
         embedder_provider=args.embedder_provider,
@@ -232,6 +274,9 @@ def run_longmemeval(args: argparse.Namespace) -> Dict[str, Any]:
         llm_model=args.llm_model,
         embedder_model=args.embedder_model,
         full_potential=args.full_potential,
+        defer_enrichment=use_deferred,
+        enable_rerank=getattr(args, "enable_rerank", False),
+        rerank_model=getattr(args, "rerank_model", None),
     )
 
     hf_responder: Optional[HFResponder] = None
@@ -261,25 +306,82 @@ def run_longmemeval(args: argparse.Namespace) -> Dict[str, Any]:
                 session_ids = entry.get("haystack_session_ids") or []
                 session_dates = entry.get("haystack_dates") or []
                 sessions = entry.get("haystack_sessions") or []
+
+                # Build batch items for all sessions
+                batch_items = []
                 for sess_id, sess_date, sess_turns in zip(session_ids, session_dates, sessions):
-                    payload = format_session_memory(str(sess_id), str(sess_date), sess_turns or [])
-                    memory.add(
-                        messages=payload,
-                        user_id=args.user_id,
-                        metadata={
+                    payload = format_session_memory(
+                        str(sess_id), str(sess_date), sess_turns or [],
+                        include_all_roles=use_deferred,
+                    )
+                    # Build context_messages from session turns for deferred mode
+                    ctx_msgs = None
+                    if use_deferred and sess_turns:
+                        ctx_msgs = [
+                            {"role": t.get("role", "user"), "content": str(t.get("content", "")).strip()}
+                            for t in sess_turns if str(t.get("content", "")).strip()
+                        ]
+                    batch_items.append({
+                        "content": payload,
+                        "metadata": {
                             "session_id": str(sess_id),
                             "session_date": str(sess_date),
                             "question_id": question_id,
                         },
-                        categories=["longmemeval", "session"],
-                        infer=False,
-                    )
+                        "categories": ["longmemeval", "session"],
+                        "_context_messages": ctx_msgs,
+                    })
+
+                # Use add_batch for fewer LLM calls; fallback to sequential on failure
+                if batch_items:
+                    if use_deferred:
+                        # Deferred mode: sequential add with context_messages
+                        for item in batch_items:
+                            try:
+                                memory.add(
+                                    messages=item["content"],
+                                    user_id=args.user_id,
+                                    metadata=item["metadata"],
+                                    categories=item["categories"],
+                                    infer=False,
+                                    context_messages=item.get("_context_messages"),
+                                )
+                            except Exception as e2:
+                                logger.warning("Skipping session for question %s: %s", question_id, e2)
+                    else:
+                        try:
+                            memory.add_batch(
+                                items=batch_items,
+                                user_id=args.user_id,
+                            )
+                        except Exception as e:
+                            logger.warning("Batch add failed for question %s, retrying sequentially: %s", question_id, e)
+                            for item in batch_items:
+                                try:
+                                    memory.add(
+                                        messages=item["content"],
+                                        user_id=args.user_id,
+                                        metadata=item["metadata"],
+                                        categories=item["categories"],
+                                        infer=False,
+                                    )
+                                except Exception as e2:
+                                    logger.warning("Skipping session for question %s: %s", question_id, e2)
+
+                # Batch enrich after all sessions loaded (deferred mode)
+                if use_deferred:
+                    try:
+                        memory.enrich_pending(user_id=args.user_id, batch_size=10, max_batches=50)
+                    except Exception as e:
+                        logger.warning("Enrichment failed for question %s: %s", question_id, e)
 
                 query = str(entry.get("question", "")).strip()
-                search_payload = memory.search_with_context(
+                search_payload = memory.search(
                     query=query,
                     user_id=args.user_id,
                     limit=args.top_k,
+                    keyword_search=True,
+                    hybrid_alpha=0.7,
                 )
                 results = search_payload.get("results", [])
 
@@ -313,6 +415,7 @@ def run_longmemeval(args: argparse.Namespace) -> Dict[str, Any]:
                     include_debug_fields=args.include_debug_fields,
                 )
                 out_f.write(json.dumps(output_row, ensure_ascii=False) + "\n")
+                out_f.flush()
 
                 if retrieval_f is not None:
                     retrieval_row = {
@@ -322,10 +425,11 @@ def run_longmemeval(args: argparse.Namespace) -> Dict[str, Any]:
                         "metrics": metrics,
                     }
                     retrieval_f.write(json.dumps(retrieval_row, ensure_ascii=False) + "\n")
+                    retrieval_f.flush()
 
                 processed += 1
                 if args.print_every > 0 and processed % args.print_every == 0:
-                    print(f"[LongMemEval] processed={processed} question_id={question_id}")
+                    print(f"[LongMemEval] processed={processed} question_id={question_id}", flush=True)
         finally:
             if retrieval_f is not None:
                 retrieval_f.close()
@@ -369,7 +473,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-questions", type=int, default=-1, help="Cap number of evaluated questions.")
     parser.add_argument("--skip-abstention", action="store_true", help="Skip *_abs questions.")
 
-    parser.add_argument("--top-k", type=int, default=8, help="Number of retrieved memories for context.")
+    parser.add_argument("--top-k", type=int, default=20, help="Number of retrieved memories for context.")
     parser.add_argument("--max-context-chars", type=int, default=12000, help="Maximum context size passed to reader.")
     parser.add_argument("--print-every", type=int, default=25, help="Progress print interval.")
 
@@ -399,8 +503,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--embedding-dims", type=int, default=1536, help="Embedding dimensions for simple/memory configs.")
     parser.add_argument("--vector-store-provider", choices=["memory", "sqlite_vec"], default="memory")
     parser.add_argument("--history-db-path", default="/content/engram-longmemeval.db", help="SQLite db path.")
+    parser.add_argument("--defer-enrichment", action="store_true", default=False, help="Use deferred enrichment (0 LLM calls at ingestion, batch enrich after).")
+    parser.add_argument("--enable-rerank", action="store_true", default=False, help="Enable neural reranking (cross-encoder second stage on retrieved results).")
+    parser.add_argument("--rerank-model", default=None, help="Reranker model override (default: nvidia/llama-3.2-nv-rerankqa-1b-v2).")
     args = parser.parse_args()
     args.full_potential = not args.minimal
+    args.defer_enrichment = args.defer_enrichment
     return args
 
 

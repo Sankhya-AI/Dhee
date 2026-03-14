@@ -257,6 +257,56 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
         print("Cancelled.")
 
 
+def cmd_benchmark(args: argparse.Namespace) -> None:
+    """Run performance benchmarks."""
+    import time
+    from engram import Memory
+
+    print("=" * 60)
+    print(" engram benchmark")
+    print("=" * 60)
+
+    # Cold start
+    print("\n[1/4] Cold start time...")
+    start = time.perf_counter()
+    m = Memory()
+    cold_start = time.perf_counter() - start
+    print(f"  Cold start: {cold_start*1000:.1f} ms")
+
+    # Add 100 memories
+    print("\n[2/4] Add 100 memories...")
+    start = time.perf_counter()
+    for i in range(100):
+        m.add(f"Test memory {i}: The quick brown fox jumps over the lazy dog.")
+    add_time = time.perf_counter() - start
+    print(f"  Added 100 memories in {add_time*1000:.1f} ms ({add_time/100*1000:.2f} ms/mem)")
+
+    # Search (cached)
+    print("\n[3/4] Search (cached embedding)...")
+    start = time.perf_counter()
+    for _ in range(10):
+        m.search("quick fox")
+    search_cached = time.perf_counter() - start
+    print(f"  10 searches (cached): {search_cached*1000:.1f} ms ({search_cached/10*1000:.2f} ms/search)")
+
+    # Decay cycle
+    print("\n[4/4] Decay cycle...")
+    start = time.perf_counter()
+    m.apply_decay()
+    decay_time = time.perf_counter() - start
+    print(f"  Decay cycle: {decay_time*1000:.1f} ms")
+
+    # Summary table
+    print("\n" + "=" * 60)
+    print(" Results")
+    print("=" * 60)
+    print(f"  Cold start:        {cold_start*1000:7.1f} ms")
+    print(f"  Add (100 mems):    {add_time*1000:7.1f} ms  ({add_time/100*1000:.2f} ms/mem)")
+    print(f"  Search (cached):   {search_cached/10*1000:7.2f} ms/search")
+    print(f"  Decay cycle:       {decay_time*1000:7.1f} ms")
+    print("=" * 60)
+
+
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------

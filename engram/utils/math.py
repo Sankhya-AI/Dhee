@@ -1,40 +1,12 @@
-"""Shared math utilities for engram.
-
-This module is the single canonical source for cosine similarity and related
-numerical operations. All other modules should import from here.
-
-Requires engram-accel (Rust) for SIMD-optimized operations.
-"""
+"""Vector math — Rust-powered, no fallbacks."""
 
 from typing import List, Optional
+from engram_accel import (
+    cosine_similarity as _rs_cosine,
+    cosine_similarity_batch as _rs_cosine_batch,
+)
 
-import math as _math
-
-try:
-    from engram_accel import (
-        cosine_similarity as _rs_cosine,
-        cosine_similarity_batch as _rs_cosine_batch,
-    )
-    ACCEL_AVAILABLE = True
-except ImportError:
-    ACCEL_AVAILABLE = False
-
-    def _rs_cosine(a, b):
-        dot = sum(x * y for x, y in zip(a, b))
-        na = _math.sqrt(sum(x * x for x in a))
-        nb = _math.sqrt(sum(x * x for x in b))
-        return dot / (na * nb) if na and nb else 0.0
-
-    def _rs_cosine_batch(query, store):
-        return [_rs_cosine(query, v) for v in store]
-
-
-def _pure_python_cosine(a, b):
-    """Pure Python cosine similarity (reference implementation for tests)."""
-    dot = sum(x * y for x, y in zip(a, b))
-    na = _math.sqrt(sum(x * x for x in a))
-    nb = _math.sqrt(sum(x * x for x in b))
-    return dot / (na * nb) if na and nb else 0.0
+ACCEL_AVAILABLE = True
 
 
 def cosine_similarity(a: Optional[List[float]], b: Optional[List[float]]) -> float:

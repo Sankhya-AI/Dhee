@@ -200,6 +200,115 @@ Return JSON:
 Return exactly {count} elements in the results array.
 """
 
+UNIFIED_ENRICHMENT_PROMPT = """You are enriching a memory for a long-term AI memory system.
+Perform ALL analyses in a single pass.
+
+MEMORY: {content}
+ECHO DEPTH: {depth}
+ECHO INSTRUCTIONS: {depth_instructions}
+EXISTING CATEGORIES:
+{existing_categories}
+INCLUDE ENTITIES: {include_entities}
+INCLUDE PROFILES: {include_profiles}
+
+Return ONLY valid JSON matching this schema:
+{{
+  "echo": {{
+    "paraphrases": ["diverse rephrasings"],
+    "keywords": ["core entities/tags"],
+    "implications": ["logical consequences"],
+    "questions": ["questions this answers"],
+    "question_form": "single question-form version of the memory or null",
+    "category": "fact|preference|goal|relationship|event",
+    "importance": 0.0-1.0
+  }},
+  "category": {{
+    "action": "use_existing|create_child|create_new",
+    "category_id": "existing_category_id or null",
+    "new_category": {{
+      "name": "Category Name",
+      "description": "Brief description",
+      "keywords": ["keyword1", "keyword2"],
+      "parent_id": "parent_category_id or null"
+    }},
+    "confidence": 0.0-1.0
+  }},
+  "entities": [
+    {{"name": "entity name", "type": "person|organization|technology|concept|location|project|tool|preference"}}
+  ],
+  "profiles": [
+    {{"name": "person name", "type": "self|contact|entity", "facts": ["fact"], "preferences": ["pref"]}}
+  ],
+  "facts": [
+    "Atomic, self-contained fact 1 extracted from the memory",
+    "Atomic, self-contained fact 2 extracted from the memory"
+  ]
+}}
+
+Rules:
+- Follow ECHO INSTRUCTIONS for which echo fields to populate
+- For paraphrases: ensure EVERY distinct factual claim gets at least one paraphrase. Do NOT only rephrase the main topic — also rephrase secondary/minor details (e.g. if the memory mentions a degree, include a paraphrase about the degree even if the main topic is task management)
+- For questions: generate questions that each factual claim in the memory ANSWERS. Example: memory says "graduated with an MBA" → include "What degree did the user graduate with?" Each fact should have a corresponding question.
+- For category: prefer use_existing when an existing category fits well
+- For entities: extract named entities (people, tech, orgs, tools)
+- For profiles: extract person mentions with their facts/preferences
+- If INCLUDE ENTITIES or INCLUDE PROFILES is "no", return empty arrays for those
+- For facts: extract ALL distinct, searchable facts from the memory as standalone statements
+  - Each fact must be self-contained (understandable without the original context)
+  - Use third person ("User graduated with MBA" not "I graduated with MBA")
+  - Include specific details: names, places, numbers, dates
+  - Extract 3-8 facts per memory (more for longer/richer content)
+  - Facts should be diverse — each captures a DIFFERENT piece of information
+"""
+
+UNIFIED_ENRICHMENT_BATCH_PROMPT = """You are enriching multiple memories for a long-term AI memory system.
+Perform ALL analyses in a single pass for each memory.
+
+MEMORIES:
+{memories_block}
+
+ECHO DEPTH: {depth}
+ECHO INSTRUCTIONS: {depth_instructions}
+EXISTING CATEGORIES:
+{existing_categories}
+INCLUDE ENTITIES: {include_entities}
+INCLUDE PROFILES: {include_profiles}
+
+Return ONLY valid JSON with a "results" array. Each element must include the memory index:
+{{
+  "results": [
+    {{
+      "index": 0,
+      "echo": {{
+        "paraphrases": ["diverse rephrasings"],
+        "keywords": ["core entities/tags"],
+        "implications": ["logical consequences"],
+        "questions": ["questions this answers"],
+        "question_form": "single question-form version or null",
+        "category": "fact|preference|goal|relationship|event",
+        "importance": 0.0-1.0
+      }},
+      "category": {{
+        "action": "use_existing|create_child|create_new",
+        "category_id": "existing_category_id or null",
+        "new_category": null,
+        "confidence": 0.0-1.0
+      }},
+      "entities": [{{"name": "entity name", "type": "person|technology|..."}}],
+      "profiles": [{{"name": "person name", "type": "self|contact|entity", "facts": [], "preferences": []}}],
+      "facts": ["Atomic self-contained fact 1", "Atomic self-contained fact 2"]
+    }}
+  ]
+}}
+
+Rules:
+- For paraphrases: ensure EVERY distinct factual claim gets at least one paraphrase. Do NOT only rephrase the main topic — also rephrase secondary/minor details.
+- For questions: generate questions that each factual claim ANSWERS. Example: "graduated with an MBA" → "What degree did the user graduate with?"
+- For facts: extract ALL distinct, searchable facts as standalone statements. Use third person. Include specifics (names, places, dates). 3-8 facts per memory.
+
+IMPORTANT: Return exactly {count} elements in the results array, one per memory, in the same order.
+"""
+
 FUSION_PROMPT = """You are consolidating multiple related memories into a single, comprehensive memory.
 
 This is part of a biologically-inspired memory system that mimics how human brains consolidate related memories during sleep. The goal is to:

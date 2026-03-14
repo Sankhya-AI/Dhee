@@ -10,7 +10,6 @@ import pytest
 from engram.utils.math import (
     cosine_similarity,
     cosine_similarity_batch,
-    _pure_python_cosine,
     ACCEL_AVAILABLE,
 )
 
@@ -38,10 +37,14 @@ class TestBenchmarks:
         b = STORE_100[0]
         benchmark(cosine_similarity, a, b)
 
-    def test_cosine_python_fallback(self, benchmark):
-        a = QUERY_VEC
-        b = STORE_100[0]
-        benchmark(_pure_python_cosine, a, b)
+    def test_cosine_python_reference(self, benchmark):
+        import math
+        def _python_cosine(a, b):
+            dot = sum(x * y for x, y in zip(a, b))
+            na = math.sqrt(sum(x * x for x in a))
+            nb = math.sqrt(sum(x * x for x in b))
+            return dot / (na * nb) if na and nb else 0.0
+        benchmark(_python_cosine, QUERY_VEC, STORE_100[0])
 
     def test_cosine_batch_100(self, benchmark):
         benchmark(cosine_similarity_batch, QUERY_VEC, STORE_100)

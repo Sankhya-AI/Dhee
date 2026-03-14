@@ -66,13 +66,7 @@ def _read_toml_mcp_servers(path: str) -> Dict[str, Any]:
     """Read MCP servers from a TOML config file (for Codex)."""
     if not os.path.exists(path):
         return {}
-    try:
-        import tomllib
-    except ImportError:
-        try:
-            import tomli as tomllib
-        except ImportError:
-            return {}
+    import tomllib
     with open(path, "rb") as f:
         data = tomllib.load(f)
     return data.get("mcp_servers", data.get("mcpServers", {}))

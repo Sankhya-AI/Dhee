@@ -18,7 +18,8 @@ VALID_MEMORY_COLUMNS = frozenset({
     "decay_lambda", "status", "importance", "sensitivity", "namespace",
     "access_count", "last_accessed", "immutable", "expiration_date",
     "scene_id", "user_id", "agent_id", "run_id", "app_id",
-    "memory_type", "s_fast", "s_mid", "s_slow",
+    "memory_type", "s_fast", "s_mid", "s_slow", "content_hash",
+    "conversation_context", "enrichment_status",
 })
 
 VALID_SCENE_COLUMNS = frozenset({
@@ -44,7 +45,497 @@ def _utcnow_iso() -> str:
     return _utcnow().isoformat()
 
 
-class SQLiteManager:
+class _SQLiteBase:
+    """Base class for SQLite managers with common functionality."""
+
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        db_dir = os.path.dirname(db_path)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
+        # Phase 1: Persistent connection with WAL mode.
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=5000")
+        self._conn.execute("PRAGMA synchronous=FULL")
+        self._conn.execute("PRAGMA cache_size=-8000")  # 8MB cache
+        self._conn.execute("PRAGMA temp_store=MEMORY")
+        self._conn.row_factory = sqlite3.Row
+        self._lock = threading.RLock()
+
+    def close(self) -> None:
+        """Close the persistent connection for clean shutdown."""
+        with self._lock:
+            if self._conn:
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None  # type: ignore[assignment]
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(db_path={self.db_path!r})"
+
+    @contextmanager
+    def _get_connection(self):
+        """Yield the persistent connection under the thread lock."""
+        with self._lock:
+            try:
+                yield self._conn
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def _is_migration_applied(self, conn: sqlite3.Connection, version: str) -> bool:
+        row = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (version,),
+        ).fetchone()
+        return row is not None
+
+    # Phase 5: Allowed table names for ALTER TABLE to prevent SQL injection.
+    _ALLOWED_TABLES = frozenset({
+        "memories", "scenes", "profiles", "categories",
+    })
+
+    def _migrate_add_column_conn(
+        self,
+        conn: sqlite3.Connection,
+        table: str,
+        column: str,
+        col_type: str,
+    ) -> None:
+        """Add a column using an existing connection, if missing."""
+        if table not in self._ALLOWED_TABLES:
+            raise ValueError(f"Invalid table for migration: {table!r}")
+        # Validate column name: must be alphanumeric/underscore only.
+        if not column.replace("_", "").isalnum():
+            raise ValueError(f"Invalid column name: {column!r}")
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+        except sqlite3.OperationalError:
+            pass
+
+    @staticmethod
+    def _parse_json_value(value: Any, default: Any) -> Any:
+        if value is None:
+            return default
+        if isinstance(value, (dict, list)):
+            return value
+        try:
+            return json.loads(value)
+        except Exception:
+            return default
+
+
+class CoreSQLiteManager(_SQLiteBase):
+    """Minimal SQLite manager for CoreMemory - only essential tables.
+
+    Tables created:
+        - memories: core memory storage with content_hash for deduplication
+        - memory_history: audit trail for memory operations
+        - decay_log: decay cycle metrics
+        - schema_migrations: migration tracking
+    """
+
+    def __init__(self, db_path: str):
+        super().__init__(db_path)
+        self._init_db()
+
+    def _init_db(self) -> None:
+        """Initialize minimal schema for CoreMemory."""
+        with self._get_connection() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version TEXT PRIMARY KEY,
+                    applied_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS memories (
+                    id TEXT PRIMARY KEY,
+                    memory TEXT NOT NULL,
+                    user_id TEXT,
+                    agent_id TEXT,
+                    run_id TEXT,
+                    app_id TEXT,
+                    metadata TEXT DEFAULT '{}',
+                    categories TEXT DEFAULT '[]',
+                    immutable INTEGER DEFAULT 0,
+                    expiration_date TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    layer TEXT DEFAULT 'sml' CHECK (layer IN ('sml', 'lml')),
+                    strength REAL DEFAULT 1.0,
+                    access_count INTEGER DEFAULT 0,
+                    last_accessed TEXT DEFAULT CURRENT_TIMESTAMP,
+                    embedding TEXT,
+                    related_memories TEXT DEFAULT '[]',
+                    source_memories TEXT DEFAULT '[]',
+                    tombstone INTEGER DEFAULT 0,
+                    content_hash TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_user_layer ON memories(user_id, layer);
+                CREATE INDEX IF NOT EXISTS idx_strength ON memories(strength DESC);
+                CREATE INDEX IF NOT EXISTS idx_tombstone ON memories(tombstone);
+
+                CREATE TABLE IF NOT EXISTS memory_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    memory_id TEXT NOT NULL,
+                    event TEXT NOT NULL,
+                    old_value TEXT,
+                    new_value TEXT,
+                    old_strength REAL,
+                    new_strength REAL,
+                    old_layer TEXT,
+                    new_layer TEXT,
+                    timestamp TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS decay_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    memories_decayed INTEGER,
+                    memories_forgotten INTEGER,
+                    memories_promoted INTEGER,
+                    storage_before_mb REAL,
+                    storage_after_mb REAL
+                );
+                """
+            )
+            # Migrate content_hash column + index for pre-existing DBs
+            self._ensure_content_hash_column(conn)
+
+    def _ensure_content_hash_column(self, conn: sqlite3.Connection) -> None:
+        """Add content_hash column + index for SHA-256 dedup (idempotent)."""
+        if self._is_migration_applied(conn, "v2_content_hash"):
+            return
+        self._migrate_add_column_conn(conn, "memories", "content_hash", "TEXT")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_content_hash ON memories(content_hash, user_id)"
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version) VALUES ('v2_content_hash')"
+        )
+
+    # Core memory operations
+    def add_memory(self, memory_data: Dict[str, Any]) -> str:
+        memory_id = memory_data.get("id", str(uuid.uuid4()))
+        now = _utcnow_iso()
+        metadata = memory_data.get("metadata", {}) or {}
+
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO memories (
+                    id, memory, user_id, agent_id, run_id, app_id,
+                    metadata, categories, immutable, expiration_date,
+                    created_at, updated_at, layer, strength, access_count,
+                    last_accessed, embedding, related_memories, source_memories, tombstone,
+                    content_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    memory_id,
+                    memory_data.get("memory", ""),
+                    memory_data.get("user_id"),
+                    memory_data.get("agent_id"),
+                    memory_data.get("run_id"),
+                    memory_data.get("app_id"),
+                    json.dumps(memory_data.get("metadata", {})),
+                    json.dumps(memory_data.get("categories", [])),
+                    1 if memory_data.get("immutable", False) else 0,
+                    memory_data.get("expiration_date"),
+                    memory_data.get("created_at", now),
+                    memory_data.get("updated_at", now),
+                    memory_data.get("layer", "sml"),
+                    memory_data.get("strength", 1.0),
+                    memory_data.get("access_count", 0),
+                    memory_data.get("last_accessed", now),
+                    json.dumps(memory_data.get("embedding", [])),
+                    json.dumps(memory_data.get("related_memories", [])),
+                    json.dumps(memory_data.get("source_memories", [])),
+                    1 if memory_data.get("tombstone", False) else 0,
+                    memory_data.get("content_hash"),
+                ),
+            )
+            # Log the add event
+            conn.execute(
+                """
+                INSERT INTO memory_history (
+                    memory_id, event, old_value, new_value,
+                    old_strength, new_strength, old_layer, new_layer
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (memory_id, "ADD", None, memory_data.get("memory"), None, None, None, None),
+            )
+        return memory_id
+
+    def get_memory(self, memory_id: str, include_tombstoned: bool = False) -> Optional[Dict[str, Any]]:
+        query = "SELECT * FROM memories WHERE id = ?"
+        params = [memory_id]
+        if not include_tombstoned:
+            query += " AND tombstone = 0"
+
+        with self._get_connection() as conn:
+            row = conn.execute(query, params).fetchone()
+            if row:
+                return self._row_to_dict(row)
+            return None
+
+    def get_memory_by_content_hash(
+        self, content_hash: str, user_id: str = "default"
+    ) -> Optional[Dict[str, Any]]:
+        """Find an existing memory by content hash (for deduplication)."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM memories WHERE content_hash = ? AND user_id = ? AND tombstone = 0 LIMIT 1",
+                (content_hash, user_id),
+            ).fetchone()
+            if row:
+                return self._row_to_dict(row)
+            return None
+
+    def get_all_memories(
+        self,
+        *,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        app_id: Optional[str] = None,
+        layer: Optional[str] = None,
+        namespace: Optional[str] = None,
+        min_strength: float = 0.0,
+        include_tombstoned: bool = False,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        query = "SELECT * FROM memories WHERE strength >= ?"
+        params: List[Any] = [min_strength]
+
+        if not include_tombstoned:
+            query += " AND tombstone = 0"
+        if user_id:
+            query += " AND user_id = ?"
+            params.append(user_id)
+        if agent_id:
+            query += " AND agent_id = ?"
+            params.append(agent_id)
+        if run_id:
+            query += " AND run_id = ?"
+            params.append(run_id)
+        if app_id:
+            query += " AND app_id = ?"
+            params.append(app_id)
+        if layer:
+            query += " AND layer = ?"
+            params.append(layer)
+
+        query += " ORDER BY strength DESC"
+
+        if limit is not None and limit > 0:
+            query += " LIMIT ?"
+            params.append(limit)
+
+        with self._get_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+            return [self._row_to_dict(row) for row in rows]
+
+    def update_memory(self, memory_id: str, updates: Dict[str, Any]) -> bool:
+        set_clauses = []
+        params: List[Any] = []
+        for key, value in updates.items():
+            if key not in VALID_MEMORY_COLUMNS:
+                raise ValueError(f"Invalid memory column: {key!r}")
+            if key in {"metadata", "categories", "embedding", "related_memories", "source_memories"}:
+                value = json.dumps(value)
+            set_clauses.append(f"{key} = ?")
+            params.append(value)
+
+        set_clauses.append("updated_at = ?")
+        params.append(_utcnow_iso())
+        params.append(memory_id)
+
+        with self._get_connection() as conn:
+            old_row = conn.execute(
+                "SELECT memory, strength, layer FROM memories WHERE id = ?",
+                (memory_id,),
+            ).fetchone()
+            if not old_row:
+                return False
+
+            conn.execute(
+                f"UPDATE memories SET {', '.join(set_clauses)} WHERE id = ?",
+                params,
+            )
+
+            # Log the update event
+            conn.execute(
+                """
+                INSERT INTO memory_history (
+                    memory_id, event, old_value, new_value,
+                    old_strength, new_strength, old_layer, new_layer
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    memory_id,
+                    "UPDATE",
+                    old_row["memory"],
+                    updates.get("memory"),
+                    old_row["strength"],
+                    updates.get("strength"),
+                    old_row["layer"],
+                    updates.get("layer"),
+                ),
+            )
+        return True
+
+    def delete_memory(self, memory_id: str, use_tombstone: bool = True) -> bool:
+        if use_tombstone:
+            return self.update_memory(memory_id, {"tombstone": 1})
+        with self._get_connection() as conn:
+            conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+            self._log_event(memory_id, "DELETE")
+        return True
+
+    def increment_access(self, memory_id: str) -> None:
+        now = _utcnow_iso()
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                UPDATE memories
+                SET access_count = access_count + 1, last_accessed = ?
+                WHERE id = ?
+                """,
+                (now, memory_id),
+            )
+
+    def increment_access_bulk(self, memory_ids: List[str]) -> None:
+        """Increment access count for multiple memories in a single transaction."""
+        if not memory_ids:
+            return
+        now = _utcnow_iso()
+        with self._get_connection() as conn:
+            placeholders = ",".join("?" for _ in memory_ids)
+            conn.execute(
+                f"""
+                UPDATE memories
+                SET access_count = access_count + 1, last_accessed = ?
+                WHERE id IN ({placeholders})
+                """,
+                [now] + list(memory_ids),
+            )
+
+    def get_memories_bulk(
+        self, memory_ids: List[str], include_tombstoned: bool = False
+    ) -> Dict[str, Dict[str, Any]]:
+        """Fetch multiple memories by ID in a single query."""
+        if not memory_ids:
+            return {}
+        with self._get_connection() as conn:
+            placeholders = ",".join("?" for _ in memory_ids)
+            query = f"SELECT * FROM memories WHERE id IN ({placeholders})"
+            if not include_tombstoned:
+                query += " AND tombstone = 0"
+            rows = conn.execute(query, memory_ids).fetchall()
+            return {row["id"]: self._row_to_dict(row) for row in rows}
+
+    def update_strength_bulk(self, updates: Dict[str, float]) -> None:
+        """Batch-update strength for multiple memories."""
+        if not updates:
+            return
+        now = _utcnow_iso()
+        with self._get_connection() as conn:
+            conn.executemany(
+                "UPDATE memories SET strength = ?, updated_at = ? WHERE id = ?",
+                [(strength, now, memory_id) for memory_id, strength in updates.items()],
+            )
+
+    _MEMORY_JSON_FIELDS = ("metadata", "categories", "related_memories", "source_memories")
+
+    def _row_to_dict(self, row: sqlite3.Row, *, skip_embedding: bool = False) -> Dict[str, Any]:
+        data = dict(row)
+        for key in self._MEMORY_JSON_FIELDS:
+            if key in data and data[key]:
+                data[key] = json.loads(data[key])
+        # Embedding is the largest JSON field (~30-50KB for 3072-dim vectors).
+        if skip_embedding:
+            data.pop("embedding", None)
+        elif "embedding" in data and data["embedding"]:
+            data["embedding"] = json.loads(data["embedding"])
+        data["immutable"] = bool(data.get("immutable", 0))
+        data["tombstone"] = bool(data.get("tombstone", 0))
+        return data
+
+    def _log_event(self, memory_id: str, event: str, **kwargs: Any) -> None:
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO memory_history (
+                    memory_id, event, old_value, new_value,
+                    old_strength, new_strength, old_layer, new_layer
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    memory_id,
+                    event,
+                    kwargs.get("old_value"),
+                    kwargs.get("new_value"),
+                    kwargs.get("old_strength"),
+                    kwargs.get("new_strength"),
+                    kwargs.get("old_layer"),
+                    kwargs.get("new_layer"),
+                ),
+            )
+
+    def log_event(self, memory_id: str, event: str, **kwargs: Any) -> None:
+        """Public wrapper for logging custom events like DECAY or FUSE."""
+        self._log_event(memory_id, event, **kwargs)
+
+    def get_history(self, memory_id: str) -> List[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM memory_history WHERE memory_id = ? ORDER BY timestamp DESC",
+                (memory_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    # Alias for CoreMemory compatibility
+    get_memory_history = get_history
+
+    def log_decay(
+        self,
+        decayed: int,
+        forgotten: int,
+        promoted: int,
+        storage_before_mb: Optional[float] = None,
+        storage_after_mb: Optional[float] = None,
+    ) -> None:
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO decay_log (memories_decayed, memories_forgotten, memories_promoted, storage_before_mb, storage_after_mb)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (decayed, forgotten, promoted, storage_before_mb, storage_after_mb),
+            )
+
+    def purge_tombstoned(self) -> int:
+        """Permanently delete all tombstoned memories."""
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT id, user_id, memory FROM memories WHERE tombstone = 1"
+            ).fetchall()
+            count = len(rows)
+            if count > 0:
+                for row in rows:
+                    self._log_event(row["id"], "PURGE", old_value=row["memory"])
+                conn.execute("DELETE FROM memories WHERE tombstone = 1")
+            return count
+
+
+class FullSQLiteManager(CoreSQLiteManager):
     def __init__(self, db_path: str):
         self.db_path = db_path
         db_dir = os.path.dirname(db_path)
@@ -384,6 +875,41 @@ class SQLiteManager:
         # CLS Distillation Memory columns (idempotent).
         self._ensure_cls_columns(conn)
 
+        # Content-hash dedup column (idempotent).
+        self._ensure_content_hash_column(conn)
+
+        # Deferred enrichment columns (idempotent).
+        self._ensure_deferred_enrichment_columns(conn)
+
+    def _ensure_deferred_enrichment_columns(self, conn: sqlite3.Connection) -> None:
+        """Add conversation_context and enrichment_status columns for deferred enrichment."""
+        if self._is_migration_applied(conn, "v2_deferred_enrichment"):
+            return
+        self._migrate_add_column_conn(conn, "memories", "conversation_context", "TEXT")
+        self._migrate_add_column_conn(conn, "memories", "enrichment_status", "TEXT DEFAULT 'complete'")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_enrichment_status ON memories(enrichment_status)"
+        )
+        # Backfill: existing memories are already enriched.
+        conn.execute(
+            "UPDATE memories SET enrichment_status = 'complete' WHERE enrichment_status IS NULL"
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version) VALUES ('v2_deferred_enrichment')"
+        )
+
+    def _ensure_content_hash_column(self, conn: sqlite3.Connection) -> None:
+        """Add content_hash column + index for SHA-256 dedup."""
+        if self._is_migration_applied(conn, "v2_content_hash"):
+            return
+        self._migrate_add_column_conn(conn, "memories", "content_hash", "TEXT")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_content_hash ON memories(content_hash, user_id)"
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version) VALUES ('v2_content_hash')"
+        )
+
     def _ensure_cls_columns(self, conn: sqlite3.Connection) -> None:
         """Add CLS Distillation Memory columns to memories table (idempotent)."""
         if self._is_migration_applied(conn, "v2_cls_columns_complete"):
@@ -453,8 +979,9 @@ class SQLiteManager:
                     last_accessed, embedding, related_memories, source_memories, tombstone,
                     confidentiality_scope, namespace, source_type, source_app, source_event_id, decay_lambda,
                     status, importance, sensitivity,
-                    memory_type, s_fast, s_mid, s_slow
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    memory_type, s_fast, s_mid, s_slow, content_hash,
+                    conversation_context, enrichment_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     memory_id,
@@ -490,6 +1017,9 @@ class SQLiteManager:
                     memory_data.get("s_fast"),
                     memory_data.get("s_mid"),
                     memory_data.get("s_slow"),
+                    memory_data.get("content_hash"),
+                    memory_data.get("conversation_context"),
+                    memory_data.get("enrichment_status", "complete"),
                 ),
             )
 
@@ -558,6 +1088,8 @@ class SQLiteManager:
                 memory_data.get("s_fast"),
                 memory_data.get("s_mid"),
                 memory_data.get("s_slow"),
+                memory_data.get("conversation_context"),
+                memory_data.get("enrichment_status", "complete"),
             ))
             history_rows.append((
                 memory_id, "ADD", None, memory_data.get("memory"), None, None, None, None,
@@ -573,8 +1105,9 @@ class SQLiteManager:
                     last_accessed, embedding, related_memories, source_memories, tombstone,
                     confidentiality_scope, namespace, source_type, source_app, source_event_id, decay_lambda,
                     status, importance, sensitivity,
-                    memory_type, s_fast, s_mid, s_slow
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    memory_type, s_fast, s_mid, s_slow,
+                    conversation_context, enrichment_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 insert_rows,
             )
@@ -598,6 +1131,19 @@ class SQLiteManager:
 
         with self._get_connection() as conn:
             row = conn.execute(query, params).fetchone()
+            if row:
+                return self._row_to_dict(row)
+        return None
+
+    def get_memory_by_content_hash(
+        self, content_hash: str, user_id: str = "default"
+    ) -> Optional[Dict[str, Any]]:
+        """Find an existing memory by content hash (for deduplication)."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM memories WHERE content_hash = ? AND user_id = ? AND tombstone = 0 LIMIT 1",
+                (content_hash, user_id),
+            ).fetchone()
             if row:
                 return self._row_to_dict(row)
         return None
@@ -807,6 +1353,60 @@ class SQLiteManager:
                 "UPDATE memories SET strength = ?, updated_at = ? WHERE id = ?",
                 [(strength, now, memory_id) for memory_id, strength in updates.items()],
             )
+
+    def get_pending_enrichment(self, user_id: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+        """Return memories with enrichment_status='pending', ordered oldest first."""
+        with self._get_connection() as conn:
+            if user_id:
+                rows = conn.execute(
+                    "SELECT * FROM memories WHERE enrichment_status = 'pending' AND user_id = ? "
+                    "AND tombstone = 0 ORDER BY created_at ASC LIMIT ?",
+                    (user_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM memories WHERE enrichment_status = 'pending' "
+                    "AND tombstone = 0 ORDER BY created_at ASC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            return [self._row_to_dict(row) for row in rows]
+
+    def update_enrichment_status(self, memory_id: str, status: str) -> None:
+        """Mark a memory's enrichment_status (e.g. 'complete')."""
+        now = _utcnow_iso()
+        with self._get_connection() as conn:
+            conn.execute(
+                "UPDATE memories SET enrichment_status = ?, updated_at = ? WHERE id = ?",
+                (status, now, memory_id),
+            )
+
+    def update_enrichment_bulk(self, updates: List[Dict[str, Any]]) -> None:
+        """Batch-update enrichment results for multiple memories.
+
+        Each dict: {id, metadata, categories, enrichment_status}.
+        """
+        if not updates:
+            return
+        now = _utcnow_iso()
+        with self._get_connection() as conn:
+            for upd in updates:
+                mid = upd["id"]
+                sets = ["updated_at = ?"]
+                params: list = [now]
+                if "metadata" in upd:
+                    sets.append("metadata = ?")
+                    params.append(json.dumps(upd["metadata"]))
+                if "categories" in upd:
+                    sets.append("categories = ?")
+                    params.append(json.dumps(upd["categories"]))
+                if "enrichment_status" in upd:
+                    sets.append("enrichment_status = ?")
+                    params.append(upd["enrichment_status"])
+                params.append(mid)
+                conn.execute(
+                    f"UPDATE memories SET {', '.join(sets)} WHERE id = ?",
+                    params,
+                )
 
     _MEMORY_JSON_FIELDS = ("metadata", "categories", "related_memories", "source_memories")
 
@@ -1547,3 +2147,9 @@ class SQLiteManager:
             return json.loads(value)
         except Exception:
             return default
+
+
+# Backward compatibility alias
+# Keep SQLiteManager mapped to the full-capability manager so legacy call sites
+# that expect category/scene/profile APIs continue to work.
+SQLiteManager = FullSQLiteManager

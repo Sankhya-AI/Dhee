@@ -22,6 +22,15 @@ if os.path.exists(_ENV_PATH):
                 value = value.strip().strip('"').strip("'")
                 os.environ.setdefault(key.strip(), value)
 
+_NVIDIA_KEYS = (
+    "NVIDIA_API_KEY",
+    "NVIDIA_EMBEDDING_API_KEY",
+    "NVIDIA_QWEN_API_KEY",
+    "LLAMA_API_KEY",
+)
+if not any(os.environ.get(key) for key in _NVIDIA_KEYS):
+    pytest.skip("requires NVIDIA API credentials", allow_module_level=True)
+
 
 @pytest.fixture(scope="session")
 def memory():

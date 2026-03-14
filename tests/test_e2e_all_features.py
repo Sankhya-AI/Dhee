@@ -15,6 +15,8 @@ import threading
 import traceback
 from datetime import datetime, timezone
 
+import pytest
+
 # ── Setup ──────────────────────────────────────────────────────
 
 _ENV_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
@@ -25,6 +27,15 @@ if os.path.exists(_ENV_PATH):
             if line and "=" in line and not line.startswith("#"):
                 key, _, value = line.partition("=")
                 os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+_NVIDIA_KEYS = (
+    "NVIDIA_API_KEY",
+    "NVIDIA_EMBEDDING_API_KEY",
+    "NVIDIA_QWEN_API_KEY",
+    "LLAMA_API_KEY",
+)
+if not any(os.environ.get(key) for key in _NVIDIA_KEYS):
+    pytest.skip("requires NVIDIA API credentials", allow_module_level=True)
 
 from engram.configs.base import (
     MemoryConfig, LLMConfig, EmbedderConfig, VectorStoreConfig,

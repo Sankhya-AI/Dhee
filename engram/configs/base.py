@@ -6,16 +6,16 @@ from pydantic import BaseModel, Field, field_validator
 from engram.configs.active import ActiveMemoryConfig
 
 
-_VALID_VECTOR_PROVIDERS = {"memory", "sqlite_vec"}
+_VALID_VECTOR_PROVIDERS = {"memory", "sqlite_vec", "zvec"}
 _VALID_LLM_PROVIDERS = {"gemini", "openai", "nvidia", "ollama", "mock"}
 _VALID_EMBEDDER_PROVIDERS = {"gemini", "openai", "nvidia", "ollama", "simple"}
 
 
 class VectorStoreConfig(BaseModel):
-    provider: str = Field(default="sqlite_vec")
+    provider: str = Field(default="zvec")
     config: Dict[str, Any] = Field(
         default_factory=lambda: {
-            "path": os.path.join(os.path.expanduser("~"), ".engram", "sqlite_vec.db"),
+            "path": os.path.join(os.path.expanduser("~"), ".engram", "zvec"),
             "collection_name": "fadem_memories",
         }
     )
@@ -33,9 +33,9 @@ class LLMConfig(BaseModel):
     provider: str = Field(default="nvidia")
     config: Dict[str, Any] = Field(
         default_factory=lambda: {
-            "model": "meta/llama-3.1-8b-instruct",
+            "model": "minimaxai/minimax-m2.1",
             "temperature": 0.2,
-            "max_tokens": 1024,
+            "max_tokens": 4096,
         }
     )
 
@@ -88,6 +88,9 @@ class EchoMemConfig(BaseModel):
     deep_multiplier: float = 1.6
     # Use question_form embedding for primary vector (better query matching)
     use_question_embedding: bool = True
+    # Echo-augmented embedding: compose primary text from content + echo data
+    # (question_form, keywords, first paraphrase) for richer retrieval vectors
+    use_echo_augmented_embedding: bool = True
 
     @field_validator("default_depth")
     @classmethod
@@ -325,6 +328,33 @@ class CausalInlineConfig(BaseModel):
     auto_detect_causal_language: bool = True
 
 
+class SkillConfig(BaseModel):
+    """Configuration for the skill-learning agent memory system."""
+    enable_skills: bool = True
+    skill_collection_name: str = "engram_skills"
+    min_confidence_for_auto_apply: float = 0.3
+    enable_mining: bool = True
+    min_trajectory_steps: int = 3
+    mutation_rate: float = 0.05
+    # Structural intelligence
+    enable_structural: bool = True
+    use_llm_decomposition: bool = True
+    structural_similarity_threshold: float = 0.4
+    auto_decompose_on_mine: bool = True
+    auto_decompose_on_import: bool = True
+
+    @field_validator("min_confidence_for_auto_apply", "mutation_rate",
+                     "structural_similarity_threshold")
+    @classmethod
+    def _clamp_unit_float(cls, v: float) -> float:
+        return min(1.0, max(0.0, float(v)))
+
+    @field_validator("min_trajectory_steps")
+    @classmethod
+    def _positive_int(cls, v: int) -> int:
+        return max(1, int(v))
+
+
 class TaskConfig(BaseModel):
     """Configuration for tasks as first-class Engram memories."""
     enable_tasks: bool = True
@@ -344,6 +374,34 @@ class TaskConfig(BaseModel):
         if v not in allowed:
             return "normal"
         return v
+
+
+class RerankConfig(BaseModel):
+    """Configuration for neural reranking (cross-encoder second stage)."""
+    enable_rerank: bool = False
+    provider: str = "nvidia"  # Currently only nvidia supported
+    model: str = "nvidia/llama-3.2-nv-rerankqa-1b-v2"
+    api_key_env: str = "NVIDIA_API_KEY"  # Env var name for API key
+    top_n: int = 0  # Number of results to return after reranking (0 = return all, re-sorted)
+    config: Dict[str, Any] = Field(default_factory=dict)
+
+
+class EnrichmentConfig(BaseModel):
+    """Configuration for unified enrichment (single LLM call for echo+category+entities+profiles)."""
+    enable_unified: bool = False        # Off by default for backward compat
+    fallback_to_individual: bool = True  # On parse failure, fall back to individual calls
+    include_entities: bool = True        # Include entity extraction in unified call
+    include_profiles: bool = True        # Include profile extraction in unified call
+    max_batch_size: int = 10             # Max memories per unified batch call
+    # Deferred enrichment: store with 0 LLM calls, enrich later in batch
+    defer_enrichment: bool = False       # When True: 0 LLM calls at ingestion
+    context_window_turns: int = 10       # Store last N conversation turns with each memory
+    enrich_on_access: bool = False       # Auto-enrich pending memories when retrieved in search
+
+    @field_validator("max_batch_size")
+    @classmethod
+    def _clamp_batch_size(cls, v: int) -> int:
+        return min(50, max(1, int(v)))
 
 
 class BatchConfig(BaseModel):
@@ -432,6 +490,9 @@ class MemoryConfig(BaseModel):
     distillation: DistillationConfig = Field(default_factory=DistillationConfig)
     parallel: ParallelConfig = Field(default_factory=ParallelConfig)
     batch: BatchConfig = Field(default_factory=BatchConfig)
+    enrichment: EnrichmentConfig = Field(default_factory=EnrichmentConfig)
+    rerank: RerankConfig = Field(default_factory=RerankConfig)
+    skill: SkillConfig = Field(default_factory=SkillConfig)
     task: TaskConfig = Field(default_factory=TaskConfig)
     metamemory: MetamemoryInlineConfig = Field(default_factory=MetamemoryInlineConfig)
     prospective: ProspectiveInlineConfig = Field(default_factory=ProspectiveInlineConfig)
@@ -449,3 +510,23 @@ class MemoryConfig(BaseModel):
         if v < 1 or v > 65536:
             raise ValueError(f"embedding_model_dims must be 1-65536, got {v}")
         return v
+
+    # ---- Preset factory methods ----
+
+    @classmethod
+    def minimal(cls) -> "MemoryConfig":
+        """Zero-config: hash embedder, in-memory vector store, basic decay. No API key."""
+        from engram.configs.presets import minimal_config
+        return minimal_config()
+
+    @classmethod
+    def smart(cls) -> "MemoryConfig":
+        """Auto-detect best available provider + echo + categories."""
+        from engram.configs.presets import smart_config
+        return smart_config()
+
+    @classmethod
+    def full(cls) -> "MemoryConfig":
+        """Everything: scenes, profiles, graph, tasks."""
+        from engram.configs.presets import full_config
+        return full_config()

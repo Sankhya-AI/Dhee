@@ -42,6 +42,7 @@ from engram.memory.utils import (
     strip_code_fences,
 )
 from engram.memory.parallel import ParallelExecutor
+from engram.memory.smart import SmartMemory
 from engram.observability import metrics
 from engram.utils.factory import EmbedderFactory, LLMFactory, VectorStoreFactory
 from engram.utils.prompts import AGENT_MEMORY_EXTRACTION_PROMPT, MEMORY_EXTRACTION_PROMPT
@@ -230,126 +231,277 @@ class MemoryScope(str, Enum):
     GLOBAL = "global"
 
 
-class Memory(MemoryBase):
-    """engram Memory class - biologically-inspired memory for AI agents."""
+class FullMemory(SmartMemory):
+    """Full-featured engram Memory class with scenes, profiles, tasks, projects.
 
-    def __init__(self, config: Optional[MemoryConfig] = None):
-        self.config = config or MemoryConfig()
+    Extends SmartMemory with additional FullMemory-specific features:
+    - SceneProcessor for episodic memory grouping
+    - ProfileProcessor for character/entity profiles
+    - Task and project management (future)
 
-        # Ensure vector store config has dims/collection if missing
-        self.config.vector_store.config.setdefault("collection_name", self.config.collection_name)
-        self.config.vector_store.config.setdefault("embedding_model_dims", self.config.embedding_model_dims)
+    All base features (echo encoding, categories, knowledge graph) are inherited
+    from SmartMemory with lazy initialization via @property.
+    """
 
-        self.db = SQLiteManager(self.config.history_db_path)
-        self.llm = LLMFactory.create(self.config.llm.provider, self.config.llm.config)
-        self.embedder = EmbedderFactory.create(self.config.embedder.provider, self.config.embedder.config)
-        self.vector_store = VectorStoreFactory.create(self.config.vector_store.provider, self.config.vector_store.config)
-        self.fadem_config = self.config.engram
-        self.echo_config = self.config.echo
-        self.scope_config = getattr(self.config, "scope", None)
-        self.distillation_config = getattr(self.config, "distillation", None)
-
-        # Initialize EchoMem processor
-        if self.echo_config.enable_echo:
-            self.echo_processor = EchoProcessor(
-                self.llm,
-                config={
-                    "auto_depth": self.echo_config.auto_depth,
-                    "default_depth": self.echo_config.default_depth,
-                }
-            )
-        else:
-            self.echo_processor = None
-
-        # Initialize CategoryMem processor
-        self.category_config = self.config.category
-        if self.category_config.enable_categories:
-            self.category_processor = CategoryProcessor(
-                llm=self.llm,
-                embedder=self.embedder,
-                config={
-                    "use_llm": self.category_config.use_llm_categorization,
-                    "auto_subcategories": self.category_config.auto_create_subcategories,
-                    "max_depth": self.category_config.max_category_depth,
-                },
-            )
-            # Load existing categories from DB
-            existing_categories = self.db.get_all_categories()
-            if existing_categories:
-                self.category_processor.load_categories(existing_categories)
-        else:
-            self.category_processor = None
-
-        # Initialize Knowledge Graph
-        self.graph_config = self.config.graph
-        if self.graph_config.enable_graph:
-            self.knowledge_graph = KnowledgeGraph(
-                llm=self.llm if self.graph_config.use_llm_extraction else None
-            )
-        else:
-            self.knowledge_graph = None
-
-        # Initialize SceneProcessor
-        self.scene_config = self.config.scene
-        if self.scene_config.enable_scenes:
-            self.scene_processor = SceneProcessor(
-                db=self.db,
-                embedder=self.embedder,
-                llm=self.llm,
-                config={
-                    "scene_time_gap_minutes": self.scene_config.scene_time_gap_minutes,
-                    "scene_topic_threshold": self.scene_config.scene_topic_threshold,
-                    "auto_close_inactive_minutes": self.scene_config.auto_close_inactive_minutes,
-                    "max_scene_memories": self.scene_config.max_scene_memories,
-                    "use_llm_summarization": self.scene_config.use_llm_summarization,
-                    "summary_regenerate_threshold": self.scene_config.summary_regenerate_threshold,
-                },
-            )
-        else:
-            self.scene_processor = None
-
-        # Initialize ProfileProcessor
-        self.profile_config = self.config.profile
-        if self.profile_config.enable_profiles:
-            self.profile_processor = ProfileProcessor(
-                db=self.db,
-                embedder=self.embedder,
-                llm=self.llm,
-                config={
-                    "auto_detect_profiles": self.profile_config.auto_detect_profiles,
-                    "use_llm_extraction": self.profile_config.use_llm_extraction,
-                    "narrative_regenerate_threshold": self.profile_config.narrative_regenerate_threshold,
-                    "self_profile_auto_create": self.profile_config.self_profile_auto_create,
-                    "max_facts_per_profile": self.profile_config.max_facts_per_profile,
-                },
-            )
-        else:
-            self.profile_processor = None
-
-        # Parallel executor for I/O-bound LLM/embedding calls
-        self.parallel_config = getattr(self.config, "parallel", None)
+    def __init__(self, config: Optional[MemoryConfig] = None, preset: Optional[str] = None):
+        # Use default full() config if neither config nor preset provided
+        if config is None and preset is None:
+            config = MemoryConfig.full()
+        # Initialize parent SmartMemory (handles db, llm, embedder, etc.)
+        super().__init__(config=config, preset=preset)
+        # Only FullMemory-specific lazy init
+        self._scene_processor: Optional[SceneProcessor] = None
+        self._profile_processor: Optional[ProfileProcessor] = None
+        self._task_manager: Optional[Any] = None
+        self._project_manager: Optional[Any] = None
+        # Neural reranker (lazy init)
+        self._reranker: Optional[Any] = None
+        # Trajectory recording and skill mining
+        self._trajectory_store: Optional[Any] = None
+        self._skill_miner: Optional[Any] = None
+        self._active_recorders: Dict[str, Any] = {}
+        # Parallel executor (lazy: created only when config enables it)
         self._executor: Optional[ParallelExecutor] = None
-        if self.parallel_config and self.parallel_config.enable_parallel:
-            self._executor = ParallelExecutor(
-                max_workers=self.parallel_config.max_workers
+        if self.config.parallel.enable_parallel:
+            self._executor = ParallelExecutor(max_workers=self.config.parallel.max_workers)
+
+    @property
+    def scene_processor(self) -> Optional[SceneProcessor]:
+        """Lazy-initialized SceneProcessor (only if scenes enabled in config)."""
+        if self._scene_processor is None and self.config.scene.enable_scenes:
+            self._scene_processor = SceneProcessor(
+                db=self.db,
+                embedder=self.embedder,
+                llm=self.llm,
+                config={
+                    "scene_time_gap_minutes": self.config.scene.scene_time_gap_minutes,
+                    "scene_topic_threshold": self.config.scene.scene_topic_threshold,
+                    "auto_close_inactive_minutes": self.config.scene.auto_close_inactive_minutes,
+                    "max_scene_memories": self.config.scene.max_scene_memories,
+                    "use_llm_summarization": self.config.scene.use_llm_summarization,
+                    "summary_regenerate_threshold": self.config.scene.summary_regenerate_threshold,
+                },
             )
+        return self._scene_processor
+
+    @property
+    def profile_processor(self) -> Optional[ProfileProcessor]:
+        """Lazy-initialized ProfileProcessor (only if profiles enabled in config)."""
+        if self._profile_processor is None and self.config.profile.enable_profiles:
+            self._profile_processor = ProfileProcessor(
+                db=self.db,
+                embedder=self.embedder,
+                llm=self.llm,
+                config={
+                    "auto_detect_profiles": self.config.profile.auto_detect_profiles,
+                    "use_llm_extraction": self.config.profile.use_llm_extraction,
+                    "narrative_regenerate_threshold": self.config.profile.narrative_regenerate_threshold,
+                    "self_profile_auto_create": self.config.profile.self_profile_auto_create,
+                    "max_facts_per_profile": self.config.profile.max_facts_per_profile,
+                },
+            )
+        return self._profile_processor
+
+    @property
+    def trajectory_store(self):
+        """Lazy-initialized TrajectoryStore for persisting agent trajectories."""
+        if self._trajectory_store is None:
+            from engram.skills.trajectory import TrajectoryStore
+            self._trajectory_store = TrajectoryStore(
+                db=self.db,
+                embedder=self.embedder,
+                vector_store=self.vector_store,
+            )
+        return self._trajectory_store
+
+    @property
+    def skill_miner(self):
+        """Lazy-initialized SkillMiner for extracting skills from trajectories."""
+        skill_cfg = getattr(self.config, "skill", None)
+        if self._skill_miner is None and skill_cfg and skill_cfg.enable_mining:
+            from engram.skills.miner import SkillMiner
+            self._skill_miner = SkillMiner(
+                trajectory_store=self.trajectory_store,
+                skill_store=self.skill_store,
+                llm=self.llm,
+                embedder=self.embedder,
+                mutation_rate=skill_cfg.mutation_rate,
+            )
+        return self._skill_miner
+
+    @property
+    def reranker(self):
+        """Lazy-initialized neural reranker (only if enabled in config)."""
+        rerank_cfg = getattr(self.config, "rerank", None)
+        if self._reranker is None and rerank_cfg and rerank_cfg.enable_rerank:
+            from engram.retrieval.reranker import create_reranker
+            self._reranker = create_reranker({
+                "provider": rerank_cfg.provider,
+                "model": rerank_cfg.model,
+                "api_key_env": rerank_cfg.api_key_env,
+                **rerank_cfg.config,
+            })
+        return self._reranker
+
+    def start_trajectory(
+        self,
+        task_description: str,
+        user_id: str = "default",
+        agent_id: str = "default",
+    ) -> str:
+        """Start recording a new trajectory for the given task.
+
+        Returns the recorder ID to be used with record_trajectory_step()
+        and complete_trajectory().
+        """
+        from engram.skills.trajectory import TrajectoryRecorder
+        recorder = TrajectoryRecorder(
+            task_description=task_description,
+            user_id=user_id,
+            agent_id=agent_id,
+        )
+        self._active_recorders[recorder.id] = recorder
+        return recorder.id
+
+    def record_trajectory_step(
+        self,
+        recorder_id: str,
+        action: str,
+        tool: str = "",
+        args: Optional[Dict[str, Any]] = None,
+        result_summary: str = "",
+        error: Optional[str] = None,
+        slot_values: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """Record a step in an active trajectory.
+
+        If slot_values are provided, they are stored in state_snapshot
+        for later structural mining.
+        """
+        recorder = self._active_recorders.get(recorder_id)
+        if recorder is None:
+            return {"error": f"No active recorder: {recorder_id}"}
+
+        state_snapshot = None
+        if slot_values:
+            state_snapshot = {"slot_values": slot_values}
+
+        step = recorder.record_step(
+            action=action,
+            tool=tool,
+            args=args,
+            result_summary=result_summary,
+            error=error,
+            state_snapshot=state_snapshot,
+        )
+        return {
+            "recorder_id": recorder_id,
+            "step_count": len(recorder.steps),
+            "action": action,
+            "tool": tool,
+        }
+
+    def complete_trajectory(
+        self,
+        recorder_id: str,
+        success: bool,
+        outcome_summary: str = "",
+    ) -> Dict[str, Any]:
+        """Finalize a trajectory recording and persist it.
+
+        Returns the trajectory data.
+        """
+        recorder = self._active_recorders.pop(recorder_id, None)
+        if recorder is None:
+            return {"error": f"No active recorder: {recorder_id}"}
+
+        trajectory = recorder.finalize(
+            success=success,
+            outcome_summary=outcome_summary,
+        )
+        self.trajectory_store.save(trajectory)
+
+        return {
+            "trajectory_id": trajectory.id,
+            "task_description": trajectory.task_description,
+            "step_count": len(trajectory.steps),
+            "success": success,
+            "outcome_summary": outcome_summary,
+            "trajectory_hash": trajectory.trajectory_hash_val,
+        }
+
+    def mine_skills(
+        self,
+        task_query: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Run a skill mining cycle.
+
+        Analyzes successful trajectories and extracts reusable skills.
+        Returns info about mined skills.
+        """
+        if self.skill_miner is None:
+            return {"error": "Skill mining not enabled", "skills_mined": 0}
+
+        mined = self.skill_miner.mine(
+            task_query=task_query,
+            user_id=user_id,
+        )
+        return {
+            "skills_mined": len(mined),
+            "skills": [
+                {
+                    "id": s.id,
+                    "name": s.name,
+                    "description": s.description,
+                    "confidence": s.confidence,
+                    "source": s.source,
+                    "tags": s.tags,
+                }
+                for s in mined
+            ],
+        }
+
+    def get_skill_stats(self) -> Dict[str, Any]:
+        """Get statistics about skills and trajectories."""
+        skills = self.skill_store.list_all() if self.skill_store else []
+        trajectories = self.trajectory_store.find_successful(limit=1000) if self._trajectory_store else []
+
+        total_skills = len(skills)
+        authored = sum(1 for s in skills if s.source == "authored")
+        mined = sum(1 for s in skills if s.source == "mined")
+        imported = sum(1 for s in skills if s.source == "imported")
+        avg_confidence = sum(s.confidence for s in skills) / max(1, total_skills)
+
+        return {
+            "total_skills": total_skills,
+            "authored_skills": authored,
+            "mined_skills": mined,
+            "imported_skills": imported,
+            "avg_confidence": round(avg_confidence, 4),
+            "total_successful_trajectories": len(trajectories),
+            "active_recorders": len(self._active_recorders),
+        }
 
     def close(self) -> None:
         """Release all resources held by the Memory instance."""
-        if hasattr(self, '_executor') and self._executor is not None:
+        # Shutdown parallel executor if it was created
+        if self._executor is not None:
             self._executor.shutdown()
             self._executor = None
-        if hasattr(self, 'vector_store') and self.vector_store is not None:
+        # Release vector store
+        if self.vector_store is not None:
             self.vector_store.close()
-        if hasattr(self, 'db') and self.db is not None:
+        # Release database
+        if self.db is not None:
             self.db.close()
 
     def __repr__(self) -> str:
-        return f"Memory(db={self.db!r}, echo={self.echo_config.enable_echo}, scenes={self.scene_config.enable_scenes})"
+        return f"FullMemory(db={self.db!r}, echo={self.config.echo.enable_echo}, scenes={self.config.scene.enable_scenes})"
 
-    @classmethod
-    def from_config(cls, config_dict: Dict[str, Any]):
-        return cls(MemoryConfig(**config_dict))
+    # _cached_embed inherited from SmartMemory
+
+    # from_config inherited from SmartMemory
 
     def add(
         self,
@@ -375,6 +527,7 @@ class Memory(MemoryBase):
         scope: Optional[str] = None,
         source_app: Optional[str] = None,
         memory_id: Optional[str] = None,
+        context_messages: Optional[List[Dict[str, str]]] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         processed_metadata, effective_filters = build_filters_and_metadata(
@@ -434,6 +587,7 @@ class Memory(MemoryBase):
                 initial_strength=initial_strength,
                 echo_depth=echo_depth,
                 memory_id=memory_id,
+                context_messages=context_messages,
             )
             if result is not None:
                 results.append(result)
@@ -554,38 +708,90 @@ class Memory(MemoryBase):
             item_meta.update(item.get("metadata") or {})
             item_metadata_list.append(item_meta)
 
-        # 1. Batch echo encoding
+        # 0. Try unified enrichment (single LLM call for echo+category+entities+profiles)
         echo_results = [None] * len(contents)
-        if self.echo_processor and self.echo_config.enable_echo and batch_config.batch_echo:
-            try:
-                depth_override = EchoDepth(echo_depth) if echo_depth else None
-                echo_results = self.echo_processor.process_batch(
-                    contents, depth=depth_override
-                )
-            except Exception as e:
-                logger.warning("Batch echo failed, processing individually: %s", e)
-                for i, c in enumerate(contents):
-                    if c:
-                        try:
-                            depth_override = EchoDepth(echo_depth) if echo_depth else None
-                            echo_results[i] = self.echo_processor.process(c, depth=depth_override)
-                        except Exception:
-                            pass
-
-        # 2. Batch category detection
         category_results = [None] * len(contents)
-        if (
-            self.category_processor
-            and self.category_config.auto_categorize
-            and batch_config.batch_category
-        ):
+        enrichment_results = [None] * len(contents)  # stash for post-store hooks
+
+        enrichment_config = getattr(self.config, "enrichment", None)
+        _use_unified = (
+            self.unified_enrichment is not None
+            and self.echo_config.enable_echo
+            and batch_config.batch_echo
+        )
+
+        if _use_unified:
             try:
-                category_results = self.category_processor.detect_categories_batch(
-                    contents,
-                    use_llm=self.category_config.use_llm_categorization,
-                )
+                depth_override = EchoDepth(echo_depth) if echo_depth else EchoDepth(self.echo_config.default_depth)
+                existing_cats = None
+                if self.category_processor:
+                    cats = self.category_processor.get_all_categories()
+                    if cats:
+                        existing_cats = "\n".join(
+                            f"- {c['id']}: {c['name']} — {c.get('description', '')}"
+                            for c in cats[:30]
+                        )
+
+                # Process in sub-batches of enrichment_config.max_batch_size
+                enrich_batch_size = enrichment_config.max_batch_size if enrichment_config else 10
+                for start in range(0, len(contents), enrich_batch_size):
+                    end = min(start + enrich_batch_size, len(contents))
+                    sub_contents = contents[start:end]
+                    sub_results = self.unified_enrichment.enrich_batch(
+                        sub_contents,
+                        depth=depth_override,
+                        existing_categories=existing_cats,
+                        include_entities=enrichment_config.include_entities if enrichment_config else True,
+                        include_profiles=enrichment_config.include_profiles if enrichment_config else True,
+                    )
+                    for j, enrichment in enumerate(sub_results):
+                        idx = start + j
+                        if enrichment.echo_result:
+                            echo_results[idx] = enrichment.echo_result
+                        if enrichment.category_match:
+                            category_results[idx] = enrichment.category_match
+                        enrichment_results[idx] = enrichment
+
+                logger.info("Unified batch enrichment completed for %d memories", len(contents))
             except Exception as e:
-                logger.warning("Batch category failed: %s", e)
+                logger.warning("Unified batch enrichment failed, falling back to separate: %s", e)
+                # Reset — let the fallback below handle it
+                echo_results = [None] * len(contents)
+                category_results = [None] * len(contents)
+                enrichment_results = [None] * len(contents)
+                _use_unified = False
+
+        # 1. Batch echo encoding (fallback if unified was not used or failed)
+        if not _use_unified:
+            if self.echo_processor and self.echo_config.enable_echo and batch_config.batch_echo:
+                try:
+                    depth_override = EchoDepth(echo_depth) if echo_depth else None
+                    echo_results = self.echo_processor.process_batch(
+                        contents, depth=depth_override
+                    )
+                except Exception as e:
+                    logger.warning("Batch echo failed, processing individually: %s", e)
+                    for i, c in enumerate(contents):
+                        if c:
+                            try:
+                                depth_override = EchoDepth(echo_depth) if echo_depth else None
+                                echo_results[i] = self.echo_processor.process(c, depth=depth_override)
+                            except Exception:
+                                pass
+
+            # 2. Batch category detection
+            if (
+                self.category_processor
+                and self.category_config.auto_categorize
+                and batch_config.batch_category
+            ):
+                try:
+                    category_results = self.category_processor.detect_categories_batch(
+                        contents,
+                        use_llm=self.category_config.use_llm_categorization,
+                    )
+                except Exception as e:
+                    logger.warning("Batch category failed: %s", e)
 
         # 3. Batch embeddings
         primary_texts = []
@@ -595,7 +801,11 @@ class Memory(MemoryBase):
 
         if batch_config.batch_embed:
             try:
-                embeddings = self.embedder.embed_batch(primary_texts, memory_action="add")
+                # Sub-batch to stay within API limits (~50 per call)
+                embeddings: List[List[float]] = []
+                for start in range(0, len(primary_texts), 50):
+                    sub = primary_texts[start:start + 50]
+                    embeddings.extend(self.embedder.embed_batch(sub, memory_action="add"))
             except Exception as e:
                 logger.warning("Batch embed failed, falling back to sequential: %s", e)
                 embeddings = [
@@ -605,6 +815,44 @@ class Memory(MemoryBase):
             embeddings = [
                 self.embedder.embed(t, memory_action="add") for t in primary_texts
             ]
+
+        # 3b. Pre-embed all echo node texts (paraphrases, questions, content variants)
+        # so _build_index_vectors can use the cache instead of individual embed() calls.
+        echo_node_texts = []
+        for i, content in enumerate(contents):
+            echo_result = echo_results[i]
+            pt = primary_texts[i]
+            if pt != content:
+                cleaned = content.strip()
+                if cleaned:
+                    echo_node_texts.append(cleaned)
+            if echo_result:
+                for p in echo_result.paraphrases:
+                    cleaned = str(p).strip()
+                    if cleaned:
+                        echo_node_texts.append(cleaned)
+                for q in echo_result.questions:
+                    cleaned = str(q).strip()
+                    if cleaned:
+                        echo_node_texts.append(cleaned)
+
+        embedding_cache: Dict[str, List[float]] = {}
+        if echo_node_texts:
+            # Deduplicate while preserving order for batch embedding
+            unique_texts = list(dict.fromkeys(echo_node_texts))
+            try:
+                # Sub-batch to stay within NVIDIA API limits (~50 per call)
+                all_echo_embeddings: List[List[float]] = []
+                for start in range(0, len(unique_texts), 50):
+                    sub = unique_texts[start:start + 50]
+                    sub_embs = self.embedder.embed_batch(sub, memory_action="add")
+                    all_echo_embeddings.extend(sub_embs)
+                for text, emb in zip(unique_texts, all_echo_embeddings):
+                    embedding_cache[text] = emb
+                logger.info("Batch-embedded %d echo node texts in %d API calls",
+                            len(unique_texts), (len(unique_texts) + 49) // 50)
+            except Exception as e:
+                logger.warning("Batch echo node embedding failed, will embed individually: %s", e)
 
         # 4. Build memory records and batch-insert into DB
         processed_metadata_base, effective_filters = build_filters_and_metadata(
@@ -702,6 +950,7 @@ class Memory(MemoryBase):
                 agent_id=agent_id,
                 run_id=run_id,
                 app_id=app_id,
+                embedding_cache=embedding_cache if embedding_cache else None,
             )
             if vectors:
                 vector_batch.append((vectors, payloads, vector_ids))
@@ -734,13 +983,86 @@ class Memory(MemoryBase):
             except Exception as e:
                 logger.error("Vector insert failed in batch: %s", e)
 
-        # Post-store hooks
+        # Post-store hooks: category stats
         for i, record in enumerate(memory_records):
             if self.category_processor and record.get("categories"):
                 for cat_id in record["categories"]:
                     self.category_processor.update_category_stats(
                         cat_id, record["strength"], is_addition=True
                     )
+
+        # Post-store hooks: fact decomposition (batch embed + insert)
+        all_fact_texts = []
+        all_fact_meta = []  # (memory_id, fact_index)
+        for i, record in enumerate(memory_records):
+            enrichment = enrichment_results[i] if i < len(enrichment_results) else None
+            if enrichment and enrichment.facts:
+                for fi, fact_text in enumerate(enrichment.facts[:8]):
+                    fact_text = fact_text.strip()
+                    if fact_text and len(fact_text) >= 10:
+                        all_fact_texts.append(fact_text)
+                        all_fact_meta.append((record["id"], fi))
+
+        if all_fact_texts:
+            try:
+                # Sub-batch fact embeddings to stay within API limits
+                fact_embeddings: List[List[float]] = []
+                for fs in range(0, len(all_fact_texts), 50):
+                    sub = all_fact_texts[fs:fs + 50]
+                    fact_embeddings.extend(self.embedder.embed_batch(sub, memory_action="add"))
+                fact_vectors = []
+                fact_payloads = []
+                fact_ids = []
+                for (memory_id, fi), fact_text, fact_emb in zip(all_fact_meta, all_fact_texts, fact_embeddings):
+                    fact_id = f"{memory_id}__fact_{fi}"
+                    fact_vectors.append(fact_emb)
+                    fact_payloads.append({
+                        "memory_id": memory_id,
+                        "is_fact": True,
+                        "fact_index": fi,
+                        "fact_text": fact_text,
+                        "user_id": user_id,
+                        "agent_id": agent_id,
+                    })
+                    fact_ids.append(fact_id)
+                if fact_vectors:
+                    self.vector_store.insert(vectors=fact_vectors, payloads=fact_payloads, ids=fact_ids)
+            except Exception as e:
+                logger.warning("Batch fact embedding/insert failed: %s", e)
+
+        # Post-store hooks: entity linking and profile updates
+        for i, record in enumerate(memory_records):
+            enrichment = enrichment_results[i] if i < len(enrichment_results) else None
+            if not enrichment:
+                continue
+            memory_id = record["id"]
+            content = record.get("memory", "")
+
+            if self.knowledge_graph and enrichment.entities:
+                try:
+                    for entity in enrichment.entities:
+                        existing_ent = self.knowledge_graph._get_or_create_entity(
+                            entity.name, entity.entity_type,
+                        )
+                        existing_ent.memory_ids.add(memory_id)
+                    self.knowledge_graph.memory_entities[memory_id] = {
+                        e.name for e in enrichment.entities
+                    }
+                    if self.graph_config.auto_link_entities:
+                        self.knowledge_graph.link_by_shared_entities(memory_id)
+                except Exception as e:
+                    logger.warning("Entity linking failed for %s: %s", memory_id, e)
+
+            if self.profile_processor and enrichment.profile_updates:
+                try:
+                    for profile_update in enrichment.profile_updates:
+                        self.profile_processor.apply_update(
+                            profile_update=profile_update,
+                            memory_id=memory_id,
+                            user_id=record.get("user_id") or user_id or "default",
+                        )
+                except Exception as e:
+                    logger.warning("Profile update failed for %s: %s", memory_id, e)
 
         return results
 
@@ -849,6 +1171,7 @@ class Memory(MemoryBase):
         initial_strength: float,
         echo_depth: Optional[str],
         memory_id: Optional[str] = None,
+        context_messages: Optional[List[Dict[str, str]]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Process and store a single memory item. Returns result dict or None if skipped."""
         content = mem.get("content", "").strip()
@@ -899,6 +1222,31 @@ class Memory(MemoryBase):
                 "memory": content,
             }
 
+        # --- Deferred enrichment: lite path (0 LLM calls) ---
+        enrichment_config = getattr(self.config, "enrichment", None)
+        if enrichment_config and enrichment_config.defer_enrichment:
+            return self._process_single_memory_lite(
+                content=content,
+                mem_metadata=mem_metadata,
+                mem_categories=mem_categories,
+                context_messages=context_messages,
+                user_id=user_id,
+                agent_id=agent_id,
+                run_id=run_id,
+                app_id=app_id,
+                effective_filters=effective_filters,
+                agent_category=agent_category,
+                connector_id=connector_id,
+                scope=scope,
+                source_app=source_app,
+                immutable=immutable,
+                expiration_date=expiration_date,
+                initial_layer=initial_layer,
+                initial_strength=initial_strength,
+                explicit_remember=explicit_remember,
+                memory_id=memory_id,
+            )
+
         # Resolve store identifiers and scope metadata.
         store_agent_id, store_run_id, store_app_id, store_filters = self._resolve_memory_metadata(
             content=content,
@@ -925,65 +1273,130 @@ class Memory(MemoryBase):
             and not mem_categories
         )
 
-        # Site 1: Parallel echo encoding + category detection
-        _use_parallel = (
-            self._executor is not None
-            and self.parallel_config
-            and self.parallel_config.parallel_add
-            and _should_categorize
-            and self.echo_processor
+        # Pre-extracted data from unified enrichment (used to skip redundant post-store calls)
+        _unified_entities = None   # List[Entity] or None
+        _unified_profiles = None   # List[ProfileUpdate] or None
+        _unified_facts = None      # List[str] or None
+
+        # Determine echo depth for unified path check
+        _depth_for_echo = EchoDepth(echo_depth) if echo_depth else None
+        if _depth_for_echo is None and self.echo_processor and hasattr(self.echo_processor, '_assess_depth'):
+            try:
+                _depth_for_echo = self.echo_processor._assess_depth(content)
+            except Exception:
+                _depth_for_echo = EchoDepth.MEDIUM
+
+        # Site 0: Unified enrichment (single LLM call for echo+category+entities+profiles)
+        _use_unified = (
+            self.unified_enrichment is not None
             and self.echo_config.enable_echo
+            and _depth_for_echo != EchoDepth.SHALLOW  # shallow is LLM-free
         )
 
-        if _use_parallel:
-            # Run echo and category detection in parallel (both only read content)
-            def _do_echo():
-                depth_override = EchoDepth(echo_depth) if echo_depth else None
-                return self.echo_processor.process(content, depth=depth_override)
+        if _use_unified:
+            enrichment_config = getattr(self.config, "enrichment", None)
+            existing_cats = None
+            if self.category_processor:
+                cats = self.category_processor.get_all_categories()
+                if cats:
+                    existing_cats = "\n".join(
+                        f"- {c['id']}: {c['name']} — {c.get('description', '')}"
+                        for c in cats[:30]
+                    )
 
-            def _do_category():
-                return self.category_processor.detect_category(
-                    content,
-                    metadata=mem_metadata,
-                    use_llm=self.category_config.use_llm_categorization,
-                )
-
-            echo_result_p, category_match = self._executor.run_parallel([
-                (_do_echo, ()),
-                (_do_category, ()),
-            ])
+            enrichment = self.unified_enrichment.enrich(
+                content=content,
+                depth=_depth_for_echo or EchoDepth.MEDIUM,
+                existing_categories=existing_cats,
+                include_entities=enrichment_config.include_entities if enrichment_config else True,
+                include_profiles=enrichment_config.include_profiles if enrichment_config else True,
+            )
 
             # Apply echo result
-            effective_strength = initial_strength * echo_result_p.strength_multiplier
-            mem_metadata.update(echo_result_p.to_metadata())
-            if not mem_categories and echo_result_p.category:
-                mem_categories = [echo_result_p.category]
+            echo_result = enrichment.echo_result
+            if echo_result:
+                effective_strength = initial_strength * echo_result.strength_multiplier
+                mem_metadata.update(echo_result.to_metadata())
+                if not mem_categories and echo_result.category:
+                    mem_categories = [echo_result.category]
+            else:
+                effective_strength = initial_strength
 
             # Apply category result
-            mem_categories = [category_match.category_id]
-            mem_metadata["category_confidence"] = category_match.confidence
-            mem_metadata["category_auto"] = True
+            if enrichment.category_match and not mem_categories:
+                mem_categories = [enrichment.category_match.category_id]
+                mem_metadata["category_confidence"] = enrichment.category_match.confidence
+                mem_metadata["category_auto"] = True
 
-            # Generate embedding (depends on echo result, must be serial)
-            primary_text = self._select_primary_text(content, echo_result_p)
+            # Stash entities + profiles + facts for post-store hooks
+            _unified_entities = enrichment.entities
+            _unified_profiles = enrichment.profile_updates
+            _unified_facts = enrichment.facts
+
+            # Generate embedding
+            primary_text = self._select_primary_text(content, echo_result)
             embedding = self.embedder.embed(primary_text, memory_action="add")
-            echo_result = echo_result_p
+
         else:
-            # Sequential path (original behavior)
-            if _should_categorize:
-                category_match = self.category_processor.detect_category(
-                    content,
-                    metadata=mem_metadata,
-                    use_llm=self.category_config.use_llm_categorization,
-                )
+            # Site 1: Parallel echo encoding + category detection
+            _use_parallel = (
+                self._executor is not None
+                and self.parallel_config
+                and self.parallel_config.parallel_add
+                and _should_categorize
+                and self.echo_processor
+                and self.echo_config.enable_echo
+            )
+
+            if _use_parallel:
+                # Run echo and category detection in parallel (both only read content)
+                def _do_echo():
+                    depth_override = EchoDepth(echo_depth) if echo_depth else None
+                    return self.echo_processor.process(content, depth=depth_override)
+
+                def _do_category():
+                    return self.category_processor.detect_category(
+                        content,
+                        metadata=mem_metadata,
+                        use_llm=self.category_config.use_llm_categorization,
+                    )
+
+                echo_result_p, category_match = self._executor.run_parallel([
+                    (_do_echo, ()),
+                    (_do_category, ()),
+                ])
+
+                # Apply echo result
+                effective_strength = initial_strength * echo_result_p.strength_multiplier
+                mem_metadata.update(echo_result_p.to_metadata())
+                if not mem_categories and echo_result_p.category:
+                    mem_categories = [echo_result_p.category]
+
+                # Apply category result
                 mem_categories = [category_match.category_id]
                 mem_metadata["category_confidence"] = category_match.confidence
                 mem_metadata["category_auto"] = True
 
-            # Encode memory (echo + embedding).
-            echo_result, effective_strength, mem_categories, embedding = self._encode_memory(
-                content, echo_depth, mem_categories, mem_metadata, initial_strength,
-            )
+                # Generate embedding (depends on echo result, must be serial)
+                primary_text = self._select_primary_text(content, echo_result_p)
+                embedding = self.embedder.embed(primary_text, memory_action="add")
+                echo_result = echo_result_p
+            else:
+                # Sequential path (original behavior)
+                if _should_categorize:
+                    category_match = self.category_processor.detect_category(
+                        content,
+                        metadata=mem_metadata,
+                        use_llm=self.category_config.use_llm_categorization,
+                    )
+                    mem_categories = [category_match.category_id]
+                    mem_metadata["category_confidence"] = category_match.confidence
+                    mem_metadata["category_auto"] = True
+
+                # Encode memory (echo + embedding).
+                echo_result, effective_strength, mem_categories, embedding = self._encode_memory(
+                    content, echo_depth, mem_categories, mem_metadata, initial_strength,
+                )
 
         nearest, similarity = self._nearest_memory(embedding, store_filters)
         repeated_threshold = max(self.fadem_config.conflict_similarity_threshold - 0.05, 0.7)
@@ -1143,6 +1556,40 @@ class Memory(MemoryBase):
                     )
                 raise
 
+        # Fact decomposition: store each extracted fact as a sub-vector for direct retrieval.
+        # Each fact gets its own embedding, linked back to the parent memory.
+        # Uses batch embedding (single API call) for efficiency.
+        if _unified_facts:
+            valid_facts = []
+            for i, fact_text in enumerate(_unified_facts[:8]):  # Cap at 8 facts
+                fact_text = fact_text.strip()
+                if fact_text and len(fact_text) >= 10:
+                    valid_facts.append((i, fact_text))
+
+            if valid_facts:
+                try:
+                    fact_texts = [ft for _, ft in valid_facts]
+                    fact_embeddings = self.embedder.embed_batch(fact_texts, memory_action="add")
+                    fact_vectors = []
+                    fact_payloads = []
+                    fact_ids = []
+                    for (i, fact_text), fact_embedding in zip(valid_facts, fact_embeddings):
+                        fact_id = f"{effective_memory_id}__fact_{i}"
+                        fact_vectors.append(fact_embedding)
+                        fact_payloads.append({
+                            "memory_id": effective_memory_id,
+                            "is_fact": True,
+                            "fact_index": i,
+                            "fact_text": fact_text,
+                            "user_id": user_id,
+                            "agent_id": store_agent_id,
+                        })
+                        fact_ids.append(fact_id)
+                    if fact_vectors:
+                        self.vector_store.insert(vectors=fact_vectors, payloads=fact_payloads, ids=fact_ids)
+                except Exception as e:
+                    logger.warning("Fact embedding/insert failed for %s: %s", effective_memory_id, e)
+
         # Post-store hooks.
         if self.category_processor and mem_categories:
             for cat_id in mem_categories:
@@ -1151,11 +1598,22 @@ class Memory(MemoryBase):
                 )
 
         if self.knowledge_graph:
-            self.knowledge_graph.extract_entities(
-                content=content,
-                memory_id=effective_memory_id,
-                use_llm=self.graph_config.use_llm_extraction,
-            )
+            if _unified_entities is not None:
+                # Use pre-extracted entities from unified enrichment
+                for entity in _unified_entities:
+                    existing = self.knowledge_graph._get_or_create_entity(
+                        entity.name, entity.entity_type,
+                    )
+                    existing.memory_ids.add(effective_memory_id)
+                self.knowledge_graph.memory_entities[effective_memory_id] = {
+                    e.name for e in _unified_entities
+                }
+            else:
+                self.knowledge_graph.extract_entities(
+                    content=content,
+                    memory_id=effective_memory_id,
+                    use_llm=self.graph_config.use_llm_extraction,
+                )
             if self.graph_config.auto_link_entities:
                 self.knowledge_graph.link_by_shared_entities(effective_memory_id)
 
@@ -1167,7 +1625,16 @@ class Memory(MemoryBase):
 
         if self.profile_processor:
             try:
-                self._update_profiles(effective_memory_id, content, mem_metadata, user_id)
+                if _unified_profiles is not None and _unified_profiles:
+                    # Use pre-extracted profiles from unified enrichment
+                    for profile_update in _unified_profiles:
+                        self.profile_processor.apply_update(
+                            profile_update=profile_update,
+                            memory_id=effective_memory_id,
+                            user_id=user_id or "default",
+                        )
+                else:
+                    self._update_profiles(effective_memory_id, content, mem_metadata, user_id)
             except Exception as e:
                 logger.warning("Profile update failed for %s: %s", effective_memory_id, e)
 
@@ -1182,6 +1649,409 @@ class Memory(MemoryBase):
             "namespace": namespace_value,
             "vector_nodes": len(vectors),
             "memory_type": memory_type,
+        }
+
+    def _process_single_memory_lite(
+        self,
+        *,
+        content: str,
+        mem_metadata: Dict[str, Any],
+        mem_categories: List[str],
+        context_messages: Optional[List[Dict[str, str]]],
+        user_id: Optional[str],
+        agent_id: Optional[str],
+        run_id: Optional[str],
+        app_id: Optional[str],
+        effective_filters: Dict[str, Any],
+        agent_category: Optional[str],
+        connector_id: Optional[str],
+        scope: Optional[str],
+        source_app: Optional[str],
+        immutable: bool,
+        expiration_date: Optional[str],
+        initial_layer: str,
+        initial_strength: float,
+        explicit_remember: bool,
+        memory_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Lite processing path for deferred enrichment — 0 LLM calls.
+
+        Stores the memory with regex-extracted keywords, context-enriched
+        embedding, and enrichment_status='pending'. All heavy LLM processing
+        (echo, category, conflict, entities, profiles) is deferred to
+        enrich_pending().
+        """
+        # Resolve store identifiers and scope metadata.
+        store_agent_id, store_run_id, store_app_id, store_filters = self._resolve_memory_metadata(
+            content=content,
+            mem_metadata=mem_metadata,
+            explicit_remember=explicit_remember,
+            agent_id=agent_id,
+            run_id=run_id,
+            app_id=app_id,
+            effective_filters=effective_filters,
+            agent_category=agent_category,
+            connector_id=connector_id,
+            scope=scope,
+            source_app=source_app,
+        )
+
+        high_confidence = explicit_remember or looks_high_confidence(content, mem_metadata)
+
+        # --- Regex keyword extraction (0 LLM calls) ---
+        extracted_keywords: List[str] = []
+        content_lower = content.lower()
+
+        # Extract preference/routine/goal hints
+        for regex, tag in [
+            (_PREFERENCE_HINT_RE, "preference"),
+            (_ROUTINE_HINT_RE, "routine"),
+            (_GOAL_HINT_RE, "goal"),
+        ]:
+            if regex.search(content):
+                extracted_keywords.append(tag)
+
+        # Simple word tokenization for top keywords (skip stopwords)
+        _STOPWORDS = {
+            "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+            "have", "has", "had", "do", "does", "did", "will", "would", "could",
+            "should", "may", "might", "can", "shall", "to", "of", "in", "for",
+            "on", "with", "at", "by", "from", "as", "into", "through", "during",
+            "before", "after", "above", "below", "between", "and", "but", "or",
+            "nor", "not", "so", "yet", "both", "either", "neither", "each",
+            "every", "all", "any", "few", "more", "most", "other", "some", "such",
+            "no", "only", "own", "same", "than", "too", "very", "just", "i", "me",
+            "my", "we", "our", "you", "your", "he", "she", "it", "they", "them",
+            "this", "that", "these", "those", "am", "his", "her", "its",
+        }
+        words = re.findall(r"\b[a-z][a-z0-9_-]{2,}\b", content_lower)
+        word_freq: Dict[str, int] = {}
+        for w in words:
+            if w not in _STOPWORDS:
+                word_freq[w] = word_freq.get(w, 0) + 1
+        top_words = sorted(word_freq, key=lambda w: word_freq[w], reverse=True)[:15]
+        extracted_keywords.extend(top_words)
+
+        # Regex entity extraction (names, dates)
+        name_match = _NAME_HINT_RE.search(content)
+        if name_match:
+            extracted_keywords.append(f"name:{name_match.group(1).strip()}")
+
+        mem_metadata["echo_keywords"] = extracted_keywords
+        mem_metadata["enrichment_status"] = "pending"
+
+        # --- Build rich embedding text (content + context summary) ---
+        context_window = getattr(self.config.enrichment, "context_window_turns", 10)
+        context_summary = ""
+        if context_messages:
+            recent = context_messages[-context_window:]
+            context_lines = [
+                f"{m.get('role', 'user')}: {str(m.get('content', ''))[:200]}"
+                for m in recent
+            ]
+            context_summary = " | ".join(context_lines)
+
+        embed_text = content
+        if context_summary:
+            embed_text += f" [Context: {context_summary[:500]}]"
+
+        # --- Generate embedding (1 API call, NOT an LLM call) ---
+        embedding = self.embedder.embed(embed_text, memory_action="add")
+
+        # --- Confidence and layer ---
+        effective_strength = initial_strength
+        if not explicit_remember and not high_confidence:
+            mem_metadata["policy_low_confidence"] = True
+            effective_strength = min(effective_strength, 0.4)
+
+        layer = initial_layer
+        if layer == "auto":
+            layer = "sml"
+
+        # --- Metadata ---
+        confidentiality_scope = str(
+            mem_metadata.get("confidentiality_scope")
+            or mem_metadata.get("privacy_scope")
+            or "work"
+        ).lower()
+        source_type = (
+            mem_metadata.get("source_type")
+            or ("cli" if (source_app or "").lower() == "cli" else "mcp")
+        )
+        namespace_value = str(mem_metadata.get("namespace", "default") or "default").strip() or "default"
+        memory_type = self._classify_memory_type(mem_metadata, mem_metadata.get("role", "user"))
+
+        # Multi-trace strength
+        s_fast_val = s_mid_val = s_slow_val = None
+        if self.distillation_config and self.distillation_config.enable_multi_trace:
+            s_fast_val, s_mid_val, s_slow_val = initialize_traces(effective_strength, is_new=True)
+
+        # Content hash for dedup
+        from engram.memory.core import _content_hash
+        ch = _content_hash(content)
+        existing = self.db.get_memory_by_content_hash(ch, user_id) if hasattr(self.db, 'get_memory_by_content_hash') else None
+        if existing:
+            self.db.increment_access(existing["id"])
+            return {
+                "id": existing["id"],
+                "memory": existing.get("memory", ""),
+                "event": "DEDUPLICATED",
+                "layer": existing.get("layer", "sml"),
+                "strength": existing.get("strength", 1.0),
+            }
+
+        effective_memory_id = memory_id or str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+
+        # Serialize conversation context
+        context_json = None
+        if context_messages:
+            recent = context_messages[-context_window:]
+            context_json = json.dumps(recent)
+
+        memory_data = {
+            "id": effective_memory_id,
+            "memory": content,
+            "user_id": user_id,
+            "agent_id": store_agent_id,
+            "run_id": store_run_id,
+            "app_id": store_app_id,
+            "metadata": mem_metadata,
+            "categories": mem_categories,
+            "immutable": immutable,
+            "expiration_date": expiration_date,
+            "created_at": now,
+            "updated_at": now,
+            "layer": layer,
+            "strength": effective_strength,
+            "access_count": 0,
+            "last_accessed": now,
+            "embedding": embedding,
+            "confidentiality_scope": confidentiality_scope,
+            "source_type": source_type,
+            "source_app": source_app or mem_metadata.get("source_app"),
+            "source_event_id": mem_metadata.get("source_event_id"),
+            "decay_lambda": self.fadem_config.sml_decay_rate,
+            "status": "active",
+            "importance": mem_metadata.get("importance", 0.5),
+            "sensitivity": mem_metadata.get("sensitivity", "normal"),
+            "namespace": namespace_value,
+            "memory_type": memory_type,
+            "s_fast": s_fast_val,
+            "s_mid": s_mid_val,
+            "s_slow": s_slow_val,
+            "content_hash": ch,
+            "conversation_context": context_json,
+            "enrichment_status": "pending",
+        }
+
+        # Build vector index (single primary vector, no echo nodes)
+        base_payload = {
+            "memory_id": effective_memory_id,
+            "user_id": user_id,
+            "agent_id": store_agent_id,
+            "run_id": store_run_id,
+            "app_id": store_app_id,
+            "categories": mem_categories,
+            "text": embed_text,
+            "type": "primary",
+            "memory": content,
+        }
+        vectors = [embedding]
+        payloads = [base_payload]
+        vector_ids = [effective_memory_id]
+
+        self.db.add_memory(memory_data)
+        try:
+            self.vector_store.insert(vectors=vectors, payloads=payloads, ids=vector_ids)
+        except Exception as e:
+            logger.error("Vector insert failed for memory %s (lite), rolling back: %s", effective_memory_id, e)
+            try:
+                self.db.delete_memory(effective_memory_id, use_tombstone=False)
+            except Exception as rollback_err:
+                logger.critical("DB rollback also failed for %s: %s", effective_memory_id, rollback_err)
+            raise
+
+        # Scene assignment still works (embedding-based, no LLM)
+        if self.scene_processor:
+            try:
+                self._assign_to_scene(effective_memory_id, content, embedding, user_id, now)
+            except Exception as e:
+                logger.warning("Scene assignment failed for %s (lite): %s", effective_memory_id, e)
+
+        return {
+            "id": effective_memory_id,
+            "memory": content,
+            "event": "ADD",
+            "layer": layer,
+            "strength": effective_strength,
+            "echo_depth": None,
+            "categories": mem_categories,
+            "namespace": namespace_value,
+            "vector_nodes": 1,
+            "memory_type": memory_type,
+            "enrichment_status": "pending",
+        }
+
+    def enrich_pending(
+        self,
+        user_id: str = "default",
+        batch_size: int = 10,
+        max_batches: int = 5,
+    ) -> Dict[str, Any]:
+        """Batch-enrich memories that were stored with deferred enrichment.
+
+        Uses unified enrichment: 1 LLM call per batch_size memories.
+        Returns {enriched_count, batches, remaining}.
+        """
+        limit = batch_size * max_batches
+        pending = self.db.get_pending_enrichment(user_id=user_id, limit=limit)
+        if not pending:
+            return {"enriched_count": 0, "batches": 0, "remaining": 0}
+
+        enriched_count = 0
+        batches_processed = 0
+
+        for start in range(0, len(pending), batch_size):
+            batch = pending[start:start + batch_size]
+            contents = [m.get("memory", "") for m in batch]
+
+            # Try unified enrichment (single LLM call for the batch)
+            enrichment_results = None
+            if self.unified_enrichment is not None:
+                try:
+                    existing_cats = None
+                    if self.category_processor:
+                        cats = self.category_processor.get_all_categories()
+                        if cats:
+                            existing_cats = "\n".join(
+                                f"- {c['id']}: {c['name']} — {c.get('description', '')}"
+                                for c in cats[:30]
+                            )
+
+                    enrichment_results = self.unified_enrichment.enrich_batch(
+                        contents,
+                        depth=EchoDepth.MEDIUM,
+                        existing_categories=existing_cats,
+                        include_entities=True,
+                        include_profiles=True,
+                    )
+                except Exception as e:
+                    logger.warning("Unified batch enrichment failed in enrich_pending: %s", e)
+                    enrichment_results = None
+
+            # Fallback: individual enrichment per memory
+            if enrichment_results is None:
+                enrichment_results = []
+                for c in contents:
+                    if self.unified_enrichment is not None:
+                        try:
+                            enrichment_results.append(
+                                self.unified_enrichment.enrich(c, depth=EchoDepth.MEDIUM)
+                            )
+                        except Exception:
+                            enrichment_results.append(None)
+                    else:
+                        enrichment_results.append(None)
+
+            # Apply enrichment results and update DB
+            db_updates: List[Dict[str, Any]] = []
+            for mem, enrichment in zip(batch, enrichment_results):
+                mem_id = mem["id"]
+                mem_meta = mem.get("metadata", {}) or {}
+                mem_cats = mem.get("categories", []) or []
+
+                if enrichment:
+                    # Apply echo result
+                    if enrichment.echo_result:
+                        mem_meta.update(enrichment.echo_result.to_metadata())
+                        if not mem_cats and enrichment.echo_result.category:
+                            mem_cats = [enrichment.echo_result.category]
+
+                    # Apply category result
+                    if enrichment.category_match and not mem_cats:
+                        mem_cats = [enrichment.category_match.category_id]
+                        mem_meta["category_confidence"] = enrichment.category_match.confidence
+                        mem_meta["category_auto"] = True
+
+                    # Apply extracted facts to metadata
+                    if enrichment.facts:
+                        mem_meta["enrichment_facts"] = enrichment.facts[:8]
+
+                    # Post-store hooks: entities
+                    if self.knowledge_graph and enrichment.entities:
+                        for entity in enrichment.entities:
+                            existing_ent = self.knowledge_graph._get_or_create_entity(
+                                entity.name, entity.entity_type,
+                            )
+                            existing_ent.memory_ids.add(mem_id)
+                        self.knowledge_graph.memory_entities[mem_id] = {
+                            e.name for e in enrichment.entities
+                        }
+
+                    # Post-store hooks: profiles
+                    if self.profile_processor and enrichment.profile_updates:
+                        for profile_update in enrichment.profile_updates:
+                            try:
+                                self.profile_processor.apply_update(
+                                    profile_update=profile_update,
+                                    memory_id=mem_id,
+                                    user_id=user_id,
+                                )
+                            except Exception as e:
+                                logger.warning("Profile update failed during enrichment for %s: %s", mem_id, e)
+
+                    # Generate fact decomposition vectors
+                    if enrichment.facts:
+                        valid_facts = [
+                            (i, f.strip()) for i, f in enumerate(enrichment.facts[:8])
+                            if f.strip() and len(f.strip()) >= 10
+                        ]
+                        if valid_facts:
+                            try:
+                                fact_texts = [ft for _, ft in valid_facts]
+                                fact_embeddings = self.embedder.embed_batch(fact_texts, memory_action="add")
+                                fact_vectors, fact_payloads, fact_ids = [], [], []
+                                for (i, fact_text), fact_emb in zip(valid_facts, fact_embeddings):
+                                    fact_id = f"{mem_id}__fact_{i}"
+                                    fact_vectors.append(fact_emb)
+                                    fact_payloads.append({
+                                        "memory_id": mem_id,
+                                        "is_fact": True,
+                                        "fact_index": i,
+                                        "fact_text": fact_text,
+                                        "user_id": user_id,
+                                    })
+                                    fact_ids.append(fact_id)
+                                if fact_vectors:
+                                    self.vector_store.insert(
+                                        vectors=fact_vectors,
+                                        payloads=fact_payloads,
+                                        ids=fact_ids,
+                                    )
+                            except Exception as e:
+                                logger.warning("Fact embedding failed during enrichment for %s: %s", mem_id, e)
+
+                mem_meta["enrichment_status"] = "complete"
+                db_updates.append({
+                    "id": mem_id,
+                    "metadata": mem_meta,
+                    "categories": mem_cats,
+                    "enrichment_status": "complete",
+                })
+                enriched_count += 1
+
+            # Batch DB update
+            self.db.update_enrichment_bulk(db_updates)
+            batches_processed += 1
+
+        # Check remaining
+        remaining_count = len(self.db.get_pending_enrichment(user_id=user_id, limit=1))
+
+        return {
+            "enriched_count": enriched_count,
+            "batches": batches_processed,
+            "remaining": remaining_count,
         }
 
     def search(
@@ -1477,6 +2347,8 @@ class Memory(MemoryBase):
                     "memory_type": mem_type,
                     "query_intent": query_intent.value if query_intent else None,
                     "confidence": metadata.get("mm_confidence"),
+                    "conversation_context": memory.get("conversation_context"),
+                    "enrichment_status": memory.get("enrichment_status", "complete"),
                 }
             )
 
@@ -1510,6 +2382,28 @@ class Memory(MemoryBase):
             self._persist_categories()
 
         results.sort(key=lambda x: x["composite_score"], reverse=True)
+
+        # Neural reranking: cross-encoder second stage on top candidates
+        rerank_cfg = getattr(self.config, "rerank", None)
+        if rerank and self.reranker and results:
+            try:
+                passages = [r.get("memory", "") for r in results[:limit]]
+                reranked = self.reranker.rerank(
+                    query=query,
+                    passages=passages,
+                    top_n=rerank_cfg.top_n if rerank_cfg and rerank_cfg.top_n > 0 else 0,
+                )
+                # Re-order results by reranker logits
+                idx_to_logit = {r["index"]: r["logit"] for r in reranked}
+                for i, result in enumerate(results[:limit]):
+                    result["rerank_logit"] = idx_to_logit.get(i, float("-inf"))
+                results[:limit] = sorted(
+                    results[:limit],
+                    key=lambda x: x.get("rerank_logit", float("-inf")),
+                    reverse=True,
+                )
+            except Exception as e:
+                logger.warning("Reranking failed, using composite_score order: %s", e)
 
         # Metamemory: auto-log knowledge gap when search returns no results
         if not results and self.config.metamemory.auto_log_gaps:
@@ -2148,7 +3042,23 @@ class Memory(MemoryBase):
         return "semantic"
 
     def _select_primary_text(self, content: str, echo_result: Optional[EchoResult]) -> str:
-        if self.echo_config.use_question_embedding and echo_result and echo_result.question_form:
+        if not echo_result:
+            return content
+
+        # Echo-augmented embedding: compose content + echo data for richer vectors.
+        # Multiple retrieval paths in one embedding — like the brain's multi-path access.
+        if self.echo_config.use_echo_augmented_embedding:
+            parts = [content[:1500]]  # Keep original content (capped to leave room)
+            if echo_result.question_form:
+                parts.append(echo_result.question_form)
+            if echo_result.keywords:
+                parts.append("Keywords: " + ", ".join(echo_result.keywords[:10]))
+            if echo_result.paraphrases:
+                parts.append(echo_result.paraphrases[0])
+            return "\n".join(parts)
+
+        # Legacy: replace content with question_form only
+        if self.echo_config.use_question_embedding and echo_result.question_form:
             return echo_result.question_form
         return content
 
@@ -2303,6 +3213,7 @@ class Memory(MemoryBase):
         agent_id: Optional[str],
         run_id: Optional[str],
         app_id: Optional[str],
+        embedding_cache: Optional[Dict[str, List[float]]] = None,
     ) -> tuple[List[List[float]], List[Dict[str, Any]], List[str]]:
         base_payload = dict(metadata)
         base_payload.update(
@@ -2352,7 +3263,13 @@ class Memory(MemoryBase):
             if echo_result and echo_result.category:
                 payload["category"] = echo_result.category
 
-            vectors.append(vector if vector is not None else self.embedder.embed(cleaned, memory_action="add"))
+            if vector is not None:
+                emb = vector
+            elif embedding_cache is not None and cleaned in embedding_cache:
+                emb = embedding_cache[cleaned]
+            else:
+                emb = self.embedder.embed(cleaned, memory_action="add")
+            vectors.append(emb)
             payloads.append(payload)
             vector_ids.append(node_id or str(uuid.uuid4()))
 
@@ -3001,3 +3918,7 @@ class Memory(MemoryBase):
     def get_decay_log(self, limit: int = 20) -> List[Dict[str, Any]]:
         """Get recent decay history for dashboard sparkline."""
         return self.db.get_decay_log_entries(limit=limit)
+
+
+# Backward-compatible alias — existing code that imports Memory still works.
+Memory = FullMemory
