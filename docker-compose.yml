@@ -1,15 +1,23 @@
 services:
-  engram:
+  dhee:
     build: .
-    ports:
-      - "8100:8100"
+    container_name: dhee
     volumes:
-      - engram-data:/data
+      - dhee-data:/data/dhee
     environment:
-      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - DHEE_DATA_DIR=/data/dhee
+      # Set ONE of these:
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      - ENGRAM_DATA_DIR=/data
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "from dhee import Dhee; print('ok')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    # MCP server (4 tools) — connect via stdio
+    command: ["dhee-mcp"]
 
 volumes:
-  engram-data:
+  dhee-data:
+    driver: local

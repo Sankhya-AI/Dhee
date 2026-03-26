@@ -8,8 +8,8 @@ import os
 import time
 import pytest
 
-from engram.configs.base import MemoryConfig, LLMConfig, EmbedderConfig, VectorStoreConfig
-from engram.memory.main import Memory
+from dhee.configs.base import MemoryConfig, LLMConfig, EmbedderConfig, VectorStoreConfig
+from dhee.memory.main import Memory
 
 # Load keys from .env file in project root
 _ENV_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
@@ -146,7 +146,7 @@ class TestRouterTaskRouter:
 
     def _setup(self, memory):
         from engram_router import AgentRegistry, TaskRouter, RouterConfig
-        from engram.memory.tasks import TaskManager
+        from dhee.memory.tasks import TaskManager
 
         config = RouterConfig()
         registry = AgentRegistry(memory, user_id="system")
@@ -747,7 +747,7 @@ class TestSpawner:
         return Spawner(memory)
 
     def test_spawn_subtasks(self, memory):
-        from engram.memory.tasks import TaskManager
+        from dhee.memory.tasks import TaskManager
 
         tm = TaskManager(memory)
         parent = tm.create_task(title="Build feature X spawn test", description="Complex task", user_id="default")
@@ -763,7 +763,7 @@ class TestSpawner:
         assert len(results) == 3
 
     def test_track_progress(self, memory):
-        from engram.memory.tasks import TaskManager
+        from dhee.memory.tasks import TaskManager
 
         tm = TaskManager(memory)
         parent = tm.create_task(title="Track parent task", user_id="default")
@@ -782,7 +782,7 @@ class TestSpawner:
         assert progress["total"] == 2
 
     def test_is_complete(self, memory):
-        from engram.memory.tasks import TaskManager
+        from dhee.memory.tasks import TaskManager
 
         tm = TaskManager(memory)
         parent = tm.create_task(title="Complete parent task", user_id="default")
@@ -798,7 +798,7 @@ class TestSpawner:
         assert spawner.is_complete(parent_id) is True
 
     def test_cancel_subtasks(self, memory):
-        from engram.memory.tasks import TaskManager
+        from dhee.memory.tasks import TaskManager
 
         tm = TaskManager(memory)
         parent = tm.create_task(title="Cancel parent task", user_id="default")
@@ -811,7 +811,7 @@ class TestSpawner:
         assert cancelled == 2
 
     def test_aggregate(self, memory):
-        from engram.memory.tasks import TaskManager
+        from dhee.memory.tasks import TaskManager
 
         tm = TaskManager(memory)
         parent = tm.create_task(title="Aggregate parent task", user_id="default")
@@ -1057,7 +1057,7 @@ class TestBridgeCoordination:
 
     def test_coordinator_claim(self, memory):
         from engram_bus import Bus
-        from engram.memory.tasks import TaskManager
+        from dhee.memory.tasks import TaskManager
         from engram_bridge.coordination import Coordinator
 
         bus = Bus(db_path=":memory:")
@@ -1465,10 +1465,10 @@ class TestMCPAutoDiscovery:
 
     def test_power_tools_discovered(self, memory):
         """Verify the discovery function finds installed packages."""
-        from engram.mcp_server import server, _discover_power_tools, _power_tool_handlers, _get_power_tool_defs
+        from dhee.mcp_server import server, _discover_power_tools, _power_tool_handlers, _get_power_tool_defs
 
         # Reset discovery state
-        import engram.mcp_server as mcp_mod
+        import dhee.mcp_server as mcp_mod
         mcp_mod._power_discovered = False
         mcp_mod._power_tool_handlers.clear()
 
@@ -1901,7 +1901,7 @@ class TestSalience:
     """Test salience computation."""
 
     def test_heuristic_neutral(self):
-        from engram.core.salience import compute_salience_heuristic
+        from dhee.core.salience import compute_salience_heuristic
 
         result = compute_salience_heuristic("The meeting is at 3pm")
         assert result["sal_valence"] == 0.0
@@ -1909,21 +1909,21 @@ class TestSalience:
         assert result["sal_salience_score"] == 0.0
 
     def test_heuristic_positive(self):
-        from engram.core.salience import compute_salience_heuristic
+        from dhee.core.salience import compute_salience_heuristic
 
         result = compute_salience_heuristic("This is amazing and wonderful news!")
         assert result["sal_valence"] > 0
         assert result["sal_salience_score"] > 0
 
     def test_heuristic_negative_urgent(self):
-        from engram.core.salience import compute_salience_heuristic
+        from dhee.core.salience import compute_salience_heuristic
 
         result = compute_salience_heuristic("Critical production crash! Urgent emergency!")
         assert result["sal_arousal"] > 0
         assert result["sal_salience_score"] > 0
 
     def test_decay_modifier(self):
-        from engram.core.salience import salience_decay_modifier
+        from dhee.core.salience import salience_decay_modifier
 
         # High salience → slower decay (modifier < 1.0)
         assert salience_decay_modifier(1.0) == 0.5
@@ -1942,7 +1942,7 @@ class TestCausalGraph:
     """Test causal relationship types and traversal."""
 
     def test_causal_relation_types_exist(self):
-        from engram.core.graph import RelationType
+        from dhee.core.graph import RelationType
 
         assert RelationType.CAUSED_BY.value == "caused_by"
         assert RelationType.LED_TO.value == "led_to"
@@ -1951,7 +1951,7 @@ class TestCausalGraph:
         assert RelationType.REQUIRES.value == "requires"
 
     def test_get_causal_chain(self):
-        from engram.core.graph import KnowledgeGraph, RelationType
+        from dhee.core.graph import KnowledgeGraph, RelationType
 
         graph = KnowledgeGraph()
         graph.add_relationship("mem_a", "mem_b", RelationType.LED_TO)
@@ -1964,7 +1964,7 @@ class TestCausalGraph:
         assert "mem_c" in chain_ids
 
     def test_detect_causal_language(self):
-        from engram.core.graph import detect_causal_language, RelationType
+        from dhee.core.graph import detect_causal_language, RelationType
 
         result = detect_causal_language("The bug was caused by a race condition")
         assert RelationType.CAUSED_BY in result
@@ -1985,7 +1985,7 @@ class TestAGILoop:
     """Test AGI loop and system health."""
 
     def test_get_system_health(self, memory):
-        from engram.core.agi_loop import get_system_health
+        from dhee.core.agi_loop import get_system_health
 
         health = get_system_health(memory)
         assert "systems" in health
@@ -1994,7 +1994,7 @@ class TestAGILoop:
         assert health["total"] > 0
 
     def test_run_agi_cycle(self, memory):
-        from engram.core.agi_loop import run_agi_cycle
+        from dhee.core.agi_loop import run_agi_cycle
 
         result = run_agi_cycle(memory, user_id="agi_test_user")
         assert "summary" in result

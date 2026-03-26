@@ -6,7 +6,7 @@ import threading
 
 import pytest
 
-from engram.db.sqlite import SQLiteManager, VALID_MEMORY_COLUMNS, VALID_SCENE_COLUMNS, _utcnow_iso
+from dhee.db.sqlite import SQLiteManager, VALID_MEMORY_COLUMNS, VALID_SCENE_COLUMNS, _utcnow_iso
 
 
 @pytest.fixture

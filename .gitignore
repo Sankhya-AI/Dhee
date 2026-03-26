@@ -122,5 +122,73 @@ pip-delete-this-directory.txt
 # Node (dashboard)
 node_modules/
 
-# Rust build artifacts (engram-accel)
+# Rust build artifacts (dhee-accel)
 target/
+
+# ============================================================
+# Excluded from public repo — internal/experimental only
+# ============================================================
+
+# Experimental engram sub-packages
+engram-bridge/
+engram-bus/
+engram-enterprise/
+engram-failure/
+engram-heartbeat/
+engram-identity/
+engram-metamemory/
+engram-policy/
+engram-procedural/
+engram-prospective/
+engram-reconsolidation/
+engram-resilience/
+engram-router/
+engram-spawn/
+engram-warroom/
+engram-working/
+
+# Internal apps
+dashboard/
+landing/
+
+# Models & training artifacts (large binaries)
+models/
+notebooks/
+kaggle_upload/
+
+# Benchmark runs & datasets
+runs/
+data/
+
+# Internal scripts & docs
+scripts/
+deep-research-report.md
+launch-article.md
+pitch-deck.md
+start-bridge.sh
+
+# Agent-specific config (not needed publicly)
+CLAUDE.md
+CURSOR.md
+.claude-plugin/
+.cursor/
+
+# Root-level node (dashboard/landing dependencies)
+/package.json
+/package-lock.json
+
+# Root-level ad-hoc test files
+/test_*.py
+
+# Temp caches
+.pycache_tmp/
+
+# Extra venvs
+.venv-dhee/
+
+# Internal benchmark docs in docs/ (keep only the logo)
+docs/engram_benchmark_blind_sota_program.md
+docs/longmemeval_active_memory_orchestration_plan_2026-02-23.md
+docs/capture_screenshots.py
+docs/screenshots/
+docs/pdf/

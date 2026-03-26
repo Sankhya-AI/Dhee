@@ -4,7 +4,7 @@ import tempfile
 import os
 import uuid
 
-from engram import CoreMemory
+from dhee import CoreMemory
 
 
 class TestCoreMemory:

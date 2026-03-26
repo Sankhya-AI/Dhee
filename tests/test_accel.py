@@ -7,12 +7,12 @@ import math
 import pytest
 from unittest.mock import patch
 
-from engram.utils.math import (
+from dhee.utils.math import (
     cosine_similarity,
     cosine_similarity_batch,
     ACCEL_AVAILABLE,
 )
-from engram.core.retrieval import tokenize, bm25_score_batch
+from dhee.core.retrieval import tokenize, bm25_score_batch
 
 
 # ── cosine_similarity ───────────────────────────────────────────────────
@@ -183,10 +183,10 @@ class TestAccelRequired:
 class TestDecayAccel:
     def test_decay_import(self):
         """Ensure decay module loads without error."""
-        from engram.core.decay import calculate_decayed_strength
+        from dhee.core.decay import calculate_decayed_strength
         assert callable(calculate_decayed_strength)
 
     def test_traces_batch_import(self):
         """Ensure traces batch function is available."""
-        from engram.core.traces import decay_traces_batch
+        from dhee.core.traces import decay_traces_batch
         assert callable(decay_traces_batch)

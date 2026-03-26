@@ -4,9 +4,9 @@ import json
 import pytest
 from unittest.mock import MagicMock, patch
 
-from engram.core.category import CategoryMatch, CategoryProcessor
-from engram.core.echo import EchoDepth, EchoProcessor, EchoResult
-from engram.core.enrichment import (
+from dhee.core.category import CategoryMatch, CategoryProcessor
+from dhee.core.echo import EchoDepth, EchoProcessor, EchoResult
+from dhee.core.enrichment import (
     EnrichmentResult,
     UnifiedCategoryOutput,
     UnifiedEchoOutput,
@@ -18,8 +18,8 @@ from engram.core.enrichment import (
     _normalize_unified_dict,
     _robust_json_load,
 )
-from engram.core.graph import Entity, EntityType, KnowledgeGraph
-from engram.core.profile import ProfileProcessor, ProfileUpdate
+from dhee.core.graph import Entity, EntityType, KnowledgeGraph
+from dhee.core.profile import ProfileProcessor, ProfileUpdate
 
 
 # ---------------------------------------------------------------------------
@@ -423,7 +423,7 @@ class TestFallback:
 
 class TestConfigToggle:
     def test_enrichment_config_defaults(self):
-        from engram.configs.base import EnrichmentConfig
+        from dhee.configs.base import EnrichmentConfig
         config = EnrichmentConfig()
         assert config.enable_unified is False
         assert config.fallback_to_individual is True
@@ -432,18 +432,18 @@ class TestConfigToggle:
         assert config.max_batch_size == 10
 
     def test_memory_config_has_enrichment(self):
-        from engram.configs.base import MemoryConfig
+        from dhee.configs.base import MemoryConfig
         config = MemoryConfig()
         assert hasattr(config, "enrichment")
         assert config.enrichment.enable_unified is False
 
     def test_full_preset_enables_unified(self):
-        from engram.configs.base import MemoryConfig
+        from dhee.configs.base import MemoryConfig
         config = MemoryConfig.full()
         assert config.enrichment.enable_unified is True
 
     def test_minimal_preset_unified_disabled(self):
-        from engram.configs.base import MemoryConfig
+        from dhee.configs.base import MemoryConfig
         config = MemoryConfig.minimal()
         assert config.enrichment.enable_unified is False
 

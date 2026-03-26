@@ -7,7 +7,7 @@ and structural_signature_hash.
 
 import pytest
 
-from engram.skills.structure import (
+from dhee.skills.structure import (
     GapReport,
     Slot,
     SkillStructure,
@@ -18,8 +18,8 @@ from engram.skills.structure import (
     extract_slots_heuristic,
     structural_similarity,
 )
-from engram.skills.hashing import structural_signature_hash
-from engram.skills.schema import Skill
+from dhee.skills.hashing import structural_signature_hash
+from dhee.skills.schema import Skill
 
 
 # ── Slot tests ──

@@ -1,17 +1,17 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `engram/` is the main package. Core logic lives in `engram/core/` (decay, echo, fusion, conflict), while the user-facing API and orchestration live in `engram/memory/`.
-- Integrations are split by concern: `engram/llms/` (Gemini/OpenAI mocks), `engram/embeddings/`, `engram/vector_stores/`, and `engram/db/`.
-- Configuration and utilities live in `engram/configs/` and `engram/utils/`.
-- Entry points/examples: `engram/mcp_server.py` (MCP server) and `engram/example_agent.py`.
-- Tests are simple pytest files in the repo root and package, e.g. `test_echomem.py`, `engram/test_quick.py`, `engram/test_no_api.py`.
+- `dhee/` is the main package. Core logic lives in `dhee/core/` (decay, echo, fusion, conflict), while the user-facing API and orchestration live in `dhee/memory/`.
+- Integrations are split by concern: `dhee/llms/` (Gemini/OpenAI mocks), `dhee/embeddings/`, `dhee/vector_stores/`, and `dhee/db/`.
+- Configuration and utilities live in `dhee/configs/` and `dhee/utils/`.
+- Entry points/examples: `dhee/mcp_server.py` (MCP server) and `dhee/example_agent.py`.
+- Tests are simple pytest files in the repo root and package, e.g. `test_echomem.py`, `dhee/test_quick.py`, `dhee/test_no_api.py`.
 
 ## Build, Test, and Development Commands
 - `pip install -e ".[dev]"` installs dev extras (pytest, pytest-asyncio).
 - `pip install -e ".[gemini,qdrant]"` installs optional runtime dependencies for Gemini + Qdrant.
 - `pytest` runs all tests discovered under `test_*.py`.
-- `python -m engram.mcp_server` or `engram-mcp` runs the MCP server entry point.
+- `python -m dhee.mcp_server` or `engram-mcp` runs the MCP server entry point.
 
 ## Coding Style & Naming Conventions
 - Python 3.9+ codebase; follow PEP 8 with 4-space indentation.
@@ -20,7 +20,7 @@
 
 ## Testing Guidelines
 - Test framework: `pytest` with `pytest-asyncio` for async cases.
-- Name new tests `test_*.py` and place them in the repo root or within `engram/` alongside related modules.
+- Name new tests `test_*.py` and place them in the repo root or within `dhee/` alongside related modules.
 - Keep tests isolated from external services unless explicitly marked or documented.
 
 ## Commit & Pull Request Guidelines

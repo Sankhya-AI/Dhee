@@ -4,10 +4,10 @@ import json
 import os
 import pytest
 
-from engram.skills.miner import SkillMiner
-from engram.skills.schema import Skill, Trajectory, TrajectoryStep
-from engram.skills.store import SkillStore
-from engram.skills.trajectory import TrajectoryRecorder, TrajectoryStore
+from dhee.skills.miner import SkillMiner
+from dhee.skills.schema import Skill, Trajectory, TrajectoryStep
+from dhee.skills.store import SkillStore
+from dhee.skills.trajectory import TrajectoryRecorder, TrajectoryStore
 
 
 class MockDB:

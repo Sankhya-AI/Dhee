@@ -1,7 +1,7 @@
 """Tests for SmartMemory - echo + categories + graph."""
 import pytest
 
-from engram import SmartMemory
+from dhee import SmartMemory
 
 
 class TestSmartMemory:
@@ -95,7 +95,7 @@ class TestSmartMemory:
 
     def test_parent_inheritance(self):
         """SmartMemory inherits from CoreMemory."""
-        from engram import CoreMemory
+        from dhee import CoreMemory
         m = SmartMemory(preset="minimal")
         # Should have all CoreMemory methods
         assert hasattr(m, "add")

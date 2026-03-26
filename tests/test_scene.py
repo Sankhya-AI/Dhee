@@ -7,8 +7,8 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from engram.core.scene import SceneProcessor, SceneDetectionResult, _detect_location, _cosine_similarity
-from engram.db.sqlite import SQLiteManager
+from dhee.core.scene import SceneProcessor, SceneDetectionResult, _detect_location, _cosine_similarity
+from dhee.db.sqlite import SQLiteManager
 
 
 @pytest.fixture

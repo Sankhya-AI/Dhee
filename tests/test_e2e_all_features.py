@@ -37,11 +37,11 @@ _NVIDIA_KEYS = (
 if not any(os.environ.get(key) for key in _NVIDIA_KEYS):
     pytest.skip("requires NVIDIA API credentials", allow_module_level=True)
 
-from engram.configs.base import (
+from dhee.configs.base import (
     MemoryConfig, LLMConfig, EmbedderConfig, VectorStoreConfig,
     EchoMemConfig, CategoryMemConfig, ProfileConfig,
 )
-from engram.memory.main import Memory
+from dhee.memory.main import Memory
 
 
 def create_memory():
@@ -683,7 +683,7 @@ time.sleep(2)  # avoid NVIDIA API rate limits
 
 @test("6.1 — Compute salience (heuristic) for different content")
 def _():
-    from engram.core.salience import compute_salience
+    from dhee.core.salience import compute_salience
 
     neutral = compute_salience("The meeting is at 3pm in room 204")
     positive = compute_salience("We just achieved an amazing breakthrough on the project!")
@@ -698,7 +698,7 @@ def _():
 
 @test("6.2 — Tag a memory with salience")
 def _():
-    from engram.core.salience import compute_salience
+    from dhee.core.salience import compute_salience
 
     # Add a high-salience memory
     result = memory.add(
@@ -724,7 +724,7 @@ def _():
 
 @test("6.3 — Salience decay modifier")
 def _():
-    from engram.core.salience import salience_decay_modifier
+    from dhee.core.salience import salience_decay_modifier
 
     # High salience → decay slower
     high = salience_decay_modifier(1.0)
@@ -745,7 +745,7 @@ def _():
 
 @test("7.1 — Add causal links between memories")
 def _():
-    from engram.core.graph import KnowledgeGraph, RelationType
+    from dhee.core.graph import KnowledgeGraph, RelationType
 
     graph = KnowledgeGraph()
 
@@ -788,7 +788,7 @@ def _():
 
 @test("7.4 — Detect causal language in text")
 def _():
-    from engram.core.graph import detect_causal_language, RelationType
+    from dhee.core.graph import detect_causal_language, RelationType
 
     texts = [
         ("The outage was caused by a misconfigured load balancer", [RelationType.CAUSED_BY]),
@@ -811,7 +811,7 @@ def _():
 
 @test("8.1 — Get system health")
 def _():
-    from engram.core.agi_loop import get_system_health
+    from dhee.core.agi_loop import get_system_health
 
     health = get_system_health(memory, user_id="vivek")
     print(f"  Health: {health['health_pct']:.0f}% ({health['available']}/{health['total']} systems)")
@@ -822,7 +822,7 @@ def _():
 
 @test("8.2 — Run full AGI cognitive cycle")
 def _():
-    from engram.core.agi_loop import run_agi_cycle
+    from dhee.core.agi_loop import run_agi_cycle
 
     result = run_agi_cycle(memory, user_id="vivek")
     summary = result.get("summary", {})

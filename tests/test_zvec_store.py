@@ -7,8 +7,8 @@ import pytest
 
 zvec = pytest.importorskip("zvec", reason="zvec not installed")
 
-from engram.vector_stores.base import MemoryResult
-from engram.vector_stores.zvec_store import ZvecStore, _build_filter_string
+from dhee.vector_stores.base import MemoryResult
+from dhee.vector_stores.zvec_store import ZvecStore, _build_filter_string
 
 
 @pytest.fixture

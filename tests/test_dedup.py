@@ -2,7 +2,7 @@
 
 import uuid
 
-from engram import CoreMemory
+from dhee import CoreMemory
 
 
 def _unique(prefix: str = "dedup") -> str:

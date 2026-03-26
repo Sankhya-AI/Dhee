@@ -3,8 +3,8 @@
 import pytest
 import time
 
-from engram.skills.trajectory import TrajectoryRecorder, TrajectoryStore
-from engram.skills.schema import Trajectory, TrajectoryStep
+from dhee.skills.trajectory import TrajectoryRecorder, TrajectoryStore
+from dhee.skills.schema import Trajectory, TrajectoryStep
 
 
 class TestTrajectoryRecorder:

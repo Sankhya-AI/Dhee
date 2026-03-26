@@ -1,4 +1,4 @@
-"""Benchmark tests for engram-accel Rust acceleration.
+"""Benchmark tests for dhee-accel Rust acceleration.
 
 Run with: pytest tests/test_accel_benchmark.py -v --benchmark-only
 (Requires pytest-benchmark to be installed.)
@@ -7,7 +7,7 @@ Run with: pytest tests/test_accel_benchmark.py -v --benchmark-only
 import random
 import pytest
 
-from engram.utils.math import (
+from dhee.utils.math import (
     cosine_similarity,
     cosine_similarity_batch,
     ACCEL_AVAILABLE,
