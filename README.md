@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="docs/dhee-logo.png" alt="Dhee" width="80">
+  <img src="docs/dhee-logo.png" alt="Dhee" width="80"> <h1 align="center">Dhee</h1>
 </p>
 
-<h1 align="center">Dhee</h1>
+
 
 <h3 align="center">The cognition layer that turns your agent into a HyperAgent.</h3>
 
