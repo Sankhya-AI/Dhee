@@ -1,401 +1,251 @@
-<h1 align="center">
-  <br>
-  <img src="https://img.shields.io/badge/engram-PMK-black?style=for-the-badge" alt="Engram" height="32">
-  <br>
-  Engram
-  <br>
-</h1>
+<p align="center">
+  <img src="docs/dhee-logo.png" alt="Dhee" width="80">
+</p>
 
-<h3 align="center">
-  The Personal Memory Kernel for AI Agents
-</h3>
+<h1 align="center">Dhee</h1>
+
+<h3 align="center">The cognition layer that turns your agent into a HyperAgent.</h3>
 
 <p align="center">
-  Hit a rate limit in Claude Code? Open Codex — it already knows what you were doing.<br>
-  Create a task? Memory picks the best agent automatically.<br>
-  One memory kernel. Shared across every agent. Bio-inspired forgetting. Zero cold starts.
+  4 tools. 1 LLM call per session. ~$0.004 total cost.<br>
+  Your agent remembers, learns from outcomes, and predicts what you need next.
 </p>
 
 <p align="center">
-  <a href="https://pypi.org/project/engram-memory"><img src="https://img.shields.io/badge/python-3.9%2B-blue.svg" alt="Python 3.9+"></a>
-  <a href="https://github.com/Ashish-dwi99/Engram/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
-  <a href="https://github.com/Ashish-dwi99/Engram/actions"><img src="https://github.com/Ashish-dwi99/Engram/actions/workflows/test.yml/badge.svg" alt="Tests"></a>
-  <a href="https://github.com/Ashish-dwi99/Engram"><img src="https://img.shields.io/github/stars/Ashish-dwi99/Engram?style=social" alt="GitHub Stars"></a>
-</p>
-
-<p align="center">
-  <a href="#quick-start">Quick Start</a> &middot;
-  <a href="#why-engram">Why Engram</a> &middot;
-  <a href="#how-it-works">How It Works</a> &middot;
-  <a href="#packages">Packages</a> &middot;
-  <a href="https://github.com/Ashish-dwi99/Engram/blob/main/CHANGELOG.md">Changelog</a> &middot;
-  <a href="https://github.com/Ashish-dwi99/Engram/wiki">Docs</a>
+  <a href="https://pypi.org/project/dhee"><img src="https://img.shields.io/badge/python-3.9%2B-blue.svg" alt="Python 3.9+"></a>
+  <a href="https://github.com/Sankhya-AI/Dhee/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
 </p>
 
 ---
 
-### Dashboard
+## What is Dhee?
 
-<p align="center">
-  <img src="docs/demo/demo.gif" alt="Engram Dashboard Demo" width="720">
-  <br>
-  <em>Kanban board, memory inspector, agent coordination, and chat.</em>
-</p>
+Most memory layers are glorified vector stores. Store text, retrieve text. Your agent is still stateless — it doesn't learn, doesn't track what worked, doesn't warn you when something is regressing.
 
-<details>
-<summary><b>Individual views</b></summary>
+**Dhee is a cognition layer.** It gives any agent — Claude, GPT, Gemini, custom — four capabilities that turn it into a self-improving HyperAgent:
 
-<p align="center">
-  <img src="docs/screenshots/board-kanban.png" alt="Kanban Board" width="720">
-  <br>
-  <em>Kanban board — drag-and-drop task management across statuses</em>
-</p>
+| Capability | What Dhee does | What your agent gets |
+|:-----------|:---------------|:---------------------|
+| **Persistent memory** | Stores facts with echo-augmented retrieval (paraphrases, keywords, question-forms) | "What theme does the user prefer?" matches "User likes dark mode" even though the words are different |
+| **Performance tracking** | Records task outcomes, detects trends automatically | Knows it's regressing on code reviews, warns you before you notice |
+| **Insight synthesis** | Extracts causal hypotheses from outcomes — not raw data, synthesized learnings | "What worked: checking git blame first" transfers to the next bug fix |
+| **Prospective memory** | Stores future triggers — "remember to X when Y" | Surfaces intentions when the trigger context matches |
 
-<p align="center">
-  <img src="docs/screenshots/coordination-agents.png" alt="Agent Coordination" width="720">
-  <br>
-  <em>Agents tab — memory-based orchestration with semantic routing and capability matching</em>
-</p>
+### Benchmark: LongMemEval
 
-<p align="center">
-  <img src="docs/screenshots/memory-view.png" alt="Memory Browser" width="720">
-  <br>
-  <em>Memory browser — search, inspect, and manage the shared memory store</em>
-</p>
+Dhee achieves near-perfect retrieval on [LongMemEval](https://arxiv.org/abs/2410.10813), the standard benchmark for long-term conversational memory — temporal reasoning, multi-session aggregation, knowledge updates, and counterfactual tracking across 500+ questions.
 
-<p align="center">
-  <img src="docs/screenshots/chat-view.png" alt="Chat Interface" width="720">
-  <br>
-  <em>Chat — describe a task and the agent creates it on the board, or just chat</em>
-</p>
-
-</details>
-
----
-
-### Research Highlights
-
-<p align="center">
-  <b>~45% less storage</b> &nbsp;&nbsp;|&nbsp;&nbsp; <b>+26% retrieval accuracy</b> &nbsp;&nbsp;|&nbsp;&nbsp; <b>+12% multi-hop reasoning</b>
-</p>
-
-<p align="center">
-  Based on <a href="https://arxiv.org/abs/2601.18642"><b>FadeMem</b> (arXiv:2601.18642)</a> — biologically-inspired forgetting for efficient agent memory.
-</p>
+> Evaluation run in progress. Full results and methodology will be published in the benchmark report.
 
 ---
 
 ## Quick Start
 
 ```bash
-pip install engram-memory          # 1. Install
-export GEMINI_API_KEY="your-key"   # 2. Set one key (or OPENAI_API_KEY, NVIDIA_API_KEY)
-engram install                     # 3. Auto-configure Claude Code, Cursor, Codex
+pip install dhee[openai,mcp]
+export OPENAI_API_KEY=sk-...
 ```
 
-Restart your agent. Done — it now has persistent memory across sessions and agents.
+### MCP (Claude Code, Cursor — zero code)
 
-**Want the dashboard + orchestration?**
+```json
+{
+  "mcpServers": {
+    "dhee": { "command": "dhee-mcp" }
+  }
+}
+```
+
+Your agent now has 4 tools. It will use them automatically.
+
+### Python SDK
+
+```python
+from dhee import Dhee
+
+d = Dhee()
+d.remember("User prefers dark mode")
+d.recall("what theme does the user like?")
+d.context("fixing auth bug")
+d.checkpoint("Fixed it", what_worked="git blame first")
+```
+
+### CLI
 
 ```bash
-pip install -e "./engram-orchestrator"
-pip install -e "./engram-bridge[web,orchestrator]"
-engram-bridge --channel web        # Open http://127.0.0.1:8200
+dhee remember "User prefers Python"
+dhee recall "programming language"
+dhee checkpoint "Fixed auth bug" --what-worked "checked logs"
+```
+
+### Docker
+
+```bash
+docker compose up -d   # uses OPENAI_API_KEY from env
 ```
 
 ---
 
-## Why Engram
+## The 4 Tools
 
-Every AI agent you use starts with amnesia. But the real pain isn't just forgetting — it's what happens when you **switch agents** and when you have to **decide which agent to use**.
+Every interface — MCP, Python, CLI, JS — exposes the same 4 operations.
 
-### The cold-start problem
+### `remember(content)`
+Store a fact, preference, or observation.
 
-You're 40 minutes into a refactor with Claude Code. You've touched six files, picked a migration strategy, mapped out the remaining TODOs. Then you hit a rate limit. Or your terminal crashes. Or you just need Codex for the next part. So you switch — and the new agent has **zero context**. You re-paste file paths, re-explain decisions, re-describe the plan. Half the time the new agent contradicts something you'd already decided.
-
-### The routing problem
-
-You have three agents configured: Claude Code for deep reasoning, Codex for fast scaffolding, a custom agent for CI. A bug comes in. Which agent handles it? You pick manually every time. When agents finish, the next task sits idle until you notice. You are the orchestrator — and you shouldn't have to be.
-
-**Engram fixes both.** It's a Personal Memory Kernel — one memory store shared across all your agents.
-
-**For handoffs**: when Claude Code pauses, it saves a session digest. When Codex picks up, it loads that digest and continues where you left off. No re-explanation. No cold starts.
-
-**For orchestration**: agents register their capabilities as memories. When a task arrives, Engram semantically matches it against agent capabilities and auto-routes it to the best available agent. Memory *is* the orchestrator — no separate routing service, no manual assignment, no YAML configs mapping tasks to agents.
-
-| Problem | Typical approach | Engram |
-|:--------|:-----------------|:-------|
-| **Switch agents = cold start** | Manual copy-paste | Handoff bus — auto session digests + resume |
-| **Who handles this task?** | You pick manually | Semantic capability matching — auto-route |
-| **Agent at capacity?** | Task sits idle | Load-aware routing with CAS claim/release |
-| **Nobody forgets** | Store everything forever | Ebbinghaus decay — ~45% less storage |
-| **Single retrieval path** | One embedding per memory | 5 retrieval paths per memory (EchoMem) |
-| **No episodic memory** | Vector search only | CAST scenes — time/place/topic clustering |
-| **No consolidation** | Store everything as-is | CLS sleep cycles — episodic to semantic distillation |
-| **No real-time coordination** | Polling or nothing | Active memory signal bus — agents see each other instantly |
-| **Agents don't learn** | Retrain or nothing | Skill-policy memory — agents accumulate reusable skills |
-| **Concurrent access** | Single-process locks | zvec HNSW — multiple agents, directory-based collections |
-
----
-
-## How It Works
-
-Engram has three layers — memory, coordination, and communication:
-
-### Passive Memory — the long-term store
-
-Memories fade via Ebbinghaus decay, get promoted from short-term to long-term through repeated access, and are encoded through multiple retrieval paths (paraphrase, keywords, implications, question-form). Sleep cycles distill episodic conversations into durable semantic facts.
-
-### Active Memory — the real-time signal bus
-
-Agents post ephemeral state ("editing auth.py", "build failing") that other agents see instantly. Signals auto-expire. Important ones get consolidated into long-term storage.
-
-### Memory-as-Orchestrator — the coordination layer
-
-Agent capabilities are stored as memories: *"claude-code: Advanced coding agent. Expert at Python, TypeScript, debugging."* When a task arrives, Engram runs a semantic search over these capability memories, filters by agent availability and capacity, scores candidates, and assigns the task — all through the same memory infrastructure used for everything else. Coordination events (routed, claimed, released) are themselves stored as memories, creating a searchable audit trail.
-
-No new database tables. No separate routing service. The same `Memory.add()` / `Memory.search()` that stores user conversations also stores agent profiles and routes tasks.
-
-### Skill Memory — the self-improvement loop
-
-Agents learn from experience. When an agent completes a task, Engram records the trajectory (actions, tools, results). Successful trajectories accumulate. The Skill Miner analyzes clusters of similar trajectories and extracts reusable **skills** — validated procedures stored as SKILL.md files with YAML frontmatter.
-
-Skills have confidence scores that update on success/failure (Bayesian, asymmetric — failures penalize more). High-confidence skills are automatically suggested when matching tasks arrive. The loop:
-
-```
-Agent works → Trajectory recorded → Miner extracts patterns → Skills stored
-  ↑                                                               |
-  └── Agent applies skill → Outcome logged → Confidence updated ──┘
-```
+**Hot path**: 0 LLM calls, 1 embedding (~$0.0002). The memory is stored immediately. Echo enrichment (paraphrases, keywords, question-forms that make future recall dramatically better) is deferred to `checkpoint`.
 
 ```python
-from engram import SmartMemory
-
-m = SmartMemory(preset="smart")
-
-# Search for relevant skills
-skills = m.search_skills("fix python import error")
-
-# Apply a skill — returns injectable recipe
-result = m.apply_skill(skill_id)
-
-# Report outcome — updates confidence
-m.log_skill_outcome(skill_id, success=True)
+d.remember("User prefers FastAPI over Flask")
+d.remember("Project uses PostgreSQL 15 with pgvector")
 ```
 
-Skills are discovered from `~/.engram/skills/` and `{repo}/.engram/skills/`. Six MCP tools: `search_skills`, `apply_skill`, `log_skill_outcome`, `record_trajectory_step`, `mine_skills`, `get_skill_stats`.
+### `recall(query)`
+Search memory. Returns top-K results ranked by relevance.
 
-### Handoff
-
-When an agent pauses (rate limit, crash, tool switch), it saves a session digest: task summary, decisions made, files touched, TODOs remaining. The next agent loads it and continues. If no digest was saved, Engram falls back to parsing the conversation logs automatically.
-
-<details>
-<summary><b>The memory stack at a glance</b></summary>
-
-| Layer | What it does |
-|:------|:-------------|
-| **FadeMem** | Ebbinghaus-curve decay, SML/LML dual layers, promotion on access |
-| **EchoMem** | 5 retrieval paths per memory (paraphrase, keywords, implications, Q-form) |
-| **CategoryMem** | Auto-discovered hierarchical categories with retrieval boosting |
-| **CAST Scenes** | Episodic narrative memory — time, place, topic clustering |
-| **CLS Distillation** | Sleep-cycle replay: episodic to semantic fact extraction |
-| **Multi-trace** | Benna-Fusi model — fast/mid/slow decay traces per memory |
-| **Intent routing** | Episodic vs semantic query classification |
-| **Skill Memory** | SKILL.md files — discover, apply, and mine reusable agent skills |
-| **Skill Miner** | Trajectory recording → pattern extraction → skill compilation |
-| **Orchestrator** | Agent registry + semantic task routing + CAS claim/release |
-| **Handoff bus** | Session digests, checkpoints, JSONL log fallback |
-| **Active Memory** | Real-time signal bus with TTL tiers |
-</details>
-
----
-
-## Packages
-
-Engram is five pip-installable packages:
-
-```
-engram-memory ← engram-bus ← engram-orchestrator ← engram-bridge ← engram-enterprise
-   (core)        (comms)       (routing)             (dashboard)     (governance)
-```
-
-### [`engram-memory`](./engram/) — Core Memory Engine
-
-The main package. Memory CRUD, semantic search, decay, echo encoding, categories, episodic scenes, MCP server, CLI.
-
-```bash
-pip install engram-memory
-pip install "engram-memory[openai]"     # OpenAI provider
-pip install "engram-memory[ollama]"     # Ollama (local, no key needed)
-pip install "engram-memory[all]"        # everything
-```
+**Hot path**: 0 LLM calls, 1 embedding (~$0.0002). Pure vector search with echo-boosted re-ranking.
 
 ```python
-from engram import Engram
-
-memory = Engram()
-memory.add("User prefers Python over TypeScript", user_id="u1")
-results = memory.search("programming preferences", user_id="u1")
+results = d.recall("what database does the project use?")
+# [{"memory": "Project uses PostgreSQL 15 with pgvector", "score": 0.94}]
 ```
 
-**14 MCP tools** — memory CRUD, semantic search, session handoff, skill search/apply/mine, trajectory recording. One command configures Claude Code, Cursor, and Codex:
+### `context(task_description)`
+HyperAgent session bootstrap. Call once at the start of a conversation.
 
-```bash
-engram install
-```
-
-### [`engram-bus`](./engram-bus/) — Agent Communication Bus
-
-Real-time agent-to-agent coordination. Key/value with TTL, pub/sub messaging, handoff sessions and checkpoints. Zero external dependencies — stdlib only.
-
-```bash
-pip install engram-bus
-```
+Returns everything the agent needs to be effective immediately:
+- **Last session state** — pick up where you left off, zero cold start
+- **Performance trends** — improving or regressing on this task type
+- **Synthesized insights** — "What worked for bug_fix: checking git blame first"
+- **Triggered intentions** — "Remember to run auth tests after modifying login.py"
+- **Proactive warnings** — "Performance on code_review is declining"
+- **Relevant memories** — top matches for the task
 
 ```python
-from engram_bus import Bus
-
-bus = Bus()
-bus.put("status", "refactoring auth", agent="planner", ttl=300)
-bus.publish("progress", {"step": 3, "total": 5}, agent="worker")
+ctx = d.context("fixing the auth bug in login.py")
+# ctx["warnings"] → ["Performance on 'bug_fix' declining (trend: -0.05)"]
+# ctx["insights"] → [{"content": "What worked: git blame → found breaking commit"}]
+# ctx["intentions"] → [{"description": "run auth tests after login.py changes"}]
 ```
 
-[Full documentation →](./engram-bus/README.md)
+### `checkpoint(summary, ...)`
+Save session state before ending. This is where the cognition happens:
 
-### [`engram-orchestrator`](./engram-orchestrator/) — Memory-as-Orchestrator
-
-Agents register capabilities as memories. Tasks auto-route to the best agent via semantic search. No new DB tables — everything is a memory.
-
-```bash
-pip install -e "./engram-orchestrator"
-```
+1. **Session digest** — saved for cross-agent handoff (Claude Code crashes? Cursor picks up instantly)
+2. **Batch enrichment** — 1 LLM call per ~10 memories stored since last checkpoint. Adds echo paraphrases and keywords that make `recall` work across phrasings
+3. **Outcome recording** — tracks score per task type, auto-detects regressions and breakthroughs
+4. **Insight synthesis** — "what worked" and "what failed" become transferable learnings
+5. **Intention storage** — "remember to X when Y" fires when the trigger matches
 
 ```python
-from engram_orchestrator import Coordinator, AgentRegistry
-from engram.memory.main import Memory
-from engram_bus import Bus
-
-memory = Memory(config=...)
-bus = Bus()
-coordinator = Coordinator(memory, bus, config)
-
-# Agents register capabilities — stored as searchable memories
-coordinator.registry.register(
-    "claude-code",
-    capabilities=["python", "typescript", "debugging", "code-review"],
-    description="Advanced coding agent for deep reasoning tasks",
-    agent_type="claude", model="claude-opus-4-6",
+d.checkpoint(
+    "Fixed auth bug in login.py",
+    task_type="bug_fix",
+    outcome_score=1.0,
+    what_worked="git blame showed the exact commit that broke auth",
+    what_failed="grep was too slow on the monorepo",
+    remember_to="run auth tests after any login.py change",
+    trigger_keywords=["login", "auth"],
 )
-
-# Tasks auto-route via semantic matching
-coordinator.start()  # subscribes to bridge.task.created bus events
-
-# Or route manually
-coordinator.router.route(task_id)           # single task
-coordinator.router.route_pending()          # batch all unassigned
-
-# Agents claim tasks atomically (CAS)
-coordinator.claim(task_id, "claude-code")   # returns None if already claimed
-coordinator.release(task_id, "claude-code")
 ```
 
-Three classes, one idea:
+---
 
-| Class | Purpose |
-|:------|:--------|
-| **AgentRegistry** | Store/query agent capability profiles as `memory_type="agent"` memories |
-| **TaskRouter** | Build query from task → semantic search → filter by availability → score → assign |
-| **Coordinator** | Ties registry + router + bus events. CAS claim/release. Event logging as memories |
+## Cost
 
-### [`engram-bridge`](./engram-bridge/) — Dashboard + Channel Adapters
+| Operation | LLM calls | Embed calls | Cost |
+|:----------|:----------|:------------|:-----|
+| `remember` | 0 | 1 | ~$0.0002 |
+| `recall` | 0 | 1 | ~$0.0002 |
+| `context` | 0 | 0-1 | ~$0.0002 |
+| `checkpoint` | 1 per ~10 memories | 0 | ~$0.001 |
+| **Typical session** | **1** | **~15** | **~$0.004** |
 
-Talk to your coding agents from a browser or Telegram. Kanban board, task management, live WebSocket streaming, and the coordination dashboard.
+---
+
+## How It Works (Under the Hood)
+
+Dhee has two layers: the memory store and the cognition engine.
+
+### Memory Store — Engram
+
+Stores memories in SQLite + a vector index. On the hot path (`remember`/`recall`), zero LLM calls — just embedding. At `checkpoint`, unified enrichment runs in a single batched LLM call:
+
+- **Echo encoding** — generates paraphrases, keywords, and question-forms so "User prefers dark mode" also matches queries like "what theme?" or "UI preferences"
+- **Category inference** — auto-tags for filtering
+- **Fact decomposition** — splits compound statements into atomic, searchable facts
+- **Entity + profile extraction** — builds a knowledge graph of people, tools, projects
+
+All of this happens in **1 LLM call per ~10 memories**. Not 4 calls per memory. One batched call.
+
+Memory decays naturally (Ebbinghaus curve). Frequently accessed memories get promoted from short-term to long-term. Unused ones fade. ~45% less storage than systems that keep everything forever.
+
+### Cognition Engine — Buddhi
+
+A parallel intelligence layer that observes the memory pipeline and builds meta-knowledge:
+
+- **Performance tracking** — records outcomes per task type, computes trends (moving average). Auto-generates regression warnings and breakthrough insights.
+- **Insight synthesis** — stores causal hypotheses ("what worked", "what failed"), not raw data. Insights have confidence scores that update on validation/invalidation.
+- **Prospective memory** — stores future triggers with keyword matching. "Remember to run tests after modifying auth" fires when the next query mentions "auth".
+- **Intention detection** — auto-detects "remember to X when Y" patterns in stored memories.
+
+Zero LLM calls on the hot path. Pure pattern matching + statistics. Persistence via JSONL files (~3 files total).
+
+Inspired by [Meta's DGM-Hyperagents](https://arxiv.org/abs/2603.19461) — agents that emergently develop persistent memory and performance tracking achieve self-accelerating improvement that transfers across domains. Dhee provides these capabilities as infrastructure.
+
+---
+
+## Architecture
+
+```
+Agent (Claude, GPT, Cursor, custom)
+  │
+  ├── remember(content)     → Engram: embed + store (0 LLM)
+  ├── recall(query)         → Engram: embed + vector search (0 LLM)
+  ├── context(task)         → Buddhi: performance + insights + intentions + memories
+  └── checkpoint(summary)   → Engram: batch enrich (1 LLM/10 mems)
+                            → Buddhi: outcome + reflect + intention
+```
+
+```
+~/.dhee/
+├── history.db              # SQLite: memories, history, entities
+├── zvec/                   # Vector index (embeddings)
+└── buddhi/
+    ├── insights.jsonl      # Synthesized learnings
+    ├── intentions.jsonl    # Future triggers
+    └── performance.json    # Task type scores + trends
+```
+
+---
+
+## Advanced
+
+### Full MCP Server (24 tools)
+
+Power users who need granular control over skills, trajectories, structural search, and enrichment:
 
 ```bash
-pip install -e "./engram-bridge[web,orchestrator]"
-engram-bridge --channel web
+dhee-mcp-full    # exposes all 24 tools
 ```
 
-The web dashboard at `http://127.0.0.1:8200` includes:
-
-- **Board** — Kanban with drag-and-drop, projects, statuses, tags
-- **Agents** — Coordination dashboard: agent registry, semantic routing, event log
-- **Memory** — Browse and search the memory store
-- **Chat** — Direct agent interaction with live streaming
-
-> See [screenshots above](#dashboard) for a visual tour.
-
-7 coordination REST endpoints under `/api/coordination/`:
-
-| Endpoint | Description |
-|:---------|:------------|
-| `GET /agents` | List agents with capabilities + status |
-| `POST /agents/{name}/register` | Register/update capabilities |
-| `GET /agents/match?q=...` | Semantic capability search |
-| `POST /route/{task_id}` | Route task to best agent |
-| `POST /route-pending` | Batch-route all unassigned |
-| `POST /claim/{task_id}` | Atomic CAS claim |
-| `GET /events` | Coordination event log |
-
-[Full documentation →](./engram-bridge/README.md)
-
-### [`engram-enterprise`](./engram-enterprise/) — Governance Layer
-
-Policy enforcement, provenance tracking, acceptance gates, async operations, and authenticated REST API. Built on top of engram-memory and engram-bus.
-
-```bash
-pip install engram-enterprise
-```
+### Python — Direct Memory Access
 
 ```python
-from engram_enterprise import PersonalMemoryKernel
+from dhee import FullMemory
 
-kernel = PersonalMemoryKernel()
+m = FullMemory()
+m.add("conversation content", user_id="u1", infer=True)
+m.search("query", user_id="u1", limit=10)
+m.think("complex question requiring reasoning across memories")
 ```
 
-[Full documentation →](./engram-enterprise/README.md)
-
----
-
-## Integrations
+### Provider Options
 
 ```bash
-engram install    # auto-configures everything
-```
-
-One command sets up MCP config for Claude Code, Cursor, and Codex. It also deploys the **Claude Code plugin** — a hook that proactively injects relevant memories before every prompt, plus periodic background checkpoints that survive rate limits.
-
-Works with any tool-calling agent via REST: `engram-api` starts a server at `http://127.0.0.1:8100`.
-
----
-
-## Repo Structure
-
-```
-├── engram/                  # engram-memory — core Python package
-│   ├── core/                #   decay, echo, category, scenes, distillation, traces
-│   ├── memory/              #   CoreMemory → SmartMemory → FullMemory
-│   ├── skills/              #   skill schema, store, discovery, executor, miner, trajectories
-│   ├── llms/                #   LLM providers (gemini, openai, nvidia, ollama)
-│   ├── embeddings/          #   embedding providers
-│   ├── vector_stores/       #   zvec, sqlite-vec, in-memory
-│   ├── db/                  #   SQLite persistence
-│   ├── api/                 #   REST API endpoints
-│   ├── mcp_server.py        #   MCP server (14 tools)
-│   └── cli.py               #   CLI interface
-├── engram-bus/              # engram-bus — agent communication
-│   └── engram_bus/          #   bus, pub/sub, handoff store, TCP server
-├── engram-orchestrator/     # engram-orchestrator — memory-as-orchestrator
-│   └── engram_orchestrator/ #   registry, router, coordinator
-├── engram-bridge/           # engram-bridge — dashboard + channel adapters
-│   └── engram_bridge/       #   bridge, channels (web + telegram), coordination shim
-│       └── channels/web-ui/ #   React dashboard (Vite + shadcn/ui)
-├── engram-enterprise/       # engram-enterprise — governance layer
-│   └── engram_enterprise/   #   kernel, policy, provenance, async, API + auth
-├── plugins/                 # Claude Code plugin (hooks, commands, skill)
-├── tests/                   # Test suite (300+ tests)
-├── pyproject.toml           # engram-memory package config
-└── install.sh               # One-line installer
+pip install dhee[openai,mcp]     # OpenAI (recommended, cheapest embeddings)
+pip install dhee[gemini,mcp]     # Google Gemini
+pip install dhee[ollama,mcp]     # Ollama (local, zero cost)
 ```
 
 ---
@@ -403,42 +253,20 @@ Works with any tool-calling agent via REST: `engram-api` starts a server at `htt
 ## Contributing
 
 ```bash
-git clone https://github.com/Ashish-dwi99/Engram.git
-cd Engram
-
-# Core
+git clone https://github.com/Sankhya-AI/Dhee.git
+cd Dhee
 pip install -e ".[dev]"
 pytest
-
-# Bus
-pip install -e "./engram-bus[dev]"
-cd engram-bus && pytest
-
-# Orchestrator
-pip install -e "./engram-orchestrator"
-
-# Bridge (web dashboard)
-pip install -e "./engram-bridge[web,orchestrator]"
-cd engram-bridge/engram_bridge/channels/web-ui && npm install && npm run build
-
-# Enterprise
-pip install -e "./engram-enterprise[dev]"
-cd engram-enterprise && pytest
 ```
 
 ---
 
-## License
-
-MIT — see [LICENSE](LICENSE).
-
----
-
 <p align="center">
-  <b>One memory. Every agent. Zero cold starts. Automatic routing.</b>
+  <b>4 tools. 1 LLM call. Your agent remembers, learns, and predicts.</b>
   <br><br>
-  <a href="https://github.com/Ashish-dwi99/Engram">GitHub</a> &middot;
-  <a href="https://github.com/Ashish-dwi99/Engram/issues">Issues</a> &middot;
-  <a href="https://github.com/Ashish-dwi99/Engram/blob/main/CHANGELOG.md">Changelog</a> &middot;
-  <a href="https://github.com/Ashish-dwi99/Engram/wiki">Docs</a>
+  <a href="https://github.com/Sankhya-AI/Dhee">GitHub</a> &middot;
+  <a href="https://pypi.org/project/dhee">PyPI</a> &middot;
+  <a href="https://github.com/Sankhya-AI/Dhee/issues">Issues</a>
 </p>
+
+<p align="center">MIT License &mdash; <a href="https://sankhyaailabs.com">Sankhya AI</a></p>

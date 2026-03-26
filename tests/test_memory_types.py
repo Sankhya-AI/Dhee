@@ -5,10 +5,10 @@ import tempfile
 
 import pytest
 
-from engram.configs.base import DistillationConfig, MemoryConfig
-from engram.core.intent import QueryIntent, classify_intent
-from engram.core.traces import compute_effective_strength, initialize_traces
-from engram.db.sqlite import SQLiteManager
+from dhee.configs.base import DistillationConfig, MemoryConfig
+from dhee.core.intent import QueryIntent, classify_intent
+from dhee.core.traces import compute_effective_strength, initialize_traces
+from dhee.db.sqlite import SQLiteManager
 
 
 @pytest.fixture
@@ -193,7 +193,7 @@ class TestMultiTraceIntegration:
         assert eff == pytest.approx(0.2 * 0.9)  # Only fast has value
 
         # After deep sleep cascade
-        from engram.core.traces import cascade_traces
+        from dhee.core.traces import cascade_traces
         s_f2, s_m2, s_s2 = cascade_traces(s_f, s_m, s_s, config, deep_sleep=True)
         assert s_m2 > 0.0  # Some transferred to mid
         eff2 = compute_effective_strength(s_f2, s_m2, s_s2, config)

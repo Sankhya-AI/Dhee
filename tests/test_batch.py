@@ -8,8 +8,8 @@ import os
 import tempfile
 import pytest
 
-from engram.configs.base import BatchConfig, MemoryConfig
-from engram.memory.main import Memory
+from dhee.configs.base import BatchConfig, MemoryConfig
+from dhee.memory.main import Memory
 
 
 def _make_memory(tmpdir, batch_enabled=True, echo_enabled=True, categories_enabled=True):
@@ -157,7 +157,7 @@ class TestBatchDBInsert:
 class TestEmbedBatch:
     def test_embed_batch_default_fallback(self):
         """BaseEmbedder.embed_batch defaults to sequential."""
-        from engram.embeddings.base import BaseEmbedder
+        from dhee.embeddings.base import BaseEmbedder
 
         class DummyEmbedder(BaseEmbedder):
             def embed(self, text, memory_action=None):
@@ -170,7 +170,7 @@ class TestEmbedBatch:
         assert results[1] == [5.0]
 
     def test_embed_batch_empty(self):
-        from engram.embeddings.base import BaseEmbedder
+        from dhee.embeddings.base import BaseEmbedder
 
         class DummyEmbedder(BaseEmbedder):
             def embed(self, text, memory_action=None):
@@ -183,7 +183,7 @@ class TestEmbedBatch:
 class TestEchoProcessBatch:
     def test_echo_process_batch_shallow(self):
         """Shallow batch skips LLM entirely."""
-        from engram.core.echo import EchoProcessor, EchoDepth
+        from dhee.core.echo import EchoProcessor, EchoDepth
 
         class MockLLM:
             def generate(self, prompt):
@@ -199,7 +199,7 @@ class TestEchoProcessBatch:
             assert r.echo_depth == EchoDepth.SHALLOW
 
     def test_echo_process_batch_empty(self):
-        from engram.core.echo import EchoProcessor
+        from dhee.core.echo import EchoProcessor
 
         class MockLLM:
             def generate(self, prompt):
@@ -210,7 +210,7 @@ class TestEchoProcessBatch:
 
     def test_echo_process_batch_single(self):
         """Single item goes through regular process()."""
-        from engram.core.echo import EchoProcessor, EchoDepth
+        from dhee.core.echo import EchoProcessor, EchoDepth
 
         class MockLLM:
             def generate(self, prompt):
@@ -224,7 +224,7 @@ class TestEchoProcessBatch:
 class TestCategoryBatch:
     def test_detect_categories_batch_keyword_match(self):
         """Keyword matches should be resolved without LLM."""
-        from engram.core.category import CategoryProcessor
+        from dhee.core.category import CategoryProcessor
 
         class MockLLM:
             def generate(self, prompt):
@@ -244,7 +244,7 @@ class TestCategoryBatch:
         assert len(results) == 2
 
     def test_detect_categories_batch_empty(self):
-        from engram.core.category import CategoryProcessor
+        from dhee.core.category import CategoryProcessor
 
         class MockLLM:
             def generate(self, prompt):

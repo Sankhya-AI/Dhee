@@ -5,9 +5,9 @@ import tempfile
 
 import pytest
 
-from engram.configs.base import MemoryConfig
-from engram.memory.main import Memory
-from engram.memory.projects import ProjectManager, DEFAULT_STATUSES
+from dhee.configs.base import MemoryConfig
+from dhee.memory.main import Memory
+from dhee.memory.projects import ProjectManager, DEFAULT_STATUSES
 
 
 def _make_memory(tmpdir):

@@ -2,11 +2,11 @@
 # engram installer — run with: curl -fsSL https://raw.githubusercontent.com/Ashish-dwi99/Engram/main/install.sh | sh
 set -e
 
-ENGRAM_HOME="$HOME/.engram"
+ENGRAM_HOME="$HOME/.dhee"
 VENV_DIR="$ENGRAM_HOME/venv"
 BIN_DIR="$HOME/.local/bin"
 MIN_PYTHON="3.9"
-PACKAGE="engram-memory[all]"
+PACKAGE="dhee[all]"
 
 # --- Colors (if terminal supports them) ---
 if [ -t 1 ]; then
@@ -85,7 +85,7 @@ info "Installing $PACKAGE ..."
 
 # --- Symlink binaries ---
 mkdir -p "$BIN_DIR"
-for bin_name in engram engram-mcp engram-bus; do
+for bin_name in dhee dhee-mcp; do
     src="$VENV_DIR/bin/$bin_name"
     dst="$BIN_DIR/$bin_name"
     if [ -f "$src" ]; then
@@ -115,6 +115,6 @@ case ":$PATH:" in
 esac
 
 # --- Done ---
-printf "\n${BOLD}${GREEN}engram installed successfully!${RESET}\n\n"
-printf "  Run ${BOLD}engram setup${RESET} to get started.\n"
-printf "  Uninstall: ${BOLD}engram uninstall${RESET} or ${BOLD}rm -rf ~/.engram${RESET}\n\n"
+printf "\n${BOLD}${GREEN}dhee installed successfully!${RESET}\n\n"
+printf "  Run ${BOLD}dhee setup${RESET} to get started.\n"
+printf "  Uninstall: ${BOLD}dhee uninstall${RESET} or ${BOLD}rm -rf ~/.dhee${RESET}\n\n"

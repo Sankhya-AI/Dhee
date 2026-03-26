@@ -5,8 +5,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from engram.configs.base import DistillationConfig
-from engram.core.traces import (
+from dhee.configs.base import DistillationConfig
+from dhee.core.traces import (
     boost_fast_trace,
     cascade_traces,
     compute_effective_strength,

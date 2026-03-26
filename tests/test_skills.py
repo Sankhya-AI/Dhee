@@ -4,11 +4,11 @@ import os
 import pytest
 import tempfile
 
-from engram.skills.schema import Skill, TrajectoryStep, Trajectory
-from engram.skills.store import SkillStore
-from engram.skills.executor import SkillExecutor
-from engram.skills.outcomes import OutcomeTracker, compute_confidence
-from engram.skills.discovery import discover_skill_dirs, scan_skill_files, load_skill_file
+from dhee.skills.schema import Skill, TrajectoryStep, Trajectory
+from dhee.skills.store import SkillStore
+from dhee.skills.executor import SkillExecutor
+from dhee.skills.outcomes import OutcomeTracker, compute_confidence
+from dhee.skills.discovery import discover_skill_dirs, scan_skill_files, load_skill_file
 
 
 # ── Schema tests ──

@@ -6,7 +6,7 @@ import uuid
 
 import pytest
 
-from engram.db.sqlite import SQLiteManager
+from dhee.db.sqlite import SQLiteManager
 
 
 @pytest.fixture

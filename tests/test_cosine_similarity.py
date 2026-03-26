@@ -1,7 +1,7 @@
 """Tests for engram.utils.math cosine_similarity."""
 
 import pytest
-from engram.utils.math import cosine_similarity
+from dhee.utils.math import cosine_similarity
 
 
 def test_identical_vectors():

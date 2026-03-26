@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from engram.core.log_parser import (
+from dhee.core.log_parser import (
     _escape_path,
     _extract_text,
     _extract_tool_artifacts,

@@ -1,6 +1,6 @@
 """Tests for MemoryConfig preset factory methods."""
 
-from engram.configs.base import MemoryConfig
+from dhee.configs.base import MemoryConfig
 
 
 class TestMemoryPresets:

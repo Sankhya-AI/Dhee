@@ -8,9 +8,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from engram.configs.base import DistillationConfig
-from engram.core.distillation import ReplayDistiller
-from engram.db.sqlite import SQLiteManager
+from dhee.configs.base import DistillationConfig
+from dhee.core.distillation import ReplayDistiller
+from dhee.db.sqlite import SQLiteManager
 
 
 @pytest.fixture

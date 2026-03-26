@@ -6,13 +6,13 @@ from unittest.mock import MagicMock, PropertyMock
 
 import pytest
 
-from engram.configs.base import DistillationConfig, FadeMemConfig
-from engram.core.forgetting import (
+from dhee.configs.base import DistillationConfig, FadeMemConfig
+from dhee.core.forgetting import (
     HomeostaticNormalizer,
     InterferencePruner,
     RedundancyCollapser,
 )
-from engram.db.sqlite import SQLiteManager
+from dhee.db.sqlite import SQLiteManager
 
 
 @pytest.fixture

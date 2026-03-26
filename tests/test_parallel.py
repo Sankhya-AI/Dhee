@@ -8,7 +8,7 @@ import time
 import threading
 import pytest
 
-from engram.memory.parallel import ParallelExecutor
+from dhee.memory.parallel import ParallelExecutor
 
 
 # ── ParallelExecutor unit tests ─────────────────────────────────────────
@@ -107,7 +107,7 @@ class TestParallelExecutor:
 
 class TestParallelConfig:
     def test_config_defaults(self):
-        from engram.configs.base import ParallelConfig
+        from dhee.configs.base import ParallelConfig
         config = ParallelConfig()
         assert config.enable_parallel is False
         assert config.max_workers == 4
@@ -116,19 +116,19 @@ class TestParallelConfig:
         assert config.parallel_decay is True
 
     def test_config_in_memory_config(self):
-        from engram.configs.base import MemoryConfig
+        from dhee.configs.base import MemoryConfig
         config = MemoryConfig()
         assert hasattr(config, "parallel")
         assert config.parallel.enable_parallel is False
 
     def test_config_enable_parallel(self):
-        from engram.configs.base import MemoryConfig, ParallelConfig
+        from dhee.configs.base import MemoryConfig, ParallelConfig
         config = MemoryConfig(parallel=ParallelConfig(enable_parallel=True, max_workers=8))
         assert config.parallel.enable_parallel is True
         assert config.parallel.max_workers == 8
 
     def test_max_workers_clamped(self):
-        from engram.configs.base import ParallelConfig
+        from dhee.configs.base import ParallelConfig
         # Too low
         config = ParallelConfig(max_workers=0)
         assert config.max_workers == 1
@@ -144,8 +144,8 @@ class TestParallelMemoryIntegration:
 
     def test_memory_no_executor_by_default(self):
         """With default config, no executor is created."""
-        from engram.configs.base import MemoryConfig
-        from engram.memory.main import Memory
+        from dhee.configs.base import MemoryConfig
+        from dhee.memory.main import Memory
         import tempfile, os
         with tempfile.TemporaryDirectory() as tmpdir:
             config = MemoryConfig(
@@ -164,8 +164,8 @@ class TestParallelMemoryIntegration:
 
     def test_memory_creates_executor_when_enabled(self):
         """With enable_parallel=True, executor is created."""
-        from engram.configs.base import MemoryConfig, ParallelConfig
-        from engram.memory.main import Memory
+        from dhee.configs.base import MemoryConfig, ParallelConfig
+        from dhee.memory.main import Memory
         import tempfile, os
         with tempfile.TemporaryDirectory() as tmpdir:
             config = MemoryConfig(
@@ -186,8 +186,8 @@ class TestParallelMemoryIntegration:
 
     def test_memory_close_shuts_down_executor(self):
         """close() cleanly shuts down the executor."""
-        from engram.configs.base import MemoryConfig, ParallelConfig
-        from engram.memory.main import Memory
+        from dhee.configs.base import MemoryConfig, ParallelConfig
+        from dhee.memory.main import Memory
         import tempfile, os
         with tempfile.TemporaryDirectory() as tmpdir:
             config = MemoryConfig(

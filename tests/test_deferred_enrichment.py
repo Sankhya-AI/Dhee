@@ -21,7 +21,7 @@ import tempfile
 
 import pytest
 
-from engram.configs.base import (
+from dhee.configs.base import (
     BatchConfig,
     CategoryMemConfig,
     EchoMemConfig,
@@ -34,7 +34,7 @@ from engram.configs.base import (
     SceneConfig,
     VectorStoreConfig,
 )
-from engram.memory.main import FullMemory as Memory
+from dhee.memory.main import FullMemory as Memory
 
 
 def _make_deferred_memory(tmpdir, defer=True, echo=False, categories=False):
@@ -317,7 +317,7 @@ class TestDBMigration:
     def test_columns_exist_after_migration(self):
         """New columns are created during DB init."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            from engram.db.sqlite import SQLiteManager
+            from dhee.db.sqlite import SQLiteManager
             db = SQLiteManager(os.path.join(tmpdir, "test.db"))
             # Try inserting with the new columns
             import uuid
@@ -338,7 +338,7 @@ class TestDBMigration:
     def test_get_pending_enrichment(self):
         """get_pending_enrichment returns only pending memories."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            from engram.db.sqlite import SQLiteManager
+            from dhee.db.sqlite import SQLiteManager
             db = SQLiteManager(os.path.join(tmpdir, "test.db"))
             import uuid
 
@@ -363,7 +363,7 @@ class TestDBMigration:
     def test_update_enrichment_status(self):
         """update_enrichment_status marks a memory as complete."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            from engram.db.sqlite import SQLiteManager
+            from dhee.db.sqlite import SQLiteManager
             db = SQLiteManager(os.path.join(tmpdir, "test.db"))
             import uuid
 

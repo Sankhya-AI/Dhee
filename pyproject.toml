@@ -3,16 +3,16 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "engram-memory"
-version = "0.6.0"
-description = "The memory layer for AI agents. Bio-inspired decay, echo encoding, zero-config."
+name = "dhee"
+version = "1.0.0"
+description = "Cognition as a Service — the memory layer that makes ANY agent intelligent"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.9"
 license = {text = "MIT"}
 authors = [
-    {name = "Engram Team"}
+    {name = "Sankhya AI Labs"}
 ]
-keywords = ["memory-layer", "mcp", "claude", "cursor", "codex", "ai", "agents", "forgetting", "llm"]
+keywords = ["memory-layer", "cognition", "mcp", "claude", "cursor", "codex", "ai", "agents", "forgetting", "llm"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -27,21 +27,26 @@ dependencies = [
     "pydantic>=2.0",
     "requests>=2.28.0",
     "pyyaml>=6.0",
-    "engram-accel>=0.1.0",
+    "dhee-accel>=0.1.0",
 ]
 
 [project.optional-dependencies]
 # LLM / embedding providers (install what you use)
 gemini = ["google-genai>=1.0.0"]
 openai = ["openai>=1.0.0"]
-nvidia = ["openai>=1.0.0"]
 ollama = ["ollama>=0.4.0"]
-zvec = ["zvec>=0.2.0"]
+# Internal providers (not documented, still functional)
+nvidia = ["openai>=1.0.0"]
+zvec = ["zvec>=0.2.1"]
 sqlite_vec = ["sqlite-vec>=0.1.1"]
+# Local Qwen stack (CPU-native, zero API cost)
+local = ["llama-cpp-python>=0.3", "sentence-transformers>=3.0"]
 # Integrations
 mcp = ["mcp>=1.0.0"]
 api = ["fastapi>=0.100.0", "uvicorn>=0.20.0"]
 bus = ["engram-bus>=0.1.0"]
+# Training (QLoRA fine-tuning)
+training = ["unsloth", "datasets>=2.0", "trl>=0.7", "peft>=0.6"]
 all = [
     "google-genai>=1.0.0",
     "openai>=1.0.0",
@@ -49,8 +54,10 @@ all = [
     "mcp>=1.0.0",
     "fastapi>=0.100.0",
     "uvicorn>=0.20.0",
-    "engram-accel>=0.1.0",
-    "engram-bus>=0.1.0",
+    "dhee-accel>=0.1.0",
+    "dhee-bus>=0.1.0",
+    "llama-cpp-python>=0.3",
+    "sentence-transformers>=3.0",
 ]
 dev = [
     "pytest>=7.0.0",
@@ -59,16 +66,17 @@ dev = [
 ]
 
 [project.scripts]
-engram-mcp = "engram.mcp_server:run"
-engram = "engram.cli:main"
+dhee = "dhee.client:main"
+dhee-mcp = "dhee.mcp_slim:run"
+dhee-mcp-full = "dhee.mcp_server:run"
 
 [project.urls]
-Homepage = "https://github.com/Ashish-dwi99/Engram"
-Repository = "https://github.com/Ashish-dwi99/Engram"
-Issues = "https://github.com/Ashish-dwi99/Engram/issues"
-Documentation = "https://github.com/Ashish-dwi99/Engram#readme"
-Changelog = "https://github.com/Ashish-dwi99/Engram/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/Sankhya-AI/Dhee"
+Repository = "https://github.com/Sankhya-AI/Dhee"
+Issues = "https://github.com/Sankhya-AI/Dhee/issues"
+Documentation = "https://github.com/Sankhya-AI/Dhee#readme"
+Changelog = "https://github.com/Sankhya-AI/Dhee/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["engram*"]
+include = ["dhee*"]

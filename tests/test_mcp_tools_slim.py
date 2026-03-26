@@ -1,6 +1,6 @@
 """Verify MCP server tool contract."""
 
-from engram import mcp_server
+from dhee import mcp_server
 
 EXPECTED_TOOL_NAMES = {
     "remember",

@@ -1,6 +1,6 @@
 """Tests for query embedding LRU cache."""
 
-from engram import CoreMemory
+from dhee import CoreMemory
 
 
 class TestQueryCache:

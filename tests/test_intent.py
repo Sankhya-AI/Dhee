@@ -2,7 +2,7 @@
 
 import pytest
 
-from engram.core.intent import QueryIntent, classify_intent
+from dhee.core.intent import QueryIntent, classify_intent
 
 
 class TestEpisodicQueries:

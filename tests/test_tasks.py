@@ -9,9 +9,9 @@ import tempfile
 
 import pytest
 
-from engram.configs.base import MemoryConfig, TaskConfig
-from engram.memory.main import Memory
-from engram.memory.tasks import TaskManager, TASK_STATUSES, ACTIVE_STATUSES
+from dhee.configs.base import MemoryConfig, TaskConfig
+from dhee.memory.main import Memory
+from dhee.memory.tasks import TaskManager, TASK_STATUSES, ACTIVE_STATUSES
 
 
 def _make_memory(tmpdir):

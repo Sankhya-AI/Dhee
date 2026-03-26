@@ -6,8 +6,8 @@ import uuid
 
 import pytest
 
-from engram.core.profile import ProfileProcessor, ProfileUpdate, _SELF_PATTERNS, _PERSON_PATTERN
-from engram.db.sqlite import SQLiteManager
+from dhee.core.profile import ProfileProcessor, ProfileUpdate, _SELF_PATTERNS, _PERSON_PATTERN
+from dhee.db.sqlite import SQLiteManager
 
 
 @pytest.fixture

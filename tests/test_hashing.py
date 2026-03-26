@@ -2,7 +2,7 @@
 
 import pytest
 
-from engram.skills.hashing import (
+from dhee.skills.hashing import (
     content_hash,
     skill_signature_hash,
     stable_json,
