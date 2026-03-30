@@ -1,6 +1,6 @@
-"""Tests for engram-accel Rust acceleration layer.
+"""Tests for dhee-accel Rust acceleration layer.
 
-Tests correctness of the Rust implementation. engram_accel is required.
+Tests correctness of the Rust implementation. dhee_accel is required.
 """
 
 import math

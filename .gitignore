@@ -51,7 +51,7 @@ venv.bak/
 secrets.json
 credentials.json
 
-# Engram specific
+# Dhee specific
 # SQLite databases
 *.db
 *.db-journal
@@ -59,9 +59,9 @@ credentials.json
 *.db-shm
 
 # History and cache directories
-.engram/
+.dhee/
 history.db
-engram_history.db
+dhee_history.db
 fadem_history.db
 
 # Temporary test files
@@ -129,9 +129,9 @@ target/
 # Excluded from public repo — internal/experimental only
 # ============================================================
 
-# Experimental engram sub-packages
+# Experimental sub-packages
 engram-bridge/
-engram-bus/
+dhee-bus/
 engram-enterprise/
 engram-failure/
 engram-heartbeat/

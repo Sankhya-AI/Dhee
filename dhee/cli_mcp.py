@@ -8,18 +8,17 @@ from typing import Any, Dict, List, Tuple
 from dhee.cli_config import PROVIDER_DEFAULTS
 
 
-def _engram_mcp_entry() -> str:
-    """Return the engram-mcp command path."""
-    # Prefer the entry point in the same prefix as the running Python
+def _dhee_mcp_entry() -> str:
+    """Return the dhee-mcp command path."""
     prefix = os.path.dirname(os.path.dirname(sys.executable))
     candidates = [
-        os.path.join(prefix, "bin", "engram-mcp"),
-        os.path.join(os.path.expanduser("~"), ".local", "bin", "engram-mcp"),
+        os.path.join(prefix, "bin", "dhee-mcp"),
+        os.path.join(os.path.expanduser("~"), ".local", "bin", "dhee-mcp"),
     ]
     for c in candidates:
         if os.path.exists(c):
             return c
-    return "engram-mcp"
+    return "dhee-mcp"
 
 
 def _build_env_block(config: Dict[str, Any]) -> Dict[str, str]:
@@ -40,7 +39,7 @@ def _build_env_block(config: Dict[str, Any]) -> Dict[str, str]:
 def _mcp_server_block(config: Dict[str, Any]) -> Dict[str, Any]:
     """Build the MCP server config block for engram."""
     return {
-        "command": _engram_mcp_entry(),
+        "command": _dhee_mcp_entry(),
         "args": [],
         "env": _build_env_block(config),
     }
@@ -78,7 +77,7 @@ def _configure_claude_code(config: Dict[str, Any]) -> str:
     data = _read_json(path)
     if "mcpServers" not in data:
         data["mcpServers"] = {}
-    data["mcpServers"]["engram"] = _mcp_server_block(config)
+    data["mcpServers"]["dhee"] = _mcp_server_block(config)
     _write_json(path, data)
     return "configured"
 
@@ -100,7 +99,7 @@ def _configure_claude_desktop(config: Dict[str, Any]) -> str:
     data = _read_json(path)
     if "mcpServers" not in data:
         data["mcpServers"] = {}
-    data["mcpServers"]["engram"] = _mcp_server_block(config)
+    data["mcpServers"]["dhee"] = _mcp_server_block(config)
     _write_json(path, data)
     return "configured"
 
@@ -113,7 +112,7 @@ def _configure_cursor(config: Dict[str, Any]) -> str:
     data = _read_json(path)
     if "mcpServers" not in data:
         data["mcpServers"] = {}
-    data["mcpServers"]["engram"] = _mcp_server_block(config)
+    data["mcpServers"]["dhee"] = _mcp_server_block(config)
     _write_json(path, data)
     return "configured"
 
@@ -135,7 +134,7 @@ def _configure_codex(config: Dict[str, Any]) -> str:
     env_lines = "\n".join(f'  {k} = "{v}"' for k, v in env.items())
     block = (
         f'\n[mcp_servers.dhee]\n'
-        f'command = "{_engram_mcp_entry()}"\n'
+        f'command = "{_dhee_mcp_entry()}"\n'
         f'args = []\n'
     )
     if env_lines:

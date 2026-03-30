@@ -26,7 +26,7 @@ def minimal_config():
         VectorStoreConfig,
     )
 
-    data_dir = os.environ.get("DHEE_DATA_DIR") or os.environ.get("ENGRAM_DATA_DIR") or os.path.join(os.path.expanduser("~"), ".dhee")
+    data_dir = os.environ.get("DHEE_DATA_DIR") or os.path.join(os.path.expanduser("~"), ".dhee")
     os.makedirs(data_dir, exist_ok=True)
 
     return MemoryConfig(
@@ -73,7 +73,7 @@ def smart_config():
     from dhee.utils.factory import _detect_provider
 
     embedder_provider, llm_provider = _detect_provider()
-    data_dir = os.environ.get("DHEE_DATA_DIR") or os.environ.get("ENGRAM_DATA_DIR") or os.path.join(os.path.expanduser("~"), ".dhee")
+    data_dir = os.environ.get("DHEE_DATA_DIR") or os.path.join(os.path.expanduser("~"), ".dhee")
     os.makedirs(data_dir, exist_ok=True)
 
     if embedder_provider == "simple":

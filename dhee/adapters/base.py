@@ -123,13 +123,17 @@ class DheePlugin:
         result = self._engram.add(content, user_id=uid, infer=False, metadata=metadata)
 
         response: Dict[str, Any] = {"stored": True}
+        memory_id = None
         if isinstance(result, dict):
             rs = result.get("results", [])
             if rs:
-                response["id"] = rs[0].get("id")
+                memory_id = rs[0].get("id")
+                response["id"] = memory_id
 
-        # Buddhi: detect intentions in the content
-        intention = self._buddhi.on_memory_stored(content=content, user_id=uid)
+        # Buddhi: detect intentions, record episode event, create beliefs
+        intention = self._buddhi.on_memory_stored(
+            content=content, user_id=uid, memory_id=memory_id,
+        )
         if intention:
             response["detected_intention"] = intention.to_dict()
 
@@ -196,6 +200,12 @@ class DheePlugin:
         repo: Optional[str] = None,
         user_id: Optional[str] = None,
         agent_id: str = "dhee",
+        # Structured task state (Phase 3)
+        goal: Optional[str] = None,
+        plan: Optional[List[str]] = None,
+        plan_rationale: Optional[str] = None,
+        blockers: Optional[List[str]] = None,
+        outcome_evidence: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Save session state. Where the cognition happens.
 
@@ -204,6 +214,9 @@ class DheePlugin:
         3. Outcome recording → performance tracking
         4. Insight synthesis → transferable learnings
         5. Intention storage → prospective memory
+        6. Episode closure → temporal experience unit
+        7. Task state update → structured progress tracking
+        8. Selective forgetting → utility-based cleanup
         """
         uid = user_id or self._user_id
         result: Dict[str, Any] = {}
@@ -262,6 +275,73 @@ class DheePlugin:
             )
             result["intention_stored"] = intention.to_dict()
 
+        # 6. Episode closure
+        try:
+            ep_store = self._buddhi._get_episode_store()
+            ep_store.record_event(
+                user_id=uid,
+                event_type="checkpoint",
+                content=summary[:500],
+                metadata={"status": status, "outcome_score": outcome_score},
+            )
+            if status == "completed":
+                episode = ep_store.end_episode(uid, outcome_score, summary)
+                if episode:
+                    result["episode_closed"] = episode.id
+        except Exception:
+            pass
+
+        # 7. Task state update
+        try:
+            ts_store = self._buddhi._get_task_state_store()
+            active_task = ts_store.get_active_task(uid)
+
+            if goal or plan:
+                # Create or update task state
+                if not active_task or active_task.goal != (goal or active_task.goal):
+                    active_task = ts_store.create_task(
+                        user_id=uid,
+                        goal=goal or summary,
+                        task_type=task_type or "general",
+                        plan=plan,
+                        plan_rationale=plan_rationale,
+                    )
+                    active_task.start()
+                    result["task_created"] = active_task.id
+                elif plan:
+                    active_task.set_plan(plan, plan_rationale)
+
+            if active_task:
+                # Add blockers
+                if blockers:
+                    for b in blockers:
+                        active_task.add_blocker(b, severity="soft")
+
+                # Complete task if outcome provided
+                if status == "completed" and outcome_score is not None:
+                    if outcome_score >= 0.5:
+                        active_task.complete(
+                            score=outcome_score,
+                            summary=summary,
+                            evidence=outcome_evidence,
+                        )
+                    else:
+                        active_task.fail(summary, evidence=outcome_evidence)
+                    result["task_completed"] = active_task.id
+
+                ts_store.update_task(active_task)
+        except Exception:
+            pass
+
+        # 8. Selective forgetting (periodic cleanup)
+        try:
+            ep_store = self._buddhi._get_episode_store()
+            archived = ep_store.selective_forget(uid)
+            if archived > 0:
+                result["episodes_archived"] = archived
+        except Exception:
+            pass
+
         return result
 
     # ------------------------------------------------------------------
@@ -272,6 +352,7 @@ class DheePlugin:
         self,
         task_description: Optional[str] = None,
         user_id: Optional[str] = None,
+        task_type: Optional[str] = None,
     ) -> str:
         """Start a session and return a frozen system prompt block.
 
@@ -279,10 +360,23 @@ class DheePlugin:
         Inject it into your agent's system prompt at session start.
         The snapshot is frozen — writes during the session update storage
         but don't change this prompt, preserving LLM prefix caches.
+
+        Also begins an Episode and creates/resumes a TaskState.
         """
         uid = user_id or self._user_id
         self._session_id = str(uuid.uuid4())
         self._session_start_time = time.time()
+
+        # Begin episode
+        try:
+            ep_store = self._buddhi._get_episode_store()
+            ep_store.begin_episode(
+                user_id=uid,
+                task_description=task_description or "session",
+                task_type=task_type or "general",
+            )
+        except Exception:
+            pass
 
         ctx = self.context(task_description=task_description, user_id=uid)
         return self._render_system_prompt(ctx, task_description)
@@ -305,6 +399,81 @@ class DheePlugin:
         self._session_id = None
         self._session_start_time = None
         return result
+
+    # ------------------------------------------------------------------
+    # Phase 3: Belief management
+    # ------------------------------------------------------------------
+
+    def add_belief(
+        self,
+        claim: str,
+        domain: str = "general",
+        confidence: float = 0.5,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Explicitly add a belief with confidence tracking."""
+        uid = user_id or self._user_id
+        b_store = self._buddhi._get_belief_store()
+        belief, contradictions = b_store.add_belief(
+            user_id=uid, claim=claim, domain=domain,
+            confidence=confidence, source="user",
+        )
+        result = {"belief_id": belief.id, "confidence": belief.confidence}
+        if contradictions:
+            result["contradictions"] = [
+                {"claim": c.claim[:200], "confidence": c.confidence}
+                for c in contradictions
+            ]
+        return result
+
+    def challenge_belief(
+        self,
+        belief_id: str,
+        evidence: str,
+        user_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Present contradicting evidence to a belief."""
+        b_store = self._buddhi._get_belief_store()
+        belief = b_store.challenge_belief(belief_id, evidence)
+        if belief:
+            return belief.to_compact()
+        return None
+
+    # ------------------------------------------------------------------
+    # Phase 3: Task state management
+    # ------------------------------------------------------------------
+
+    def create_task(
+        self,
+        goal: str,
+        task_type: str = "general",
+        plan: Optional[List[str]] = None,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create a structured task with optional plan."""
+        uid = user_id or self._user_id
+        ts_store = self._buddhi._get_task_state_store()
+        task = ts_store.create_task(
+            user_id=uid, goal=goal, task_type=task_type, plan=plan,
+        )
+        task.start()
+        ts_store.update_task(task)
+        return task.to_compact()
+
+    def advance_task(
+        self,
+        note: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Advance the active task to the next step."""
+        uid = user_id or self._user_id
+        ts_store = self._buddhi._get_task_state_store()
+        task = ts_store.get_active_task(uid)
+        if not task:
+            return None
+        task.advance_step(note)
+        ts_store.update_task(task)
+        return task.to_compact()
 
     # ------------------------------------------------------------------
     # Trajectory recording (for skill mining + self-evolution)
@@ -570,6 +739,62 @@ class DheePlugin:
                 parts.append(
                     f"- [{h.get('level', 'domain')}] {h.get('heuristic', '')[:200]}"
                 )
+
+        # Policies (Phase 3)
+        policies = ctx.get("policies", [])
+        if policies:
+            parts.append("\n### Proven Strategies")
+            for p in policies[:3]:
+                parts.append(
+                    f"- **{p.get('name', 'policy')}** (win rate: {p.get('win_rate', 0):.0%}): "
+                    f"{p.get('do', '')[:150]}"
+                )
+                avoid = p.get("avoid", [])
+                if avoid:
+                    parts.append(f"  Avoid: {', '.join(avoid[:3])}")
+
+        # Beliefs (Phase 3)
+        beliefs = ctx.get("beliefs", [])
+        if beliefs:
+            challenged = [b for b in beliefs if b.get("has_contradictions")]
+            confident = [b for b in beliefs if not b.get("has_contradictions") and b.get("confidence", 0) >= 0.7]
+            if confident:
+                parts.append("\n### Established Beliefs")
+                for b in confident[:5]:
+                    parts.append(f"- {b['claim']} (confidence: {b['confidence']:.0%})")
+            if challenged:
+                parts.append("\n### Beliefs Under Review")
+                for b in challenged[:3]:
+                    parts.append(f"- {b['claim']} (confidence: {b['confidence']:.0%}, contradicted)")
+
+        # Task State (Phase 3)
+        task_states = ctx.get("task_states", [])
+        if task_states:
+            active = [t for t in task_states if t.get("status") in ("in_progress", "blocked")]
+            if active:
+                parts.append("\n### Active Tasks")
+                for t in active[:2]:
+                    parts.append(
+                        f"- **{t['goal'][:100]}** ({t['status']}, "
+                        f"progress: {t.get('progress', 0):.0%})"
+                    )
+                    if t.get("current_step"):
+                        parts.append(f"  Current step: {t['current_step'][:100]}")
+                    if t.get("blockers"):
+                        parts.append(f"  Blockers: {', '.join(t['blockers'][:2])}")
+
+        # Episodes (Phase 3)
+        episodes = ctx.get("episodes", [])
+        if episodes:
+            relevant = [e for e in episodes if e.get("outcome") is not None]
+            if relevant:
+                parts.append("\n### Recent Experience")
+                for e in relevant[:3]:
+                    outcome_str = f"score={e['outcome']:.2f}" if e['outcome'] is not None else "no outcome"
+                    parts.append(
+                        f"- {e.get('task', '')[:100]} ({outcome_str}, "
+                        f"{e.get('events', 0)} events, {e.get('duration_min', 0):.0f}min)"
+                    )
 
         # Memories
         memories = ctx.get("memories", [])

@@ -2996,7 +2996,7 @@ class FullMemory(SmartMemory):
                             user_id=user_id or "default",
                         )
                 else:
-                    if self.profile_config.use_llm_extraction:
+                    if self.config.profile.use_llm_extraction:
                         _add_llm_cost(self._estimate_token_count(content))
                     self._update_profiles(effective_memory_id, content, mem_metadata, user_id)
             except Exception as e:

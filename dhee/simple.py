@@ -1,7 +1,7 @@
-"""Simplified Engram interface for 3-line integration.
+"""Simplified Dhee interface for 3-line integration.
 
 This module provides the Engram class - a simplified, batteries-included
-interface for the Engram memory layer.
+interface for the Dhee memory layer.
 
 Usage:
     from dhee import Engram
@@ -11,9 +11,9 @@ Usage:
     results = memory.search("programming preferences", user_id="u123")
 
 Environment Variables:
-    GEMINI_API_KEY: Google Gemini API key (preferred)
-    OPENAI_API_KEY: OpenAI API key (fallback)
-    ENGRAM_DATA_DIR: Directory for storage (default: ~/.engram)
+    OPENAI_API_KEY: OpenAI API key (recommended)
+    GEMINI_API_KEY: Google Gemini API key
+    DHEE_DATA_DIR: Directory for storage (default: ~/.dhee)
 """
 
 from __future__ import annotations
@@ -56,14 +56,10 @@ def _has_api_key() -> bool:
 
 def _get_data_dir() -> Path:
     """Get the data directory for Dhee storage."""
-    data_dir = os.environ.get("DHEE_DATA_DIR") or os.environ.get("ENGRAM_DATA_DIR")
+    data_dir = os.environ.get("DHEE_DATA_DIR")
     if data_dir:
         return Path(data_dir)
-    dhee_dir = Path.home() / ".dhee"
-    engram_dir = Path.home() / ".engram"
-    if dhee_dir.is_dir() or not engram_dir.is_dir():
-        return dhee_dir
-    return engram_dir
+    return Path.home() / ".dhee"
 
 
 class Engram:
@@ -80,7 +76,7 @@ class Engram:
 
     Args:
         provider: LLM/embedder provider ("gemini" or "openai"). Auto-detected if not set.
-        data_dir: Directory for storage. Uses ~/.engram if not set.
+        data_dir: Directory for storage. Uses ~/.dhee if not set.
         enable_echo: Enable EchoMem multi-modal encoding. Default True.
         enable_categories: Enable CategoryMem organization. Default True.
         enable_decay: Enable FadeMem forgetting. Default True.
@@ -103,7 +99,7 @@ class Engram:
         if in_memory and provider is None and not _has_api_key():
             self._provider = "mock"
         if in_memory and data_dir is None:
-            data_dir = tempfile.mkdtemp(prefix="engram_")
+            data_dir = tempfile.mkdtemp(prefix="dhee_")
         self._data_dir = Path(data_dir) if data_dir else _get_data_dir()
         self._data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -166,7 +162,7 @@ class Engram:
         connector_id: Optional[str] = None,
         scope: Optional[str] = None,
         source_app: Optional[str] = None,
-        infer: bool = True,
+        infer: bool = False,
     ) -> Dict[str, Any]:
         """Add a memory.
 
@@ -176,7 +172,10 @@ class Engram:
             agent_id: Optional agent identifier
             metadata: Additional metadata to store
             categories: Category tags for organization
-            infer: Extract facts from content (default True)
+            infer: Extract additional facts from content using LLM (default False).
+                   Set True only when passing raw conversation turns and you want
+                   the LLM to decompose them into atomic facts. Requires a
+                   configured LLM provider (OPENAI_API_KEY or GEMINI_API_KEY).
 
         Returns:
             Dict with results including memory IDs
@@ -186,7 +185,7 @@ class Engram:
             >>> memory.add([
             ...     {"role": "user", "content": "I prefer Python"},
             ...     {"role": "assistant", "content": "Noted!"}
-            ... ], user_id="u1")
+            ... ], user_id="u1", infer=True)
         """
         return self._memory.add(
             messages=content,
@@ -279,12 +278,19 @@ class Engram:
         Returns:
             List of memories
         """
-        return self._memory.get_all(
+        result = self._memory.get_all(
             user_id=user_id,
             agent_id=agent_id,
             layer=layer,
             limit=limit,
         )
+        # Underlying memory.get_all() returns dict {"results": [...]}
+        # — normalise to a plain list as documented.
+        if isinstance(result, dict):
+            return result.get("results", [])
+        if isinstance(result, list):
+            return result
+        return []
 
     def update(self, memory_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
         """Update a memory.
@@ -364,3 +370,259 @@ class Engram:
     def data_dir(self) -> Path:
         """Data storage directory."""
         return self._data_dir
+
+
+class Dhee:
+    """4-tool HyperAgent interface — the simplest way to make any agent intelligent.
+
+    The headline API from the README. Wraps the full Engram + Buddhi stack
+    behind four methods that mirror the MCP tools exactly.
+
+    Example:
+        >>> from dhee import Dhee
+        >>> d = Dhee()
+        >>> d.remember("User prefers dark mode")
+        >>> results = d.recall("what theme does the user like?")
+        >>> ctx = d.context("fixing auth bug in login.py")
+        >>> d.checkpoint("Fixed auth bug", what_worked="git blame first")
+
+    Args:
+        provider: "openai", "gemini", or "ollama". Auto-detected from env.
+        data_dir: Storage directory. Defaults to ~/.dhee.
+        user_id: Default user ID for all operations. Default "default".
+        in_memory: Use in-memory storage (for testing). Default False.
+    """
+
+    def __init__(
+        self,
+        provider: Optional[str] = None,
+        data_dir: Optional[Union[str, Path]] = None,
+        user_id: str = "default",
+        in_memory: bool = False,
+    ):
+        self._user_id = user_id
+        self._engram = Engram(
+            provider=provider,
+            data_dir=data_dir,
+            in_memory=in_memory,
+        )
+        from dhee.core.buddhi import Buddhi
+        buddhi_dir = str(self._engram.data_dir / "buddhi")
+        self._buddhi = Buddhi(data_dir=buddhi_dir)
+
+    # ------------------------------------------------------------------
+    # Tool 1: remember
+    # ------------------------------------------------------------------
+
+    def remember(
+        self,
+        content: str,
+        user_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Store a fact, preference, or observation.
+
+        0 LLM calls on hot path. 1 embedding call. Echo enrichment
+        (paraphrases + keywords for better recall) runs at checkpoint.
+
+        Args:
+            content: The fact or preference to remember.
+            user_id: Override default user_id.
+            metadata: Additional metadata to attach.
+
+        Returns:
+            {"stored": True, "id": "<memory_id>"}
+        """
+        uid = user_id or self._user_id
+        result = self._engram.add(content, user_id=uid, infer=False, metadata=metadata)
+        response: Dict[str, Any] = {"stored": True}
+        if isinstance(result, dict):
+            rs = result.get("results", [])
+            if rs:
+                response["id"] = rs[0].get("id")
+        # Detect intentions in the content
+        intention = self._buddhi.on_memory_stored(content=content, user_id=uid)
+        if intention:
+            response["detected_intention"] = intention.to_dict()
+        return response
+
+    # ------------------------------------------------------------------
+    # Tool 2: recall
+    # ------------------------------------------------------------------
+
+    def recall(
+        self,
+        query: str,
+        user_id: Optional[str] = None,
+        limit: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """Search memory for relevant facts.
+
+        0 LLM calls. 1 embedding call. Returns top-K results by relevance.
+
+        Args:
+            query: What you're trying to remember.
+            user_id: Override default user_id.
+            limit: Max results (default 5).
+
+        Returns:
+            List of {"memory": str, "score": float, "id": str}
+        """
+        uid = user_id or self._user_id
+        results = self._engram.search(query, user_id=uid, limit=limit)
+        return [
+            {
+                "memory": r.get("memory", r.get("content", "")),
+                "score": round(r.get("composite_score", r.get("score", 0.0)), 3),
+                "id": r.get("id", ""),
+            }
+            for r in results
+        ]
+
+    # ------------------------------------------------------------------
+    # Tool 3: context
+    # ------------------------------------------------------------------
+
+    def context(
+        self,
+        task_description: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """HyperAgent session bootstrap. Call once at conversation start.
+
+        Returns everything the agent needs: last session state, performance
+        trends, synthesized insights, triggered intentions, warnings, and
+        top relevant memories.
+
+        Args:
+            task_description: What you're about to work on.
+            user_id: Override default user_id.
+
+        Returns:
+            HyperContext dict with keys: warnings, insights, intentions,
+            performance, memories, last_session, meta.
+        """
+        uid = user_id or self._user_id
+        hyper_ctx = self._buddhi.get_hyper_context(
+            user_id=uid,
+            task_description=task_description,
+            memory=self._engram._memory,
+        )
+        return hyper_ctx.to_dict()
+
+    # ------------------------------------------------------------------
+    # Tool 4: checkpoint
+    # ------------------------------------------------------------------
+
+    def checkpoint(
+        self,
+        summary: str,
+        task_type: Optional[str] = None,
+        outcome_score: Optional[float] = None,
+        what_worked: Optional[str] = None,
+        what_failed: Optional[str] = None,
+        key_decision: Optional[str] = None,
+        remember_to: Optional[str] = None,
+        trigger_keywords: Optional[List[str]] = None,
+        status: str = "paused",
+        decisions: Optional[List[str]] = None,
+        todos: Optional[List[str]] = None,
+        files_touched: Optional[List[str]] = None,
+        repo: Optional[str] = None,
+        user_id: Optional[str] = None,
+        agent_id: str = "dhee",
+    ) -> Dict[str, Any]:
+        """Save session state before ending. Where the cognition happens.
+
+        1. Session digest saved for cross-agent handoff.
+        2. Batch enrichment of stored memories (1 LLM call per ~10 mems).
+        3. Outcome recording → performance tracking.
+        4. Insight synthesis: what_worked/failed → transferable learnings.
+        5. Intention storage → prospective memory.
+
+        Args:
+            summary: What you were working on.
+            task_type: Task category (e.g. "bug_fix", "code_review").
+            outcome_score: 0.0–1.0 score for performance tracking.
+            what_worked: Approach that worked → stored as strategy insight.
+            what_failed: Approach that failed → stored as warning insight.
+            key_decision: Key decision and rationale.
+            remember_to: Future intention ("remember to X when Y").
+            trigger_keywords: Keywords that fire the intention.
+            status: "active", "paused", or "completed".
+            decisions: Key decisions made (for handoff).
+            todos: Remaining work items (for handoff).
+            files_touched: Files modified (for handoff).
+            repo: Repository path.
+            user_id: Override default user_id.
+            agent_id: Agent identifier.
+
+        Returns:
+            Dict with session_saved, memories_enriched, outcome_recorded,
+            insights_created, intention_stored.
+        """
+        uid = user_id or self._user_id
+        result: Dict[str, Any] = {}
+
+        # 1. Session digest
+        try:
+            from dhee.core.kernel import save_session_digest
+            digest = save_session_digest(
+                task_summary=summary,
+                agent_id=agent_id,
+                repo=repo,
+                status=status,
+                decisions_made=decisions,
+                files_touched=files_touched,
+                todos_remaining=todos,
+            )
+            result["session_saved"] = True
+            if isinstance(digest, dict):
+                result["session_id"] = digest.get("session_id")
+        except Exception:
+            result["session_saved"] = False
+
+        # 2. Batch enrichment of deferred memories
+        memory = self._engram._memory
+        if hasattr(memory, "enrich_pending"):
+            try:
+                enrich_result = memory.enrich_pending(
+                    user_id=uid, batch_size=10, max_batches=5,
+                )
+                enriched = enrich_result.get("enriched_count", 0)
+                if enriched > 0:
+                    result["memories_enriched"] = enriched
+            except Exception:
+                pass
+
+        # 3. Outcome recording
+        if task_type and outcome_score is not None:
+            score = max(0.0, min(1.0, float(outcome_score)))
+            insight = self._buddhi.record_outcome(
+                user_id=uid, task_type=task_type, score=score,
+            )
+            result["outcome_recorded"] = True
+            if insight:
+                result["auto_insight"] = insight.to_dict()
+
+        # 4. Insight synthesis
+        if any([what_worked, what_failed, key_decision]):
+            insights = self._buddhi.reflect(
+                user_id=uid,
+                task_type=task_type or "general",
+                what_worked=what_worked,
+                what_failed=what_failed,
+                key_decision=key_decision,
+            )
+            result["insights_created"] = len(insights)
+
+        # 5. Intention storage
+        if remember_to:
+            intention = self._buddhi.store_intention(
+                user_id=uid,
+                description=remember_to,
+                trigger_keywords=trigger_keywords,
+            )
+            result["intention_stored"] = intention.to_dict()
+
+        return result

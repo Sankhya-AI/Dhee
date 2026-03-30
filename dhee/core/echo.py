@@ -36,7 +36,7 @@ def retry_parse(max_retries: int = 2, delay: float = 0.5):
                 except (ValidationError, json.JSONDecodeError) as e:
                     last_exception = e
                     if i < max_retries:
-                        logger.warning(f"Parsing failed (attempt {i+1}/{max_retries+1}): {e}. Retrying...")
+                        logger.debug("Parsing failed (attempt %d/%d): %s. Retrying...", i + 1, max_retries + 1, e)
                         time.sleep(delay)
             
             # If we get here, all retries failed
@@ -320,7 +320,7 @@ class EchoProcessor:
                 strength_multiplier=self.STRENGTH_MULTIPLIERS[EchoDepth.MEDIUM],
             )
         except (json.JSONDecodeError, ValueError, KeyError, AttributeError) as e:
-            logger.warning(f"Medium echo failed, falling back to shallow: {e}")
+            logger.debug("Medium echo failed, falling back to shallow: %s", e)
             return self._shallow_echo(content)
 
     def _deep_echo(self, content: str) -> EchoResult:
@@ -353,7 +353,7 @@ class EchoProcessor:
                 strength_multiplier=self.STRENGTH_MULTIPLIERS[EchoDepth.DEEP],
             )
         except (json.JSONDecodeError, ValueError, KeyError, AttributeError) as e:
-            logger.warning(f"Deep echo failed, falling back to medium: {e}")
+            logger.debug("Deep echo failed, falling back to medium: %s", e)
             return self._medium_echo(content)
 
     def _extract_keywords_simple(self, content: str) -> List[str]:

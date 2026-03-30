@@ -198,6 +198,66 @@ def cmd_import(args: argparse.Namespace) -> None:
         print(f"Imported {count} memories.")
 
 
+def cmd_checkpoint(args: argparse.Namespace) -> None:
+    """Save session state and learnings (checkpoint)."""
+    from dhee.core.buddhi import Buddhi
+
+    buddhi = Buddhi()
+
+    result: dict = {}
+
+    # Save session digest if engram-bus is available
+    try:
+        from dhee.core.kernel import save_session_digest
+        digest = save_session_digest(
+            task_summary=args.summary,
+            agent_id="dhee-cli",
+            status="paused",
+        )
+        result["session_saved"] = True
+        result["session_id"] = digest.get("session_id")
+    except Exception:
+        result["session_saved"] = False
+
+    # Record outcome if provided
+    if args.task_type and args.outcome_score is not None:
+        buddhi.record_outcome(
+            user_id=args.user_id,
+            task_type=args.task_type,
+            score=max(0.0, min(1.0, args.outcome_score)),
+        )
+        result["outcome_recorded"] = True
+
+    # Reflect
+    if args.what_worked or args.what_failed:
+        insights = buddhi.reflect(
+            user_id=args.user_id,
+            task_type=args.task_type or "general",
+            what_worked=args.what_worked,
+            what_failed=args.what_failed,
+        )
+        result["insights_created"] = len(insights)
+
+    # Store intention
+    if args.remember_to:
+        intention = buddhi.store_intention(
+            user_id=args.user_id,
+            description=args.remember_to,
+        )
+        result["intention_stored"] = intention.description
+
+    if args.json:
+        _json_out(result)
+    else:
+        print(f"  Checkpoint saved: {args.summary[:60]}")
+        if result.get("session_saved"):
+            print(f"  Session ID: {result.get('session_id', '')[:12]}...")
+        if result.get("insights_created"):
+            print(f"  Insights created: {result['insights_created']}")
+        if result.get("intention_stored"):
+            print(f"  Intention stored: {result['intention_stored'][:60]}")
+
+
 def cmd_status(args: argparse.Namespace) -> None:
     """Show version, config, DB size, detected agents."""
     from dhee import __version__
@@ -208,7 +268,7 @@ def cmd_status(args: argparse.Namespace) -> None:
     provider = config.get("provider", "not configured")
     packages = config.get("packages", [])
 
-    print(f"  engram v{__version__}")
+    print(f"  dhee v{__version__}")
     print(f"  Provider: {provider}")
     print(f"  Packages: {', '.join(packages) if packages else 'none'}")
     print(f"  Config:   {CONFIG_PATH}")
@@ -316,29 +376,51 @@ def build_parser() -> argparse.ArgumentParser:
     from dhee import __version__
 
     parser = argparse.ArgumentParser(
-        prog="engram",
-        description="engram — memory layer for AI agents",
+        prog="dhee",
+        description="dhee — cognition layer for AI agents",
     )
     parser.add_argument(
-        "--version", action="version", version=f"engram {__version__}",
+        "--version", action="version", version=f"dhee {__version__}",
     )
     sub = parser.add_subparsers(dest="command")
 
     # setup
     sub.add_parser("setup", help="Interactive setup wizard")
 
-    # add
-    p_add = sub.add_parser("add", help="Add a memory")
+    # remember / add (aliases)
+    p_remember = sub.add_parser("remember", help="Store a fact or preference")
+    p_remember.add_argument("text", help="Memory content")
+    p_remember.add_argument("--user-id", default="default", help="User ID")
+    p_remember.add_argument("--json", action="store_true", help="JSON output")
+
+    p_add = sub.add_parser("add", help="Store a memory (alias for remember)")
     p_add.add_argument("text", help="Memory content")
     p_add.add_argument("--user-id", default="default", help="User ID")
     p_add.add_argument("--json", action="store_true", help="JSON output")
 
-    # search
-    p_search = sub.add_parser("search", help="Search memories")
+    # recall / search (aliases)
+    p_recall = sub.add_parser("recall", help="Search memory for relevant facts")
+    p_recall.add_argument("query", help="What you're trying to remember")
+    p_recall.add_argument("--user-id", default="default", help="User ID")
+    p_recall.add_argument("--limit", type=int, default=10, help="Max results")
+    p_recall.add_argument("--json", action="store_true", help="JSON output")
+
+    p_search = sub.add_parser("search", help="Search memories (alias for recall)")
     p_search.add_argument("query", help="Search query")
     p_search.add_argument("--user-id", default="default", help="User ID")
     p_search.add_argument("--limit", type=int, default=10, help="Max results")
     p_search.add_argument("--json", action="store_true", help="JSON output")
+
+    # checkpoint
+    p_cp = sub.add_parser("checkpoint", help="Save session state and learnings")
+    p_cp.add_argument("summary", help="What you were working on")
+    p_cp.add_argument("--what-worked", default=None, help="What approach worked well")
+    p_cp.add_argument("--what-failed", default=None, help="What approach failed")
+    p_cp.add_argument("--task-type", default=None, help="Task category (e.g. bug_fix)")
+    p_cp.add_argument("--outcome-score", type=float, default=None, help="Outcome score 0.0-1.0")
+    p_cp.add_argument("--remember-to", default=None, help="Future intention (remember to X when Y)")
+    p_cp.add_argument("--user-id", default="default", help="User ID")
+    p_cp.add_argument("--json", action="store_true", help="JSON output")
 
     # list
     p_list = sub.add_parser("list", help="List all memories")
@@ -376,15 +458,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_status.add_argument("--json", action="store_true", help="JSON output")
 
     # uninstall
-    sub.add_parser("uninstall", help="Remove ~/.engram directory")
+    sub.add_parser("uninstall", help="Remove ~/.dhee directory")
 
     return parser
 
 
 COMMAND_MAP = {
     "setup": cmd_setup,
+    "remember": cmd_add,   # alias
     "add": cmd_add,
+    "recall": cmd_search,  # alias
     "search": cmd_search,
+    "checkpoint": cmd_checkpoint,
     "list": cmd_list,
     "stats": cmd_stats,
     "decay": cmd_decay,
