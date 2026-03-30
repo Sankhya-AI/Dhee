@@ -249,6 +249,9 @@ class DheeLLM(BaseLLM):
         - [DECOMPOSE]: complex question -> sub-questions
         - [CONTEXT]: text -> ContextAnchor
         - [SCENE]: text -> SceneSnapshot
+        - [MEMORY_OP]: context -> optimal memory operation
+        - [HEURISTIC]: trajectory summary -> abstract reasoning pattern
+        - [RETRIEVAL_JUDGE]: query + results -> sufficiency score 0.0-1.0
         """
         prompt = f"[{task.upper()}]\n{content}"
         return self.generate(prompt)
@@ -280,6 +283,24 @@ class DheeLLM(BaseLLM):
     def extract_scene(self, text: str) -> str:
         """[SCENE] task: extract scene snapshot."""
         return self.generate_with_task("SCENE", text)
+
+    # --- BuddhiMini task heads (added for self-evolution) ---
+
+    def classify_memory_op(self, context: str) -> str:
+        """[MEMORY_OP] task: predict optimal memory operation for context.
+
+        Returns: store | retrieve | update | summarize | discard | none
+        """
+        return self.generate_with_task("MEMORY_OP", context)
+
+    def generate_heuristic(self, trajectory_summary: str) -> str:
+        """[HEURISTIC] task: distill abstract reasoning pattern from trajectory."""
+        return self.generate_with_task("HEURISTIC", trajectory_summary)
+
+    def judge_retrieval(self, query: str, results_text: str) -> str:
+        """[RETRIEVAL_JUDGE] task: score retrieval sufficiency 0.0-1.0."""
+        prompt = f"Query: {query}\nResults:\n{results_text}"
+        return self.generate_with_task("RETRIEVAL_JUDGE", prompt)
 
     @property
     def backend(self) -> str:

@@ -120,7 +120,37 @@ class SkillMiner:
             for t in cluster:
                 t.mined_skill_ids.append(skill.id)
 
+            # Phase 2: Distill heuristics from the cluster
+            self._distill_heuristics(cluster, skill)
+
         return mined_skills
+
+    def _distill_heuristics(
+        self, cluster: List[Trajectory], skill: Skill,
+    ) -> None:
+        """Trigger heuristic distillation from a mined cluster (ERL pattern)."""
+        try:
+            from dhee.core.heuristic import HeuristicDistiller
+            distiller = HeuristicDistiller()
+
+            task_descriptions = [t.task_description for t in cluster]
+            # Extract common patterns from trajectory steps
+            common_patterns = []
+            if skill.steps:
+                common_patterns.append(
+                    f"For {skill.name}: follow steps {' → '.join(skill.steps[:5])}"
+                )
+            if skill.description:
+                common_patterns.append(skill.description)
+
+            distiller.distill_from_cluster(
+                task_descriptions=task_descriptions,
+                task_type=skill.tags[0] if skill.tags else "general",
+                common_patterns=common_patterns,
+                user_id=cluster[0].user_id if cluster else "default",
+            )
+        except Exception as e:
+            logger.debug("Heuristic distillation skipped: %s", e)
 
     def _cluster_trajectories(
         self, trajectories: List[Trajectory]

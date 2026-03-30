@@ -97,6 +97,16 @@ class EvolutionLayer:
             except Exception as e:
                 logger.debug("Nididhyasana init skipped: %s", e)
 
+        # Phase 2: MetaBuddhi (self-referential cognition)
+        self._meta_buddhi = None
+        try:
+            from dhee.core.meta_buddhi import MetaBuddhi
+            self._meta_buddhi = MetaBuddhi(
+                data_dir=os.path.join(self._data_dir, "meta_buddhi"),
+            )
+        except Exception as e:
+            logger.debug("MetaBuddhi init skipped: %s", e)
+
     # ------------------------------------------------------------------
     # WRITE path hooks
     # ------------------------------------------------------------------
@@ -276,28 +286,48 @@ class EvolutionLayer:
     def check_evolution(self) -> Optional[Dict[str, Any]]:
         """Check if auto-evolution should trigger. Call periodically.
 
+        Runs two loops:
+          1. Nididhyasana: model weight updates (SFT/DPO/RL)
+          2. MetaBuddhi: retrieval strategy mutations (propose/evaluate/promote)
+
         Returns evolution cycle result if triggered, None otherwise.
         """
-        if not self._nididhyasana:
-            return None
+        result: Optional[Dict[str, Any]] = None
 
-        try:
-            should, reason = self._nididhyasana.should_evolve()
-            if should:
-                logger.info("Auto-evolution triggered: %s", reason)
-                cycle = self._nididhyasana.evolve()
-                if cycle:
-                    return {
-                        "cycle_id": cycle.cycle_id,
-                        "verdict": cycle.verdict,
-                        "karma_net": cycle.karma_net,
-                        "hot_swapped": cycle.hot_swapped,
-                        "error": cycle.error,
-                    }
-        except Exception as e:
-            logger.debug("Evolution check failed: %s", e)
+        # 1. Nididhyasana: model training
+        if self._nididhyasana:
+            try:
+                should, reason = self._nididhyasana.should_evolve()
+                if should:
+                    logger.info("Auto-evolution triggered: %s", reason)
+                    cycle = self._nididhyasana.evolve()
+                    if cycle:
+                        result = {
+                            "cycle_id": cycle.cycle_id,
+                            "verdict": cycle.verdict,
+                            "karma_net": cycle.karma_net,
+                            "hot_swapped": cycle.hot_swapped,
+                            "error": cycle.error,
+                        }
+            except Exception as e:
+                logger.debug("Nididhyasana check failed: %s", e)
 
-        return None
+        # 2. MetaBuddhi: strategy improvement proposals
+        if self._meta_buddhi and self._samskara:
+            try:
+                signals = self._samskara.get_training_signals()
+                vasana_report = signals.get("vasana_report")
+                degrading = signals.get("degrading_dimensions", [])
+                if degrading:
+                    attempt = self._meta_buddhi.propose_improvement(
+                        vasana_report=vasana_report,
+                    )
+                    if attempt:
+                        logger.info("MetaBuddhi proposed: %s", attempt.rationale)
+            except Exception as e:
+                logger.debug("MetaBuddhi check failed: %s", e)
+
+        return result
 
     # ------------------------------------------------------------------
     # Status and persistence
@@ -318,6 +348,9 @@ class EvolutionLayer:
 
         if self._nididhyasana:
             status["nididhyasana"] = self._nididhyasana.get_status()
+
+        if self._meta_buddhi:
+            status["meta_buddhi"] = self._meta_buddhi.get_stats()
 
         return status
 
