@@ -1,6 +1,6 @@
-"""Handoff kernel — combines engram-bus sessions with JSONL log fallback.
+"""Handoff kernel — combines dhee-bus sessions with JSONL log fallback.
 
-Provides ``get_last_session()`` which first checks the engram-bus SQLite store
+Provides ``get_last_session()`` which first checks the dhee-bus SQLite store
 for an existing handoff session, and if none is found, falls back to parsing
 Claude Code's ``.jsonl`` conversation logs to reconstruct context.
 """
@@ -20,7 +20,14 @@ _DEFAULT_DB = os.path.join(_dhee_data_dir(), "handoff.db")
 
 def _get_bus(db_path: Optional[str] = None):
     """Lazy-import and create a Bus instance with a handoff store."""
-    from engram_bus.bus import Bus
+    try:
+        from engram_bus.bus import Bus
+    except ImportError as exc:
+        raise ImportError(
+            "Cross-agent handoff requires 'engram-bus'. "
+            "Install it with: pip install engram-bus  "
+            "(or: pip install dhee[bus])"
+        ) from exc
     return Bus(db_path=db_path or os.environ.get("ENGRAM_HANDOFF_DB", _DEFAULT_DB))
 
 
@@ -107,7 +114,7 @@ def save_session_digest(
     test_results: Optional[str] = None,
     db_path: Optional[str] = None,
 ) -> Dict:
-    """Save a session digest to the engram-bus handoff store.
+    """Save a session digest to the dhee-bus handoff store.
 
     Returns ``{"status": "saved", "session_id": "<id>"}``.
     """

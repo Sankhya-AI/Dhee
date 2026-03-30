@@ -174,6 +174,12 @@ class HyperContext:
     contrasts: List[Dict[str, Any]] = field(default_factory=list)
     heuristics: List[Dict[str, Any]] = field(default_factory=list)
 
+    # Phase 3: first-class cognitive state objects
+    episodes: List[Dict[str, Any]] = field(default_factory=list)
+    task_states: List[Dict[str, Any]] = field(default_factory=list)
+    policies: List[Dict[str, Any]] = field(default_factory=list)
+    beliefs: List[Dict[str, Any]] = field(default_factory=list)
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "user_id": self.user_id,
@@ -186,6 +192,10 @@ class HyperContext:
             "warnings": self.warnings,
             "contrasts": self.contrasts[:5],
             "heuristics": self.heuristics[:5],
+            "episodes": self.episodes[:5],
+            "task_states": self.task_states[:5],
+            "policies": self.policies[:5],
+            "beliefs": self.beliefs[:10],
             "memories": [
                 {"id": m.get("id"), "memory": m.get("memory", "")[:500],
                  "strength": m.get("strength", 1.0)}
@@ -197,6 +207,10 @@ class HyperContext:
                 "n_warnings": len(self.warnings),
                 "n_contrasts": len(self.contrasts),
                 "n_heuristics": len(self.heuristics),
+                "n_episodes": len(self.episodes),
+                "n_task_states": len(self.task_states),
+                "n_policies": len(self.policies),
+                "n_beliefs": len(self.beliefs),
                 "performance_tracked": len(self.performance) > 0,
             },
         }
@@ -258,6 +272,13 @@ class Buddhi:
         self._heuristic_distiller = None
         self._meta_buddhi = None
 
+        # Phase 3 subsystems (lazy-initialized)
+        self._episode_store = None
+        self._task_state_store = None
+        self._policy_store = None
+        self._belief_store = None
+        self._trigger_manager = None
+
         self._load_state()
 
     def _get_contrastive(self):
@@ -283,6 +304,38 @@ class Buddhi:
                 data_dir=os.path.join(self._data_dir, "meta_buddhi")
             )
         return self._meta_buddhi
+
+    def _get_episode_store(self):
+        if self._episode_store is None:
+            from dhee.core.episode import EpisodeStore
+            self._episode_store = EpisodeStore(
+                data_dir=os.path.join(self._data_dir, "episodes")
+            )
+        return self._episode_store
+
+    def _get_task_state_store(self):
+        if self._task_state_store is None:
+            from dhee.core.task_state import TaskStateStore
+            self._task_state_store = TaskStateStore(
+                data_dir=os.path.join(self._data_dir, "tasks")
+            )
+        return self._task_state_store
+
+    def _get_policy_store(self):
+        if self._policy_store is None:
+            from dhee.core.policy import PolicyStore
+            self._policy_store = PolicyStore(
+                data_dir=os.path.join(self._data_dir, "policies")
+            )
+        return self._policy_store
+
+    def _get_belief_store(self):
+        if self._belief_store is None:
+            from dhee.core.belief import BeliefStore
+            self._belief_store = BeliefStore(
+                data_dir=os.path.join(self._data_dir, "beliefs")
+            )
+        return self._belief_store
 
     # ------------------------------------------------------------------
     # Core API: The HyperAgent entry point
@@ -382,6 +435,65 @@ class Buddhi:
         except Exception:
             pass
 
+        # 11. Episodes (Phase 3: temporal experience units)
+        episodes = []
+        try:
+            ep_store = self._get_episode_store()
+            recent_eps = ep_store.retrieve_episodes(
+                user_id=user_id, task_description=task_description, limit=5,
+            )
+            episodes = [ep.to_compact() for ep in recent_eps]
+        except Exception:
+            pass
+
+        # 12. Task states (Phase 3: structured task tracking)
+        task_states = []
+        try:
+            ts_store = self._get_task_state_store()
+            active = ts_store.get_active_task(user_id)
+            if active:
+                task_states.append(active.to_compact())
+            recent_tasks = ts_store.get_recent_tasks(user_id, limit=3)
+            for t in recent_tasks:
+                c = t.to_compact()
+                if c not in task_states:
+                    task_states.append(c)
+        except Exception:
+            pass
+
+        # 13. Policies (Phase 3: condition->action rules)
+        policies = []
+        try:
+            p_store = self._get_policy_store()
+            matched = p_store.match_policies(
+                user_id=user_id,
+                task_type=task_description or "general",
+                task_description=task_description or "",
+                limit=3,
+            )
+            policies = [p.to_compact() for p in matched]
+        except Exception:
+            pass
+
+        # 14. Beliefs (Phase 3: confidence-tracked facts)
+        beliefs = []
+        try:
+            b_store = self._get_belief_store()
+            relevant_beliefs = b_store.get_relevant_beliefs(
+                user_id=user_id, query=task_description or "", limit=5,
+            )
+            beliefs = [b.to_compact() for b in relevant_beliefs]
+
+            # Surface contradictions as warnings
+            contradictions = b_store.get_contradictions(user_id)
+            for b1, b2 in contradictions[:3]:
+                warnings.append(
+                    f"Contradicting beliefs: '{b1.claim[:80]}' vs '{b2.claim[:80]}' "
+                    f"(confidence: {b1.confidence:.2f} vs {b2.confidence:.2f})"
+                )
+        except Exception:
+            pass
+
         return HyperContext(
             user_id=user_id,
             session_id=str(uuid.uuid4()),
@@ -394,6 +506,10 @@ class Buddhi:
             memories=memories,
             contrasts=contrasts,
             heuristics=heuristics,
+            episodes=episodes,
+            task_states=task_states,
+            policies=policies,
+            beliefs=beliefs,
         )
 
     # ------------------------------------------------------------------
@@ -684,39 +800,38 @@ class Buddhi:
     def _check_intentions(
         self, user_id: str, context: Optional[str]
     ) -> List[Intention]:
-        """Check for triggered intentions given current context."""
+        """Check for triggered intentions using confidence-scored trigger system.
+
+        Uses the new TriggerManager for confidence-scored, composite trigger
+        evaluation while maintaining backwards compatibility with legacy
+        keyword/time triggers.
+        """
+        from dhee.core.trigger import TriggerManager, TriggerContext, KeywordTrigger, TimeTrigger
+
         triggered = []
         now = datetime.now(timezone.utc)
-        context_lower = (context or "").lower()
-        context_words = set(context_lower.split()) if context_lower else set()
+        trigger_ctx = TriggerContext(
+            text=context or "",
+            timestamp=time.time(),
+        )
 
         for intention in list(self._intentions.values()):
             if intention.user_id != user_id or intention.status != "active":
                 continue
 
-            fire = False
+            # Build triggers from legacy format
+            triggers = TriggerManager.from_intention_keywords(
+                keywords=intention.trigger_keywords,
+                trigger_after=intention.trigger_after,
+            )
 
-            # Time-based trigger
-            if intention.trigger_after:
-                try:
-                    deadline = datetime.fromisoformat(intention.trigger_after)
-                    if deadline.tzinfo is None:
-                        deadline = deadline.replace(tzinfo=timezone.utc)
-                    if now >= deadline:
-                        fire = True
-                except (ValueError, TypeError):
-                    pass
+            if not triggers:
+                continue
 
-            # Keyword trigger
-            if not fire and intention.trigger_keywords and context_words:
-                matched = sum(
-                    1 for kw in intention.trigger_keywords
-                    if kw.lower() in context_lower
-                )
-                if matched >= max(1, len(intention.trigger_keywords) // 2):
-                    fire = True
-
-            if fire:
+            # Evaluate with confidence scoring
+            results = TriggerManager.evaluate_triggers(triggers, trigger_ctx)
+            if results:
+                best = max(results, key=lambda r: r.confidence)
                 intention.status = "triggered"
                 intention.triggered_at = now.isoformat()
                 triggered.append(intention)
@@ -766,9 +881,88 @@ class Buddhi:
         content: str,
         user_id: str = "default",
         metadata: Optional[Dict[str, Any]] = None,
+        memory_id: Optional[str] = None,
     ) -> Optional[Intention]:
-        """Called when a memory is stored. Checks for intentions."""
-        return self.detect_intention_in_text(content, user_id)
+        """Called when a memory is stored.
+
+        Triggers:
+          1. Intention detection ("remember to X when Y")
+          2. Episode event recording
+          3. Belief creation for factual claims
+        """
+        # 1. Intention detection
+        intention = self.detect_intention_in_text(content, user_id)
+
+        # 2. Episode event recording
+        try:
+            ep_store = self._get_episode_store()
+            ep_store.record_event(
+                user_id=user_id,
+                event_type="memory_add",
+                content=content[:500],
+                memory_id=memory_id,
+            )
+        except Exception:
+            pass
+
+        # 3. Belief creation for factual statements
+        try:
+            self._maybe_create_belief(content, user_id, memory_id)
+        except Exception:
+            pass
+
+        return intention
+
+    def _maybe_create_belief(
+        self, content: str, user_id: str, memory_id: Optional[str] = None,
+    ) -> None:
+        """Detect factual claims and create/update beliefs.
+
+        Simple heuristic: statements with assertion patterns are factual claims.
+        """
+        assertion_patterns = [
+            r"\b(?:is|are|was|were|has|have|does|do)\b",
+            r"\b(?:always|never|every|all|none)\b",
+            r"\b(?:prefers?|likes?|wants?|needs?|requires?|supports?)\b",
+            r"\b(?:works?|runs?|uses?|depends?)\b",
+        ]
+        content_lower = content.lower()
+
+        # Only create beliefs for assertive content (not questions, not commands)
+        if content.strip().endswith("?") or content.strip().startswith(("do ", "how ", "what ", "where ", "when ", "why ")):
+            return
+        if len(content.split()) < 4:
+            return
+
+        # Check if it matches assertion patterns
+        is_assertion = any(
+            re.search(pattern, content_lower)
+            for pattern in assertion_patterns
+        )
+        if not is_assertion:
+            return
+
+        # Determine domain from content
+        domain = "general"
+        domain_keywords = {
+            "programming": ["code", "function", "class", "api", "python", "javascript", "bug", "test"],
+            "user_preference": ["prefer", "like", "want", "favorite", "style", "choice"],
+            "system_state": ["server", "database", "deploy", "config", "version", "running"],
+        }
+        for d, keywords in domain_keywords.items():
+            if any(kw in content_lower for kw in keywords):
+                domain = d
+                break
+
+        b_store = self._get_belief_store()
+        b_store.add_belief(
+            user_id=user_id,
+            claim=content[:500],
+            domain=domain,
+            confidence=0.5,
+            source="memory",
+            memory_id=memory_id,
+        )
 
     # ------------------------------------------------------------------
     # On-search hook: piggyback proactive signals
@@ -869,17 +1063,87 @@ class Buddhi:
         if what_worked:
             try:
                 distiller = self._get_heuristic_distiller()
-                distiller.distill_from_trajectory(
+                h = distiller.distill_from_trajectory(
                     task_description=f"{task_type} task",
                     task_type=task_type,
                     what_worked=what_worked,
                     what_failed=what_failed,
                     user_id=user_id,
                 )
+                # Close the heuristic validation loop: validate any previously
+                # retrieved heuristics that were used for this task type
+                self._validate_used_heuristics(user_id, task_type, what_worked is not None)
+            except Exception:
+                pass
+
+        # Phase 3: Extract policy from task outcomes
+        if what_worked:
+            try:
+                p_store = self._get_policy_store()
+                # Record success for any matching active policies
+                matched = p_store.match_policies(user_id, task_type, f"{task_type} task")
+                for policy in matched:
+                    p_store.record_outcome(policy.id, success=True)
+
+                # If we have enough task history, try to extract a new policy
+                ts_store = self._get_task_state_store()
+                completed = ts_store.get_tasks_by_type(user_id, task_type, limit=10)
+                if len(completed) >= 3:
+                    task_dicts = [t.to_dict() for t in completed]
+                    p_store.extract_from_tasks(user_id, task_dicts, task_type)
+            except Exception:
+                pass
+
+        if what_failed:
+            try:
+                p_store = self._get_policy_store()
+                matched = p_store.match_policies(user_id, task_type, f"{task_type} task")
+                for policy in matched:
+                    p_store.record_outcome(policy.id, success=False)
+            except Exception:
+                pass
+
+        # Phase 3: Update beliefs based on outcomes
+        if what_worked:
+            try:
+                b_store = self._get_belief_store()
+                relevant = b_store.get_relevant_beliefs(user_id, what_worked, limit=3)
+                for belief in relevant:
+                    b_store.reinforce_belief(belief.id, what_worked, source="outcome")
+            except Exception:
+                pass
+
+        if what_failed:
+            try:
+                b_store = self._get_belief_store()
+                relevant = b_store.get_relevant_beliefs(user_id, what_failed, limit=3)
+                for belief in relevant:
+                    b_store.challenge_belief(belief.id, what_failed, source="outcome")
             except Exception:
                 pass
 
         return new_insights
+
+    def _validate_used_heuristics(
+        self, user_id: str, task_type: str, success: bool,
+    ) -> None:
+        """Close the heuristic validation loop.
+
+        When a task completes, validate heuristics that were retrieved for
+        this task type. This is the missing feedback loop that turns
+        scaffolding into real self-improvement.
+        """
+        try:
+            distiller = self._get_heuristic_distiller()
+            relevant = distiller.retrieve_relevant(
+                task_description=f"{task_type} task",
+                user_id=user_id,
+                limit=5,
+            )
+            for h in relevant:
+                distiller.validate(h.id, validated=success)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Persistence
@@ -1006,9 +1270,21 @@ class Buddhi:
         self._save_intentions()
         self._save_performance()
 
+        # Flush Phase 2/3 subsystems if initialized
+        for store in [
+            self._contrastive, self._heuristic_distiller,
+            self._episode_store, self._task_state_store,
+            self._policy_store, self._belief_store,
+        ]:
+            if store and hasattr(store, "flush"):
+                try:
+                    store.flush()
+                except Exception:
+                    pass
+
     def get_stats(self) -> Dict[str, Any]:
         """Get buddhi status for health checks."""
-        return {
+        stats = {
             "insights": len(self._insights),
             "active_intentions": sum(
                 1 for i in self._intentions.values() if i.status == "active"
@@ -1021,3 +1297,20 @@ class Buddhi:
                 len(v) for v in self._performance.values()
             ),
         }
+
+        # Phase 2/3 stats (only if initialized)
+        for name, store in [
+            ("contrastive", self._contrastive),
+            ("heuristics", self._heuristic_distiller),
+            ("episodes", self._episode_store),
+            ("tasks", self._task_state_store),
+            ("policies", self._policy_store),
+            ("beliefs", self._belief_store),
+        ]:
+            if store and hasattr(store, "get_stats"):
+                try:
+                    stats[name] = store.get_stats()
+                except Exception:
+                    pass
+
+        return stats

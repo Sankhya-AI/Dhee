@@ -182,7 +182,7 @@ class EngramExtractor:
                 logger.debug("EngramExtractor raw LLM response (first 500 chars): %s", response[:500])
             parsed = self._parse_extraction_response(response)
             if not parsed:
-                logger.warning("EngramExtractor: LLM returned unparseable response")
+                logger.debug("EngramExtractor: LLM returned unparseable response")
                 return None
 
             engram = UniversalEngram(

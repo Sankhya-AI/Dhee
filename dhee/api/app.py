@@ -86,7 +86,7 @@ class SessionDigestRequest(BaseModel):
 async def handoff_checkpoint(request: CheckpointRequest):
     """Receive a lightweight checkpoint from the hook or an agent.
 
-    Creates an engram-bus session (if needed) and writes a checkpoint snapshot.
+    Creates a dhee-bus session (if needed) and writes a checkpoint snapshot.
     """
     from dhee.core.kernel import _get_bus
 

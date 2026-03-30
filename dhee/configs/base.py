@@ -7,16 +7,11 @@ from dhee.configs.active import ActiveMemoryConfig
 
 
 def _dhee_data_dir() -> str:
-    """Resolve data directory: DHEE_DATA_DIR > ~/.dhee (fallback ~/.engram for migration)."""
-    env = os.environ.get("DHEE_DATA_DIR") or os.environ.get("ENGRAM_DATA_DIR")
+    """Resolve data directory: DHEE_DATA_DIR > ~/.dhee."""
+    env = os.environ.get("DHEE_DATA_DIR")
     if env:
         return env
-    dhee_dir = os.path.join(os.path.expanduser("~"), ".dhee")
-    engram_dir = os.path.join(os.path.expanduser("~"), ".engram")
-    # Use .dhee if it exists or .engram doesn't; otherwise fall back to existing .engram
-    if os.path.isdir(dhee_dir) or not os.path.isdir(engram_dir):
-        return dhee_dir
-    return engram_dir
+    return os.path.join(os.path.expanduser("~"), ".dhee")
 
 
 _VALID_VECTOR_PROVIDERS = {"memory", "sqlite_vec", "zvec"}

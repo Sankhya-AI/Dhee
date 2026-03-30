@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.1.0] - 2026-03-30 — Production Cognition
+
+Dhee V2.1: All 10 cognition capabilities at production A-grade. Every self-improvement loop is closed and verified with 60 tests.
+
+### Added — Production Cognition Systems
+
+- **Episode System** (`dhee/core/episode.py`): First-class temporal unit of agent experience. Lifecycle: open→active→closed→archived→forgotten. Automatic boundary detection via time gap (>30min) and topic shift (Jaccard <20%). Utility-based selective forgetting with exponential recency decay (7-day half-life), access frequency, outcome value, and connection density scoring. Hard cap at 500 episodes/user.
+- **Task State** (`dhee/core/task_state.py`): Structured task tracking with goal/plan/progress/blockers/outcome. Full lifecycle: created→in_progress→blocked→completed/failed. Step-level tracking with `advance_step()`. Blocker management (soft/hard severity). Plan success rate analysis for policy learning.
+- **Policy Cases** (`dhee/core/policy.py`): Outcome-linked condition→action rules (not text reflections). Wilson score confidence at 95% interval. Laplace-smoothed win rate. Auto-promotion to VALIDATED (confidence≥0.5, win_rate≥0.6) and auto-deprecation (apply≥5, win_rate<0.4). Policy extraction from completed task patterns.
+- **Belief Tracking** (`dhee/core/belief.py`): Bayesian-inspired confidence updates (lr=0.15×evidence_strength). Contradiction detection via keyword Jaccard overlap >0.4 + negation patterns. Revision history with stability metric. Status lifecycle: proposed→held→challenged→revised|retracted. Auto-creation from factual assertions in stored memories.
+- **Trigger System** (`dhee/core/trigger.py`): 5 trigger types all returning `TriggerResult(fired, confidence, reason)`. Keyword (overlap scoring + required keywords), Time (after/before/recurring/window modes), Event (type + regex pattern), Composite (AND/OR/NOT with min/max confidence), Sequence (ordered events within time window, tightness-based confidence). Backwards-compatible bridge from legacy Intention format.
+- **Test Suite** (`tests/test_cognition_v3.py`): 60 tests across 10 classes covering all capabilities + full pipeline integration.
+
+### Changed — Closed Self-Improvement Loops
+
+- **Contrastive Pairs**: Upgraded from scaffolded to production. Retrieval-time integration in HyperContext, MaTTS scoring, DPO export for training.
+- **Heuristic Distillation**: Upgraded from scaffolded to production. Outcome validation loop closed — `reflect()` validates heuristics used in the session and updates confidence.
+- **Meta-Learning Gate**: Upgraded from scaffolded to production. Real evaluation via propose/evaluate/promote/rollback cycle verified.
+- **Progressive Training**: Upgraded from theoretical to production. Real data flow from Samskara → SFT → DPO → RL pipeline.
+- **Buddhi** (`dhee/core/buddhi.py`): HyperContext expanded with `episodes`, `task_states`, `policies`, `beliefs`. `reflect()` now creates contrastive pairs + distills heuristics + validates used heuristics + extracts policies + updates beliefs. `on_memory_stored()` auto-creates beliefs for factual assertions.
+- **DheePlugin** (`dhee/adapters/base.py`): `checkpoint()` handles episode closure, task state lifecycle, selective forgetting. System prompt renderer includes Proven Strategies, Established Beliefs, Active Tasks, Recent Experience. New convenience methods: `add_belief()`, `challenge_belief()`, `create_task()`, `advance_task()`.
+- **Version**: 2.0.0 → 2.1.0
+
+---
+
 ## [2.0.0] - 2026-03-30
 
 Dhee V2: Self-Evolving Cognition Plugin. This release transforms Dhee from a memory layer into a **self-improving cognition plugin** that can make any agent — local or cloud, software or embodied — a HyperAgent that gets better with every interaction.
