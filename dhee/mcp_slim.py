@@ -28,33 +28,24 @@ from mcp.types import Tool, TextContent
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Lazy singletons
+# Lazy singleton — DheePlugin wraps Engram + Buddhi
 # ---------------------------------------------------------------------------
 
-_memory = None
-_buddhi = None
+_plugin = None
 
 
-def _get_memory():
-    """Create memory instance with deferred enrichment (0 LLM on hot path)."""
-    global _memory
-    if _memory is None:
-        from dhee.mcp_server import get_memory_instance
-        _memory = get_memory_instance()
-        # Enable deferred enrichment: 0 LLM calls at ingestion,
-        # batch-enrich later at checkpoint time for retrieval quality.
-        if hasattr(_memory, "config") and hasattr(_memory.config, "enrichment"):
-            _memory.config.enrichment.defer_enrichment = True
-            _memory.config.enrichment.enable_unified = True
-    return _memory
-
-
-def _get_buddhi():
-    global _buddhi
-    if _buddhi is None:
-        from dhee.core.buddhi import Buddhi
-        _buddhi = Buddhi()
-    return _buddhi
+def _get_plugin():
+    """Create the DheePlugin singleton. Wraps Engram + Buddhi."""
+    global _plugin
+    if _plugin is None:
+        from dhee.adapters.base import DheePlugin
+        _plugin = DheePlugin()
+        # Enable deferred enrichment on the underlying memory
+        memory = _plugin._engram._memory
+        if hasattr(memory, "config") and hasattr(memory.config, "enrichment"):
+            memory.config.enrichment.defer_enrichment = True
+            memory.config.enrichment.enable_unified = True
+    return _plugin
 
 
 # ---------------------------------------------------------------------------
@@ -224,56 +215,32 @@ TOOLS = [
 # ---------------------------------------------------------------------------
 
 def _handle_remember(args: Dict[str, Any]) -> Dict[str, Any]:
-    """Store a memory. 0 LLM calls on hot path, 1 embed. Enrichment deferred."""
-    memory = _get_memory()
+    """Store a memory. Delegates to DheePlugin.remember()."""
     content = args.get("content", "")
     if not content:
         return {"error": "content is required"}
-
-    user_id = args.get("user_id", "default")
-
-    # infer=False: agent explicitly stated the fact, no need to re-extract.
-    # defer_enrichment (set in _get_memory): echo/keywords added at checkpoint.
-    result = memory.add(
-        messages=content,
-        user_id=user_id,
-        agent_id="agent",
-        source_app="dhee-mcp",
-        infer=False,
+    return _get_plugin().remember(
+        content=content,
+        user_id=args.get("user_id", "default"),
     )
-
-    # Buddhi: detect intentions in the content
-    buddhi = _get_buddhi()
-    intention = buddhi.on_memory_stored(content=content, user_id=user_id)
-
-    response: Dict[str, Any] = {"stored": True}
-    if isinstance(result, dict):
-        results = result.get("results", [])
-        if results:
-            response["id"] = results[0].get("id")
-    if intention:
-        response["detected_intention"] = intention.to_dict()
-    return response
 
 
 def _handle_recall(args: Dict[str, Any]) -> Dict[str, Any]:
     """Search memory. 0 LLM calls, 1 embed."""
-    memory = _get_memory()
     query = args.get("query", "")
     if not query:
         return {"error": "query is required"}
 
+    plugin = _get_plugin()
     user_id = args.get("user_id", "default")
     limit = min(max(1, int(args.get("limit", 5))), 20)
 
-    result = memory.search(
-        query=query,
-        user_id=user_id,
-        limit=limit,
+    # Use raw memory search to get proactive signals alongside results
+    raw_result = plugin._engram._memory.search(
+        query=query, user_id=user_id, limit=limit,
     )
-    results = result.get("results", [])
+    results = raw_result.get("results", []) if isinstance(raw_result, dict) else []
 
-    # Compact output — only what the agent needs
     memories = [
         {
             "id": r.get("id"),
@@ -286,7 +253,7 @@ def _handle_recall(args: Dict[str, Any]) -> Dict[str, Any]:
     response: Dict[str, Any] = {"memories": memories, "count": len(memories)}
 
     # Attach Buddhi proactive signals if any
-    buddhi_signals = result.get("buddhi")
+    buddhi_signals = raw_result.get("buddhi") if isinstance(raw_result, dict) else None
     if buddhi_signals:
         response["proactive"] = buddhi_signals
 
@@ -294,103 +261,36 @@ def _handle_recall(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _handle_context(args: Dict[str, Any]) -> Dict[str, Any]:
-    """HyperAgent bootstrap. Buddhi-powered."""
-    memory = _get_memory()
-    buddhi = _get_buddhi()
-    user_id = args.get("user_id", "default")
-    task_description = args.get("task_description")
-
-    hyper_ctx = buddhi.get_hyper_context(
-        user_id=user_id,
-        task_description=task_description,
-        memory=memory,
+    """HyperAgent bootstrap. Delegates to DheePlugin.context()."""
+    return _get_plugin().context(
+        task_description=args.get("task_description"),
+        user_id=args.get("user_id", "default"),
     )
-    return hyper_ctx.to_dict()
 
 
 def _handle_checkpoint(args: Dict[str, Any]) -> Dict[str, Any]:
-    """Session lifecycle — save digest + enrich + outcome + reflect + intention."""
+    """Session lifecycle. Delegates to DheePlugin.checkpoint()."""
     summary = args.get("summary", "")
     if not summary:
         return {"error": "summary is required"}
 
-    user_id = args.get("user_id", "default")
-    agent_id = args.get("agent_id", "agent")
-    result: Dict[str, Any] = {}
-
-    # 1. Save session digest (for handoff)
-    try:
-        from dhee.core.kernel import save_session_digest
-        digest = save_session_digest(
-            task_summary=summary,
-            agent_id=agent_id,
-            repo=args.get("repo"),
-            status=args.get("status", "paused"),
-            decisions_made=args.get("decisions"),
-            files_touched=args.get("files_touched"),
-            todos_remaining=args.get("todos"),
-        )
-        result["session_saved"] = True
-        if isinstance(digest, dict):
-            result["session_id"] = digest.get("session_id")
-    except Exception as e:
-        logger.debug("Session save skipped: %s", e)
-        result["session_saved"] = False
-
-    # 2. Batch-enrich deferred memories (1 LLM call per ~10 memories)
-    # This is where retrieval quality gets added — echo paraphrases, keywords,
-    # categories — all in one batched LLM call. Not on the hot path.
-    memory = _get_memory()
-    if hasattr(memory, "enrich_pending"):
-        try:
-            enrich_result = memory.enrich_pending(
-                user_id=user_id, batch_size=10, max_batches=5,
-            )
-            enriched = enrich_result.get("enriched_count", 0)
-            if enriched > 0:
-                result["memories_enriched"] = enriched
-        except Exception as e:
-            logger.debug("Batch enrichment skipped: %s", e)
-
-    buddhi = _get_buddhi()
-
-    # 3. Record outcome (for performance tracking)
-    task_type = args.get("task_type")
-    outcome_score = args.get("outcome_score")
-    if task_type and outcome_score is not None:
-        score = max(0.0, min(1.0, float(outcome_score)))
-        insight = buddhi.record_outcome(
-            user_id=user_id, task_type=task_type, score=score,
-        )
-        result["outcome_recorded"] = True
-        if insight:
-            result["auto_insight"] = insight.to_dict()
-
-    # 4. Reflect (for insight synthesis)
-    what_worked = args.get("what_worked")
-    what_failed = args.get("what_failed")
-    key_decision = args.get("key_decision")
-    if any([what_worked, what_failed, key_decision]):
-        reflections = buddhi.reflect(
-            user_id=user_id,
-            task_type=task_type or "general",
-            what_worked=what_worked,
-            what_failed=what_failed,
-            key_decision=key_decision,
-        )
-        result["insights_created"] = len(reflections)
-
-    # 5. Store intention (for prospective memory)
-    remember_to = args.get("remember_to")
-    if remember_to:
-        intention = buddhi.store_intention(
-            user_id=user_id,
-            description=remember_to,
-            trigger_keywords=args.get("trigger_keywords"),
-        )
-        result["intention_stored"] = intention.to_dict()
-
-    return result
+    return _get_plugin().checkpoint(
+        summary=summary,
+        task_type=args.get("task_type"),
+        outcome_score=args.get("outcome_score"),
+        what_worked=args.get("what_worked"),
+        what_failed=args.get("what_failed"),
+        key_decision=args.get("key_decision"),
+        remember_to=args.get("remember_to"),
+        trigger_keywords=args.get("trigger_keywords"),
+        status=args.get("status", "paused"),
+        decisions=args.get("decisions"),
+        todos=args.get("todos"),
+        files_touched=args.get("files_touched"),
+        repo=args.get("repo"),
+        user_id=args.get("user_id", "default"),
+        agent_id=args.get("agent_id", "agent"),
+    )
 
 
 HANDLERS = {

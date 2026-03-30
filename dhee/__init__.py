@@ -23,7 +23,8 @@ Tiered Memory Classes:
 from dhee.memory.core import CoreMemory
 from dhee.memory.smart import SmartMemory
 from dhee.memory.main import FullMemory
-from dhee.simple import Engram
+from dhee.simple import Engram, Dhee
+from dhee.adapters.base import DheePlugin
 from dhee.core.category import CategoryProcessor, Category, CategoryType, CategoryMatch
 from dhee.core.echo import EchoProcessor, EchoDepth, EchoResult
 from dhee.configs.base import MemoryConfig, FadeMemConfig, EchoMemConfig, CategoryMemConfig, ScopeConfig
@@ -31,7 +32,7 @@ from dhee.configs.base import MemoryConfig, FadeMemConfig, EchoMemConfig, Catego
 # Default: CoreMemory (lightest, zero-config)
 Memory = CoreMemory
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 __all__ = [
     # Tiered memory classes
     "CoreMemory",
@@ -39,7 +40,10 @@ __all__ = [
     "FullMemory",
     "Memory",
     # Simplified interface
+    "Dhee",
     "Engram",
+    # Universal plugin
+    "DheePlugin",
     # CategoryMem
     "CategoryProcessor",
     "Category",

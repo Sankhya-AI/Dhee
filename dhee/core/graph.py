@@ -6,6 +6,7 @@ enabling graph-based retrieval and reasoning.
 
 from __future__ import annotations
 
+import os
 import re
 import json
 import logging
@@ -52,6 +53,7 @@ class EntityType(str, Enum):
     PROJECT = "project"
     TOOL = "tool"
     PREFERENCE = "preference"
+    DYNAMIC = "dynamic"       # Schema-free entity discovered at runtime
     UNKNOWN = "unknown"
 
 
@@ -540,6 +542,25 @@ Return only valid JSON array, no explanation:"""
                 for t in RelationType
             },
         }
+
+    # ── Persistence ──
+
+    def save(self, path: str) -> None:
+        """Persist graph to a JSON file on disk."""
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(self.to_dict(), f, ensure_ascii=False)
+        os.replace(tmp, path)
+
+    @classmethod
+    def load(cls, path: str, llm=None) -> "KnowledgeGraph":
+        """Load graph from a JSON file. Returns empty graph if file missing."""
+        if not os.path.exists(path):
+            return cls(llm=llm)
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return cls.from_dict(data, llm=llm)
 
 
 # ── Causal language detection (module-level) ──

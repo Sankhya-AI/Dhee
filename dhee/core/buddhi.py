@@ -170,6 +170,10 @@ class HyperContext:
     # Top relevant memories (context)
     memories: List[Dict[str, Any]]
 
+    # Phase 2: contrastive pairs + heuristics
+    contrasts: List[Dict[str, Any]] = field(default_factory=list)
+    heuristics: List[Dict[str, Any]] = field(default_factory=list)
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "user_id": self.user_id,
@@ -180,6 +184,8 @@ class HyperContext:
             "skills": self.skills[:5],
             "intentions": [i.to_dict() for i in self.intentions],
             "warnings": self.warnings,
+            "contrasts": self.contrasts[:5],
+            "heuristics": self.heuristics[:5],
             "memories": [
                 {"id": m.get("id"), "memory": m.get("memory", "")[:500],
                  "strength": m.get("strength", 1.0)}
@@ -189,6 +195,8 @@ class HyperContext:
                 "n_insights": len(self.insights),
                 "n_active_intentions": len(self.intentions),
                 "n_warnings": len(self.warnings),
+                "n_contrasts": len(self.contrasts),
+                "n_heuristics": len(self.heuristics),
                 "performance_tracked": len(self.performance) > 0,
             },
         }
@@ -245,7 +253,36 @@ class Buddhi:
         self._performance: Dict[str, List[Dict[str, Any]]] = {}  # task_type -> records
         self._query_sequences: Dict[str, List[str]] = {}  # user_id -> recent queries
 
+        # Phase 2 subsystems (lazy-initialized)
+        self._contrastive = None
+        self._heuristic_distiller = None
+        self._meta_buddhi = None
+
         self._load_state()
+
+    def _get_contrastive(self):
+        if self._contrastive is None:
+            from dhee.core.contrastive import ContrastiveStore
+            self._contrastive = ContrastiveStore(
+                data_dir=os.path.join(self._data_dir, "contrastive")
+            )
+        return self._contrastive
+
+    def _get_heuristic_distiller(self):
+        if self._heuristic_distiller is None:
+            from dhee.core.heuristic import HeuristicDistiller
+            self._heuristic_distiller = HeuristicDistiller(
+                data_dir=os.path.join(self._data_dir, "heuristics")
+            )
+        return self._heuristic_distiller
+
+    def _get_meta_buddhi(self):
+        if self._meta_buddhi is None:
+            from dhee.core.meta_buddhi import MetaBuddhi
+            self._meta_buddhi = MetaBuddhi(
+                data_dir=os.path.join(self._data_dir, "meta_buddhi")
+            )
+        return self._meta_buddhi
 
     # ------------------------------------------------------------------
     # Core API: The HyperAgent entry point
@@ -323,6 +360,28 @@ class Buddhi:
             if len(seq) > 50:
                 self._query_sequences[user_id] = seq[-50:]
 
+        # 9. Contrastive pairs (Phase 2: ReasoningBank pattern)
+        contrasts = []
+        try:
+            store = self._get_contrastive()
+            pairs = store.retrieve_contrasts(
+                task_description or "", user_id=user_id, limit=5,
+            )
+            contrasts = [p.to_compact() for p in pairs]
+        except Exception:
+            pass
+
+        # 10. Heuristics (Phase 2: ERL pattern)
+        heuristics = []
+        try:
+            distiller = self._get_heuristic_distiller()
+            relevant = distiller.retrieve_relevant(
+                task_description or "", user_id=user_id, limit=5,
+            )
+            heuristics = [h.to_compact() for h in relevant]
+        except Exception:
+            pass
+
         return HyperContext(
             user_id=user_id,
             session_id=str(uuid.uuid4()),
@@ -333,6 +392,8 @@ class Buddhi:
             intentions=triggered,
             warnings=warnings,
             memories=memories,
+            contrasts=contrasts,
+            heuristics=heuristics,
         )
 
     # ------------------------------------------------------------------
@@ -789,6 +850,34 @@ class Buddhi:
                 tags=["decision", task_type],
             )
             new_insights.append(insight)
+
+        # Phase 2: Auto-create contrastive pair when both sides provided
+        if what_worked and what_failed:
+            try:
+                store = self._get_contrastive()
+                store.add_pair(
+                    task_description=f"{task_type} task",
+                    success_approach=what_worked,
+                    failure_approach=what_failed,
+                    task_type=task_type,
+                    user_id=user_id,
+                )
+            except Exception:
+                pass
+
+        # Phase 2: Distill heuristic from what_worked
+        if what_worked:
+            try:
+                distiller = self._get_heuristic_distiller()
+                distiller.distill_from_trajectory(
+                    task_description=f"{task_type} task",
+                    task_type=task_type,
+                    what_worked=what_worked,
+                    what_failed=what_failed,
+                    user_id=user_id,
+                )
+            except Exception:
+                pass
 
         return new_insights
 

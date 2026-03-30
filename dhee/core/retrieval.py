@@ -142,8 +142,9 @@ def hybrid_score(
 class HybridSearcher:
     """Helper class for hybrid search across memories."""
 
-    def __init__(self, alpha: float = 0.7):
+    def __init__(self, alpha: float = 0.7, contrastive_boost: float = 0.0):
         self.alpha = alpha
+        self.contrastive_boost = contrastive_boost
 
     def score_memory(
         self,
@@ -153,6 +154,7 @@ class HybridSearcher:
         echo_keywords: Optional[List[str]] = None,
         echo_paraphrases: Optional[List[str]] = None,
         strength: float = 1.0,
+        contrastive_signal: float = 0.0,
     ) -> Dict[str, float]:
         keyword_score = calculate_keyword_score(
             query_terms=query_terms,
@@ -163,9 +165,14 @@ class HybridSearcher:
 
         hybrid = hybrid_score(semantic_similarity, keyword_score, self.alpha)
 
+        # Apply contrastive boost: results aligned with past successes score higher
+        if self.contrastive_boost > 0 and contrastive_signal > 0:
+            hybrid += self.contrastive_boost * contrastive_signal
+
         return {
             "semantic_score": semantic_similarity,
             "keyword_score": keyword_score,
             "hybrid_score": hybrid,
+            "contrastive_signal": contrastive_signal,
             "composite_score": composite_score(hybrid, strength),
         }

@@ -494,6 +494,39 @@ class SamskaraCollector:
         except (OSError, json.JSONDecodeError):
             pass
 
+    def get_training_data(self) -> Dict[str, Any]:
+        """Export accumulated data formatted for BuddhiMini training pipeline.
+
+        Returns SFT examples from session samskaras and DPO pairs from corrections.
+        Called by BuddhiMini.train_cycle() to feed the progressive trainer.
+        """
+        sft_samples = []
+        for s in self._session_samskaras:
+            if s.input_text and s.output_text:
+                sample = {
+                    "input": f"[{s.type.value.upper()}] {s.input_text}",
+                    "output": s.output_text,
+                    "type": s.type.value,
+                    "valence": s.valence.value,
+                }
+                if s.corrected_text:
+                    sample["corrected"] = s.corrected_text
+                sft_samples.append(sample)
+
+        return {
+            "sft_samples": sft_samples,
+            "dpo_pairs": list(self._dpo_pairs),
+            "vasana_report": {
+                name: {"strength": v.strength, "count": v.count}
+                for name, v in self.vasanas.items()
+            },
+            "degrading_dimensions": [
+                name for name, v in self.vasanas.items()
+                if v.is_degrading
+            ],
+            "total_samskaras": self._total_samskaras,
+        }
+
     def flush(self) -> None:
         """Persist current state. Call periodically or on shutdown."""
         self._save_state()

@@ -4,17 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dhee"
-version = "1.0.0"
-description = "Cognition as a Service — the memory layer that makes ANY agent intelligent"
+version = "2.0.0"
+description = "Self-Evolving Cognition Plugin — makes ANY agent a self-improving HyperAgent"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
 authors = [
     {name = "Sankhya AI Labs"}
 ]
-keywords = ["memory-layer", "cognition", "mcp", "claude", "cursor", "codex", "ai", "agents", "forgetting", "llm"]
+keywords = ["memory-layer", "cognition", "mcp", "self-evolving", "hyperagent", "ai", "agents", "plugin", "llm", "edge"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
@@ -45,6 +45,8 @@ local = ["llama-cpp-python>=0.3", "sentence-transformers>=3.0"]
 mcp = ["mcp>=1.0.0"]
 api = ["fastapi>=0.100.0", "uvicorn>=0.20.0"]
 bus = ["engram-bus>=0.1.0"]
+# Edge/hardware deployment (offline, ONNX embedder)
+edge = ["onnxruntime>=1.16"]
 # Training (QLoRA fine-tuning)
 training = ["unsloth", "datasets>=2.0", "trl>=0.7", "peft>=0.6"]
 all = [
@@ -55,7 +57,7 @@ all = [
     "fastapi>=0.100.0",
     "uvicorn>=0.20.0",
     "dhee-accel>=0.1.0",
-    "dhee-bus>=0.1.0",
+    "engram-bus>=0.1.0",
     "llama-cpp-python>=0.3",
     "sentence-transformers>=3.0",
 ]
@@ -66,7 +68,7 @@ dev = [
 ]
 
 [project.scripts]
-dhee = "dhee.client:main"
+dhee = "dhee.cli:main"
 dhee-mcp = "dhee.mcp_slim:run"
 dhee-mcp-full = "dhee.mcp_server:run"
 
