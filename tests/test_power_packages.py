@@ -31,6 +31,12 @@ _NVIDIA_KEYS = (
 if not any(os.environ.get(key) for key in _NVIDIA_KEYS):
     pytest.skip("requires NVIDIA API credentials", allow_module_level=True)
 
+# Power packages are separate installable packages (engram_router, engram_heartbeat, etc.)
+try:
+    import engram_router  # noqa: F401
+except ImportError:
+    pytest.skip("engram power packages not installed", allow_module_level=True)
+
 
 @pytest.fixture(scope="session")
 def memory():

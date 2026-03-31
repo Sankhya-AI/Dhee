@@ -134,7 +134,7 @@ class Engram:
             llm=LLMConfig(provider=llm_provider),
             embedder=EmbedderConfig(provider=embedder_provider, **embedder_kwargs),
             vector_store=vector_config,
-            engram=FadeMemConfig(
+            fade=FadeMemConfig(
                 enable_forgetting=enable_decay,
             ),
             echo=EchoMemConfig(

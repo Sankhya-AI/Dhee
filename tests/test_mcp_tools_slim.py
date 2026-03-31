@@ -1,13 +1,15 @@
 """Verify MCP server tool contract."""
 
-from dhee import mcp_server
+import pytest
+
+mcp_server = pytest.importorskip("dhee.mcp_server", reason="mcp package not installed")
 
 EXPECTED_TOOL_NAMES = {
     "remember",
     "search_memory",
     "get_memory",
     "get_all_memories",
-    "engram_context",
+    "dhee_context",
     "get_last_session",
     "save_session_digest",
     "get_memory_stats",
@@ -22,6 +24,11 @@ EXPECTED_TOOL_NAMES = {
     "decompose_skill",
     "apply_skill_with_bindings",
     "enrich_pending",
+    "think",
+    "anticipate",
+    "record_outcome",
+    "reflect",
+    "store_intention",
 }
 
 

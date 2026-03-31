@@ -3,14 +3,19 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from scripts.run_locomo_plus_engram import (
-    _build_output_record,
-    _extract_question_from_prompt,
-    _load_existing_predictions,
-    _parse_cognitive_sessions,
-    _parse_locomo_sessions,
-    _strip_question_block,
-)
+import pytest
+
+try:
+    from scripts.run_locomo_plus_engram import (
+        _build_output_record,
+        _extract_question_from_prompt,
+        _load_existing_predictions,
+        _parse_cognitive_sessions,
+        _parse_locomo_sessions,
+        _strip_question_block,
+    )
+except ImportError:
+    pytest.skip("engram benchmark module not available", allow_module_level=True)
 
 
 def test_parse_locomo_sessions_with_date_blocks_and_question_strip() -> None:

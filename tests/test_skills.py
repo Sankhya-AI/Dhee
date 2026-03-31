@@ -293,11 +293,11 @@ class TestComputeConfidence:
 class TestDiscovery:
     def test_discover_skill_dirs_global(self):
         dirs = discover_skill_dirs()
-        assert any(".engram/skills" in d for d in dirs)
+        assert any(".dhee/skills" in d for d in dirs)
 
     def test_discover_skill_dirs_with_repo(self, tmp_path):
         dirs = discover_skill_dirs(repo_path=str(tmp_path))
-        assert any(".engram/skills" in d for d in dirs)
+        assert any(".dhee/skills" in d for d in dirs)
         assert str(tmp_path) in dirs[0]
 
     def test_scan_skill_files(self, tmp_path):

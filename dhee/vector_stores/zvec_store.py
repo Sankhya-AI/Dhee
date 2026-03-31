@@ -48,7 +48,7 @@ class ZvecStore(VectorStoreBase):
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         config = config or {}
         self.config = config
-        self.collection_name = config.get("collection_name", "fadem_memories")
+        self.collection_name = config.get("collection_name", "dhee_memories")
         self.vector_size = (
             config.get("embedding_model_dims")
             or config.get("vector_size")

@@ -5,6 +5,10 @@ import tempfile
 
 import pytest
 
+pytest.importorskip("engram_bus", reason="engram_bus package not installed")
+pytest.importorskip("engram_router", reason="engram_router package not installed")
+pytest.importorskip("engram_bridge", reason="engram_bridge package not installed")
+
 from dhee.configs.base import MemoryConfig
 from dhee.memory.main import FullMemory as Memory
 from dhee.memory.projects import ProjectManager

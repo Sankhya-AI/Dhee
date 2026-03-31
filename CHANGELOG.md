@@ -4,6 +4,46 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.2.0b1] - 2026-03-31 — Architectural Cleanup
+
+Beta release focused on internal discipline rather than new features.
+
+### Changed — Architecture
+
+- **main.py decomposition**: Extracted `SearchPipeline`, `MemoryWritePipeline`, `OrchestrationEngine` from the 6,129-line monolith. main.py is now ~3,100 lines (49% reduction).
+- **Public surface**: `dhee/__init__.py` rewritten for clean, narrow exports. `Memory = CoreMemory` (not FullMemory). Cognitive subsystems intentionally kept internal.
+- **MCP split**: `mcp_slim.py` (4-tool product surface) vs `mcp_server.py` (24-tool power surface). Clear separation of concerns.
+
+### Changed — Rename Debt
+
+- All `FADEM_*` env vars → `DHEE_*` (with `FADEM_*` fallback for backward compat).
+- Internal `fadem_config` → `fade_config` across memory package.
+- Default collection name `fadem_memories` → `dhee_memories`.
+- Config field `MemoryConfig.engram` → `MemoryConfig.fade`.
+- CLI, MCP server, observability, presets: all `engram` product references removed.
+
+### Added — D2Skill Policy Improvements
+
+- **Dual-granularity policies**: `PolicyGranularity.TASK` (strategy) vs `PolicyGranularity.STEP` (local correction). Inspired by D2Skill (arXiv:2603.28716).
+- **Utility scoring**: EMA-smoothed performance delta tracking on policies. Three-signal retrieval ranking (condition match + sigmoid utility + UCB exploration bonus).
+- **Utility-based pruning**: `PolicyStore.prune()` removes deprecated policies first, protects validated ones.
+- **Buddhi wiring**: `reflect()` accepts `outcome_score`, computes baseline vs actual delta, feeds it to policy `record_outcome()`.
+
+### Fixed
+
+- `buddhi.py`: Replaced dead `memory.get_last_session_digest()` call with working `get_last_session()` import.
+- `mcp_server.py`: Fixed wrong "8 tools total" comment (actually 24), fixed `-> Memory` type hints (Memory not imported).
+- CLI: Wired `benchmark` command into parser (existed but was unreachable).
+- `PolicyStore.prune()`: Fixed bug where `candidates.pop()` pruned validated policies instead of deprecated ones.
+- CHANGELOG 2.1.0: Removed false "Production/Stable" and "A-grade" claims.
+
+### Changed — Packaging
+
+- Version: 2.1.0 → 2.2.0b1
+- Classifier: `Development Status :: 4 - Beta` (was falsely claiming Production/Stable)
+
+---
+
 ## [2.1.0] - 2026-03-30 — Cognition Primitives
 
 Dhee V2.1: Adds first-class cognitive primitives (episodes, tasks, policies, beliefs, triggers) and a 60-test suite that exercises them. These are internal building blocks — the public API remains the 4-operation surface (remember/recall/context/checkpoint).

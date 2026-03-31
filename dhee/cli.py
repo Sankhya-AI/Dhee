@@ -10,6 +10,7 @@ Usage:
     dhee categories         List categories
     dhee export             Export to JSON
     dhee import <file>      Import from JSON
+    dhee benchmark          Run performance benchmarks
     dhee status             Version, config, DB info
 """
 
@@ -457,6 +458,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_status = sub.add_parser("status", help="Show version, config, and agents")
     p_status.add_argument("--json", action="store_true", help="JSON output")
 
+    # benchmark
+    sub.add_parser("benchmark", help="Run performance benchmarks")
+
     # uninstall
     sub.add_parser("uninstall", help="Remove ~/.dhee directory")
 
@@ -477,6 +481,7 @@ COMMAND_MAP = {
     "export": cmd_export,
     "import": cmd_import,
     "status": cmd_status,
+    "benchmark": cmd_benchmark,
     "uninstall": cmd_uninstall,
 }
 

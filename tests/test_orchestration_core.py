@@ -97,7 +97,7 @@ def test_search_orchestrated_skips_map_reduce_when_coverage_sufficient(memory_in
     def fail_extract_atomic_facts(**kwargs: Any) -> List[Dict[str, Any]]:
         raise AssertionError("map stage should be skipped when episodic coverage is sufficient")
 
-    monkeypatch.setattr("engram.memory.main.extract_atomic_facts", fail_extract_atomic_facts)
+    monkeypatch.setattr("dhee.memory.main.extract_atomic_facts", fail_extract_atomic_facts)
 
     payload = mem.search_orchestrated(
         query="How many projects?",
@@ -140,8 +140,8 @@ def test_search_orchestrated_reflection_hard_caps_to_one_hop(memory_instance, mo
 
     monkeypatch.setattr(mem, "search", fake_search)
     monkeypatch.setattr(mem, "search_episodes", fake_search_episodes)
-    monkeypatch.setattr("engram.memory.main.extract_atomic_facts", fake_extract_atomic_facts)
-    monkeypatch.setattr("engram.memory.main.reduce_atomic_facts", fake_reduce_atomic_facts)
+    monkeypatch.setattr("dhee.memory.main.extract_atomic_facts", fake_extract_atomic_facts)
+    monkeypatch.setattr("dhee.memory.main.reduce_atomic_facts", fake_reduce_atomic_facts)
 
     payload = mem.search_orchestrated(
         query="How many projects?",
@@ -190,8 +190,8 @@ def test_search_orchestrated_inconsistency_can_trigger_map_reduce(memory_instanc
 
     monkeypatch.setattr(mem, "search", fake_search)
     monkeypatch.setattr(mem, "search_episodes", fake_search_episodes)
-    monkeypatch.setattr("engram.memory.main.extract_atomic_facts", lambda **kwargs: [{"value": "5", "relevant": True}])
-    monkeypatch.setattr("engram.memory.main.reduce_atomic_facts", lambda **kwargs: ("5", {}))
+    monkeypatch.setattr("dhee.memory.main.extract_atomic_facts", lambda **kwargs: [{"value": "5", "relevant": True}])
+    monkeypatch.setattr("dhee.memory.main.reduce_atomic_facts", lambda **kwargs: ("5", {}))
 
     payload = mem.search_orchestrated(
         query="How many projects have I led?",
@@ -254,8 +254,8 @@ def test_search_orchestrated_reducer_cache_hit(memory_instance, monkeypatch) -> 
 
     monkeypatch.setattr(mem, "search", fake_search)
     monkeypatch.setattr(mem, "search_episodes", fake_search_episodes)
-    monkeypatch.setattr("engram.memory.main.extract_atomic_facts", fake_extract_atomic_facts)
-    monkeypatch.setattr("engram.memory.main.reduce_atomic_facts", lambda **kwargs: ("4", {}))
+    monkeypatch.setattr("dhee.memory.main.extract_atomic_facts", fake_extract_atomic_facts)
+    monkeypatch.setattr("dhee.memory.main.reduce_atomic_facts", lambda **kwargs: ("4", {}))
 
     first = mem.search_orchestrated(
         query="How many projects have I led?",
