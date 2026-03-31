@@ -38,6 +38,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from dhee.core.intention import Intention  # re-export for backward compat
+
 logger = logging.getLogger(__name__)
 
 
@@ -81,36 +83,6 @@ class Insight:
             "source_task_types": self.source_task_types,
             "validations": self.validation_count,
             "tags": self.tags,
-        }
-
-
-@dataclass
-class Intention:
-    """A stored future trigger — prospective memory.
-
-    "Remember to run tests after modifying the auth module"
-    "Deploy when the PR is approved"
-    """
-    id: str
-    user_id: str
-    description: str
-    trigger_keywords: List[str]     # matched against queries/content
-    trigger_after: Optional[str]    # ISO timestamp deadline
-    action_type: str                # "remind" | "suggest" | "warn"
-    action_payload: str             # what to surface when triggered
-    status: str                     # "active" | "triggered" | "expired"
-    created_at: str
-    triggered_at: Optional[str]
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "id": self.id,
-            "description": self.description,
-            "action_type": self.action_type,
-            "action_payload": self.action_payload,
-            "status": self.status,
-            "trigger_keywords": self.trigger_keywords,
-            "trigger_after": self.trigger_after,
         }
 
 
@@ -217,28 +189,6 @@ class HyperContext:
 
 
 # ---------------------------------------------------------------------------
-# Intention detection patterns
-# ---------------------------------------------------------------------------
-
-_INTENTION_PATTERNS = [
-    # "remember to X when/after/before Y"
-    re.compile(
-        r"(?:remember|remind|don't forget|make sure)\s+(?:to\s+)?(.+?)"
-        r"\s+(?:when|after|before|if|once)\s+(.+)",
-        re.IGNORECASE,
-    ),
-    # "I need to X after Y"
-    re.compile(
-        r"(?:I|we)\s+(?:need|want|should|must|have)\s+to\s+(.+?)"
-        r"\s+(?:after|before|when|once)\s+(.+)",
-        re.IGNORECASE,
-    ),
-    # "todo: X" / "TODO X"
-    re.compile(r"(?:todo|TODO|fixme|FIXME|hack|HACK)[:;]?\s+(.+)", re.IGNORECASE),
-]
-
-
-# ---------------------------------------------------------------------------
 # Buddhi — the proactive cognition layer
 # ---------------------------------------------------------------------------
 
@@ -255,29 +205,32 @@ class Buddhi:
     Zero LLM calls on the hot path. Fast and cheap.
     """
 
-    def __init__(self, data_dir: Optional[str] = None):
+    def __init__(
+        self,
+        data_dir: Optional[str] = None,
+        kernel: Optional[Any] = None,
+    ):
         self._data_dir = data_dir or os.path.join(
             os.path.expanduser("~"), ".dhee", "buddhi"
         )
         os.makedirs(self._data_dir, exist_ok=True)
 
-        # In-memory stores, loaded from disk
+        # CognitionKernel owns all state primitives
+        if kernel is not None:
+            self._kernel = kernel
+        else:
+            from dhee.core.cognition_kernel import CognitionKernel
+            self._kernel = CognitionKernel(data_dir=self._data_dir)
+
+        # Buddhi's own state: insights + performance (NOT state primitives)
         self._insights: Dict[str, Insight] = {}
-        self._intentions: Dict[str, Intention] = {}
         self._performance: Dict[str, List[Dict[str, Any]]] = {}  # task_type -> records
         self._query_sequences: Dict[str, List[str]] = {}  # user_id -> recent queries
 
-        # Phase 2 subsystems (lazy-initialized)
+        # Phase 2 subsystems (lazy-initialized, stay in Buddhi)
         self._contrastive = None
         self._heuristic_distiller = None
         self._meta_buddhi = None
-
-        # Phase 3 subsystems (lazy-initialized)
-        self._episode_store = None
-        self._task_state_store = None
-        self._policy_store = None
-        self._belief_store = None
-        self._trigger_manager = None
 
         self._load_state()
 
@@ -305,37 +258,20 @@ class Buddhi:
             )
         return self._meta_buddhi
 
+    # Deprecated forwarders — use self._kernel.* directly.
+    # Kept for backward compat with test_cognition_v3.py.
+
     def _get_episode_store(self):
-        if self._episode_store is None:
-            from dhee.core.episode import EpisodeStore
-            self._episode_store = EpisodeStore(
-                data_dir=os.path.join(self._data_dir, "episodes")
-            )
-        return self._episode_store
+        return self._kernel.episodes
 
     def _get_task_state_store(self):
-        if self._task_state_store is None:
-            from dhee.core.task_state import TaskStateStore
-            self._task_state_store = TaskStateStore(
-                data_dir=os.path.join(self._data_dir, "tasks")
-            )
-        return self._task_state_store
+        return self._kernel.tasks
 
     def _get_policy_store(self):
-        if self._policy_store is None:
-            from dhee.core.policy import PolicyStore
-            self._policy_store = PolicyStore(
-                data_dir=os.path.join(self._data_dir, "policies")
-            )
-        return self._policy_store
+        return self._kernel.policies
 
     def _get_belief_store(self):
-        if self._belief_store is None:
-            from dhee.core.belief import BeliefStore
-            self._belief_store = BeliefStore(
-                data_dir=os.path.join(self._data_dir, "beliefs")
-            )
-        return self._belief_store
+        return self._kernel.beliefs
 
     # ------------------------------------------------------------------
     # Core API: The HyperAgent entry point
@@ -385,8 +321,8 @@ class Buddhi:
             except Exception:
                 pass
 
-        # 5. Check pending intentions
-        triggered = self._check_intentions(user_id, task_description)
+        # 5. Check pending intentions (via kernel)
+        triggered = self._kernel.intentions.check_triggers(user_id, task_description)
 
         # 6. Generate proactive warnings
         warnings = self._generate_warnings(performance, insights)
@@ -435,64 +371,13 @@ class Buddhi:
         except Exception:
             pass
 
-        # 11. Episodes (Phase 3: temporal experience units)
-        episodes = []
-        try:
-            ep_store = self._get_episode_store()
-            recent_eps = ep_store.retrieve_episodes(
-                user_id=user_id, task_description=task_description, limit=5,
-            )
-            episodes = [ep.to_compact() for ep in recent_eps]
-        except Exception:
-            pass
-
-        # 12. Task states (Phase 3: structured task tracking)
-        task_states = []
-        try:
-            ts_store = self._get_task_state_store()
-            active = ts_store.get_active_task(user_id)
-            if active:
-                task_states.append(active.to_compact())
-            recent_tasks = ts_store.get_recent_tasks(user_id, limit=3)
-            for t in recent_tasks:
-                c = t.to_compact()
-                if c not in task_states:
-                    task_states.append(c)
-        except Exception:
-            pass
-
-        # 13. Policies (Phase 3: condition->action rules)
-        policies = []
-        try:
-            p_store = self._get_policy_store()
-            matched = p_store.match_policies(
-                user_id=user_id,
-                task_type=task_description or "general",
-                task_description=task_description or "",
-                limit=3,
-            )
-            policies = [p.to_compact() for p in matched]
-        except Exception:
-            pass
-
-        # 14. Beliefs (Phase 3: confidence-tracked facts)
-        beliefs = []
-        try:
-            b_store = self._get_belief_store()
-            relevant_beliefs = b_store.get_relevant_beliefs(
-                user_id=user_id, query=task_description or "", limit=5,
-            )
-            beliefs = [b.to_compact() for b in relevant_beliefs]
-
-            # Surface contradictions as warnings
-            contradictions = b_store.get_contradictions(user_id)
-            for b1, b2 in contradictions[:3]:
-                warnings.append(
-                    f"Contradicting beliefs: '{b1.claim[:80]}' vs '{b2.claim[:80]}' "
-                    f"(confidence: {b1.confidence:.2f} vs {b2.confidence:.2f})"
-                )
-        except Exception:
-            pass
+        # 11-14. Cognitive state from kernel (episodes, tasks, policies, beliefs)
+        cog_state = self._kernel.get_cognitive_state(user_id, task_description)
+        episodes = cog_state.get("episodes", [])
+        task_states = cog_state.get("task_states", [])
+        policies = cog_state.get("policies", [])
+        beliefs = cog_state.get("beliefs", [])
+        warnings.extend(cog_state.get("belief_warnings", []))
 
         return HyperContext(
             user_id=user_id,
@@ -743,103 +628,28 @@ class Buddhi:
         trigger_after: Optional[str] = None,
         action_type: str = "remind",
         action_payload: Optional[str] = None,
-    ) -> Intention:
-        """Store a future intention — prospective memory.
-
-        Called when the agent or user says something like:
-        "remember to run tests after modifying auth"
-        """
-        intention = Intention(
-            id=str(uuid.uuid4()),
+    ) -> "Intention":
+        """Store a future intention — delegates to kernel IntentionStore."""
+        return self._kernel.intentions.store(
             user_id=user_id,
             description=description,
-            trigger_keywords=trigger_keywords or [],
+            trigger_keywords=trigger_keywords,
             trigger_after=trigger_after,
             action_type=action_type,
-            action_payload=action_payload or description,
-            status="active",
-            created_at=datetime.now(timezone.utc).isoformat(),
-            triggered_at=None,
+            action_payload=action_payload,
         )
-        self._intentions[intention.id] = intention
-        self._save_intentions()
-        return intention
 
     def detect_intention_in_text(
         self, text: str, user_id: str
-    ) -> Optional[Intention]:
-        """Auto-detect intentions in natural language and store them."""
-        for pattern in _INTENTION_PATTERNS:
-            match = pattern.search(text)
-            if match:
-                groups = match.groups()
-                if len(groups) >= 2:
-                    action = groups[0].strip()
-                    trigger = groups[1].strip()
-                    keywords = [
-                        w for w in trigger.lower().split()
-                        if len(w) > 3 and w not in {
-                            "the", "this", "that", "when", "after", "before",
-                        }
-                    ]
-                    return self.store_intention(
-                        user_id=user_id,
-                        description=f"{action} (trigger: {trigger})",
-                        trigger_keywords=keywords,
-                        action_payload=action,
-                    )
-                elif len(groups) == 1:
-                    # TODO-style, no trigger
-                    return self.store_intention(
-                        user_id=user_id,
-                        description=groups[0].strip(),
-                        action_payload=groups[0].strip(),
-                    )
-        return None
+    ) -> Optional["Intention"]:
+        """Auto-detect intentions in natural language — delegates to kernel."""
+        return self._kernel.intentions.detect_in_text(text, user_id)
 
     def _check_intentions(
         self, user_id: str, context: Optional[str]
-    ) -> List[Intention]:
-        """Check for triggered intentions using confidence-scored trigger system.
-
-        Uses the new TriggerManager for confidence-scored, composite trigger
-        evaluation while maintaining backwards compatibility with legacy
-        keyword/time triggers.
-        """
-        from dhee.core.trigger import TriggerManager, TriggerContext, KeywordTrigger, TimeTrigger
-
-        triggered = []
-        now = datetime.now(timezone.utc)
-        trigger_ctx = TriggerContext(
-            text=context or "",
-            timestamp=time.time(),
-        )
-
-        for intention in list(self._intentions.values()):
-            if intention.user_id != user_id or intention.status != "active":
-                continue
-
-            # Build triggers from legacy format
-            triggers = TriggerManager.from_intention_keywords(
-                keywords=intention.trigger_keywords,
-                trigger_after=intention.trigger_after,
-            )
-
-            if not triggers:
-                continue
-
-            # Evaluate with confidence scoring
-            results = TriggerManager.evaluate_triggers(triggers, trigger_ctx)
-            if results:
-                best = max(results, key=lambda r: r.confidence)
-                intention.status = "triggered"
-                intention.triggered_at = now.isoformat()
-                triggered.append(intention)
-
-        if triggered:
-            self._save_intentions()
-
-        return triggered
+    ) -> List["Intention"]:
+        """Check for triggered intentions — delegates to kernel."""
+        return self._kernel.intentions.check_triggers(user_id, context)
 
     # ------------------------------------------------------------------
     # Proactive warnings
@@ -893,10 +703,9 @@ class Buddhi:
         # 1. Intention detection
         intention = self.detect_intention_in_text(content, user_id)
 
-        # 2. Episode event recording
+        # 2. Episode event recording (via kernel)
         try:
-            ep_store = self._get_episode_store()
-            ep_store.record_event(
+            self._kernel.episodes.record_event(
                 user_id=user_id,
                 event_type="memory_add",
                 content=content[:500],
@@ -905,7 +714,7 @@ class Buddhi:
         except Exception:
             pass
 
-        # 3. Belief creation for factual statements
+        # 3. Belief creation for factual statements (via kernel)
         try:
             self._maybe_create_belief(content, user_id, memory_id)
         except Exception:
@@ -954,8 +763,7 @@ class Buddhi:
                 domain = d
                 break
 
-        b_store = self._get_belief_store()
-        b_store.add_belief(
+        self._kernel.beliefs.add_belief(
             user_id=user_id,
             claim=content[:500],
             domain=domain,
@@ -977,8 +785,8 @@ class Buddhi:
         """Called after search. Returns proactive signals to attach."""
         signals: Dict[str, Any] = {}
 
-        # Check intentions
-        triggered = self._check_intentions(user_id, query)
+        # Check intentions (via kernel)
+        triggered = self._kernel.intentions.check_triggers(user_id, query)
         if triggered:
             signals["triggered_intentions"] = [i.to_dict() for i in triggered]
 
@@ -1095,30 +903,35 @@ class Buddhi:
 
         if what_worked:
             try:
-                p_store = self._get_policy_store()
-                matched = p_store.match_policies(user_id, task_type, f"{task_type} task")
+                matched = self._kernel.policies.match_policies(
+                    user_id, task_type, f"{task_type} task",
+                )
                 for policy in matched:
-                    p_store.record_outcome(
+                    self._kernel.policies.record_outcome(
                         policy.id,
                         success=True,
                         baseline_score=baseline_score,
                         actual_score=outcome_score,
                     )
 
-                ts_store = self._get_task_state_store()
-                completed = ts_store.get_tasks_by_type(user_id, task_type, limit=10)
+                completed = self._kernel.tasks.get_tasks_by_type(
+                    user_id, task_type, limit=10,
+                )
                 if len(completed) >= 3:
                     task_dicts = [t.to_dict() for t in completed]
-                    p_store.extract_from_tasks(user_id, task_dicts, task_type)
+                    self._kernel.policies.extract_from_tasks(
+                        user_id, task_dicts, task_type,
+                    )
             except Exception:
                 pass
 
         if what_failed:
             try:
-                p_store = self._get_policy_store()
-                matched = p_store.match_policies(user_id, task_type, f"{task_type} task")
+                matched = self._kernel.policies.match_policies(
+                    user_id, task_type, f"{task_type} task",
+                )
                 for policy in matched:
-                    p_store.record_outcome(
+                    self._kernel.policies.record_outcome(
                         policy.id,
                         success=False,
                         baseline_score=baseline_score,
@@ -1127,22 +940,28 @@ class Buddhi:
             except Exception:
                 pass
 
-        # Phase 3: Update beliefs based on outcomes
+        # Update beliefs based on outcomes (via kernel)
         if what_worked:
             try:
-                b_store = self._get_belief_store()
-                relevant = b_store.get_relevant_beliefs(user_id, what_worked, limit=3)
+                relevant = self._kernel.beliefs.get_relevant_beliefs(
+                    user_id, what_worked, limit=3,
+                )
                 for belief in relevant:
-                    b_store.reinforce_belief(belief.id, what_worked, source="outcome")
+                    self._kernel.beliefs.reinforce_belief(
+                        belief.id, what_worked, source="outcome",
+                    )
             except Exception:
                 pass
 
         if what_failed:
             try:
-                b_store = self._get_belief_store()
-                relevant = b_store.get_relevant_beliefs(user_id, what_failed, limit=3)
+                relevant = self._kernel.beliefs.get_relevant_beliefs(
+                    user_id, what_failed, limit=3,
+                )
                 for belief in relevant:
-                    b_store.challenge_belief(belief.id, what_failed, source="outcome")
+                    self._kernel.beliefs.challenge_belief(
+                        belief.id, what_failed, source="outcome",
+                    )
             except Exception:
                 pass
 
@@ -1196,25 +1015,8 @@ class Buddhi:
             logger.debug("Failed to save insights: %s", e)
 
     def _save_intentions(self) -> None:
-        path = os.path.join(self._data_dir, "intentions.jsonl")
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                for intention in self._intentions.values():
-                    row = {
-                        "id": intention.id,
-                        "user_id": intention.user_id,
-                        "description": intention.description,
-                        "trigger_keywords": intention.trigger_keywords,
-                        "trigger_after": intention.trigger_after,
-                        "action_type": intention.action_type,
-                        "action_payload": intention.action_payload,
-                        "status": intention.status,
-                        "created_at": intention.created_at,
-                        "triggered_at": intention.triggered_at,
-                    }
-                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
-        except OSError as e:
-            logger.debug("Failed to save intentions: %s", e)
+        """Deprecated: intentions now managed by kernel IntentionStore."""
+        self._kernel.intentions.flush()
 
     def _save_performance(self) -> None:
         path = os.path.join(self._data_dir, "performance.json")
@@ -1253,31 +1055,7 @@ class Buddhi:
             except (OSError, json.JSONDecodeError) as e:
                 logger.debug("Failed to load insights: %s", e)
 
-        # Intentions
-        intentions_path = os.path.join(self._data_dir, "intentions.jsonl")
-        if os.path.exists(intentions_path):
-            try:
-                with open(intentions_path, "r", encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        row = json.loads(line)
-                        intention = Intention(
-                            id=row["id"],
-                            user_id=row["user_id"],
-                            description=row["description"],
-                            trigger_keywords=row.get("trigger_keywords", []),
-                            trigger_after=row.get("trigger_after"),
-                            action_type=row.get("action_type", "remind"),
-                            action_payload=row.get("action_payload", ""),
-                            status=row.get("status", "active"),
-                            created_at=row.get("created_at", ""),
-                            triggered_at=row.get("triggered_at"),
-                        )
-                        self._intentions[intention.id] = intention
-            except (OSError, json.JSONDecodeError) as e:
-                logger.debug("Failed to load intentions: %s", e)
+        # Intentions: now managed by kernel IntentionStore (loaded in kernel init)
 
         # Performance
         perf_path = os.path.join(self._data_dir, "performance.json")
@@ -1291,14 +1069,14 @@ class Buddhi:
     def flush(self) -> None:
         """Persist all state. Call on shutdown."""
         self._save_insights()
-        self._save_intentions()
         self._save_performance()
 
-        # Flush Phase 2/3 subsystems if initialized
+        # Flush kernel (all state stores)
+        self._kernel.flush()
+
+        # Flush Phase 2 subsystems if initialized
         for store in [
             self._contrastive, self._heuristic_distiller,
-            self._episode_store, self._task_state_store,
-            self._policy_store, self._belief_store,
         ]:
             if store and hasattr(store, "flush"):
                 try:
@@ -1308,28 +1086,27 @@ class Buddhi:
 
     def get_stats(self) -> Dict[str, Any]:
         """Get buddhi status for health checks."""
+        intention_stats = self._kernel.intentions.get_stats()
         stats = {
             "insights": len(self._insights),
-            "active_intentions": sum(
-                1 for i in self._intentions.values() if i.status == "active"
-            ),
-            "triggered_intentions": sum(
-                1 for i in self._intentions.values() if i.status == "triggered"
-            ),
+            "active_intentions": intention_stats.get("active", 0),
+            "triggered_intentions": intention_stats.get("triggered", 0),
             "task_types_tracked": len(self._performance),
             "total_performance_records": sum(
                 len(v) for v in self._performance.values()
             ),
         }
 
-        # Phase 2/3 stats (only if initialized)
+        # Kernel state store stats
+        kernel_stats = self._kernel.get_stats()
+        stats.update(kernel_stats)
+
+        # Phase 2 stats (only if initialized)
         for name, store in [
             ("contrastive", self._contrastive),
             ("heuristics", self._heuristic_distiller),
-            ("episodes", self._episode_store),
-            ("tasks", self._task_state_store),
-            ("policies", self._policy_store),
-            ("beliefs", self._belief_store),
+            ("contrastive", self._contrastive),
+            ("heuristics", self._heuristic_distiller),
         ]:
             if store and hasattr(store, "get_stats"):
                 try:

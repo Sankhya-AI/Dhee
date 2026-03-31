@@ -409,9 +409,11 @@ class Dhee:
             data_dir=data_dir,
             in_memory=in_memory,
         )
+        from dhee.core.cognition_kernel import CognitionKernel
         from dhee.core.buddhi import Buddhi
         buddhi_dir = str(self._engram.data_dir / "buddhi")
-        self._buddhi = Buddhi(data_dir=buddhi_dir)
+        self._kernel = CognitionKernel(data_dir=buddhi_dir)
+        self._buddhi = Buddhi(data_dir=buddhi_dir, kernel=self._kernel)
 
         # Passive session tracker — auto-context + auto-checkpoint
         from dhee.core.session_tracker import SessionTracker
@@ -420,6 +422,11 @@ class Dhee:
             auto_context=auto_context,
             auto_checkpoint=auto_checkpoint,
         )
+
+    @property
+    def kernel(self):
+        """Access the CognitionKernel for direct state manipulation."""
+        return self._kernel
 
     # ------------------------------------------------------------------
     # Tool 1: remember
@@ -646,10 +653,12 @@ class Dhee:
                 pass
 
         # 3. Outcome recording
-        if task_type and outcome_score is not None:
-            score = max(0.0, min(1.0, float(outcome_score)))
+        clamped_score = None
+        if outcome_score is not None:
+            clamped_score = max(0.0, min(1.0, float(outcome_score)))
+        if task_type and clamped_score is not None:
             insight = self._buddhi.record_outcome(
-                user_id=uid, task_type=task_type, score=score,
+                user_id=uid, task_type=task_type, score=clamped_score,
             )
             result["outcome_recorded"] = True
             if insight:
@@ -663,7 +672,7 @@ class Dhee:
                 what_worked=what_worked,
                 what_failed=what_failed,
                 key_decision=key_decision,
-                outcome_score=score if outcome_score is not None else None,
+                outcome_score=clamped_score,
             )
             result["insights_created"] = len(insights)
 
