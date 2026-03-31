@@ -79,10 +79,12 @@ class DheePlugin:
             in_memory=in_memory,
         )
 
-        # Build the Buddhi (cognition) layer
+        # Build the CognitionKernel (state) + Buddhi (intelligence) layers
+        from dhee.core.cognition_kernel import CognitionKernel
         from dhee.core.buddhi import Buddhi
         buddhi_dir = str(self._engram.data_dir / "buddhi")
-        self._buddhi = Buddhi(data_dir=buddhi_dir)
+        self._kernel = CognitionKernel(data_dir=buddhi_dir)
+        self._buddhi = Buddhi(data_dir=buddhi_dir, kernel=self._kernel)
 
         # Passive session tracker — auto-context + auto-checkpoint
         from dhee.core.session_tracker import SessionTracker
@@ -316,72 +318,31 @@ class DheePlugin:
             )
             result["intention_stored"] = intention.to_dict()
 
-        # 6. Episode closure
-        try:
-            ep_store = self._buddhi._get_episode_store()
-            ep_store.record_event(
+        # 6. Episode closure (via kernel)
+        ep_result = self._kernel.record_checkpoint_event(
+            uid, summary, status, outcome_score,
+        )
+        result.update(ep_result)
+
+        # 7. Task state update (via kernel)
+        if goal or plan or blockers:
+            task_result = self._kernel.update_task_on_checkpoint(
                 user_id=uid,
-                event_type="checkpoint",
-                content=summary[:500],
-                metadata={"status": status, "outcome_score": outcome_score},
+                goal=goal,
+                plan=plan,
+                plan_rationale=plan_rationale,
+                blockers=blockers,
+                task_type=task_type or "general",
+                status=status,
+                outcome_score=outcome_score,
+                outcome_evidence=outcome_evidence,
+                summary=summary,
             )
-            if status == "completed":
-                episode = ep_store.end_episode(uid, outcome_score, summary)
-                if episode:
-                    result["episode_closed"] = episode.id
-        except Exception:
-            pass
+            result.update(task_result)
 
-        # 7. Task state update
-        try:
-            ts_store = self._buddhi._get_task_state_store()
-            active_task = ts_store.get_active_task(uid)
-
-            if goal or plan:
-                # Create or update task state
-                if not active_task or active_task.goal != (goal or active_task.goal):
-                    active_task = ts_store.create_task(
-                        user_id=uid,
-                        goal=goal or summary,
-                        task_type=task_type or "general",
-                        plan=plan,
-                        plan_rationale=plan_rationale,
-                    )
-                    active_task.start()
-                    result["task_created"] = active_task.id
-                elif plan:
-                    active_task.set_plan(plan, plan_rationale)
-
-            if active_task:
-                # Add blockers
-                if blockers:
-                    for b in blockers:
-                        active_task.add_blocker(b, severity="soft")
-
-                # Complete task if outcome provided
-                if status == "completed" and outcome_score is not None:
-                    if outcome_score >= 0.5:
-                        active_task.complete(
-                            score=outcome_score,
-                            summary=summary,
-                            evidence=outcome_evidence,
-                        )
-                    else:
-                        active_task.fail(summary, evidence=outcome_evidence)
-                    result["task_completed"] = active_task.id
-
-                ts_store.update_task(active_task)
-        except Exception:
-            pass
-
-        # 8. Selective forgetting (periodic cleanup)
-        try:
-            ep_store = self._buddhi._get_episode_store()
-            archived = ep_store.selective_forget(uid)
-            if archived > 0:
-                result["episodes_archived"] = archived
-        except Exception:
-            pass
+        # 8. Selective forgetting (via kernel)
+        forget_result = self._kernel.selective_forget(uid)
+        result.update(forget_result)
 
         return result
 
@@ -408,10 +369,9 @@ class DheePlugin:
         self._session_id = str(uuid.uuid4())
         self._session_start_time = time.time()
 
-        # Begin episode
+        # Begin episode (via kernel)
         try:
-            ep_store = self._buddhi._get_episode_store()
-            ep_store.begin_episode(
+            self._kernel.episodes.begin_episode(
                 user_id=uid,
                 task_description=task_description or "session",
                 task_type=task_type or "general",
@@ -479,8 +439,7 @@ class DheePlugin:
     ) -> Dict[str, Any]:
         """Explicitly add a belief with confidence tracking."""
         uid = user_id or self._user_id
-        b_store = self._buddhi._get_belief_store()
-        belief, contradictions = b_store.add_belief(
+        belief, contradictions = self._kernel.beliefs.add_belief(
             user_id=uid, claim=claim, domain=domain,
             confidence=confidence, source="user",
         )
@@ -499,8 +458,7 @@ class DheePlugin:
         user_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Present contradicting evidence to a belief."""
-        b_store = self._buddhi._get_belief_store()
-        belief = b_store.challenge_belief(belief_id, evidence)
+        belief = self._kernel.beliefs.challenge_belief(belief_id, evidence)
         if belief:
             return belief.to_compact()
         return None
@@ -518,12 +476,11 @@ class DheePlugin:
     ) -> Dict[str, Any]:
         """Create a structured task with optional plan."""
         uid = user_id or self._user_id
-        ts_store = self._buddhi._get_task_state_store()
-        task = ts_store.create_task(
+        task = self._kernel.tasks.create_task(
             user_id=uid, goal=goal, task_type=task_type, plan=plan,
         )
         task.start()
-        ts_store.update_task(task)
+        self._kernel.tasks.update_task(task)
         return task.to_compact()
 
     def advance_task(
@@ -533,12 +490,11 @@ class DheePlugin:
     ) -> Optional[Dict[str, Any]]:
         """Advance the active task to the next step."""
         uid = user_id or self._user_id
-        ts_store = self._buddhi._get_task_state_store()
-        task = ts_store.get_active_task(uid)
+        task = self._kernel.tasks.get_active_task(uid)
         if not task:
             return None
         task.advance_step(note)
-        ts_store.update_task(task)
+        self._kernel.tasks.update_task(task)
         return task.to_compact()
 
     # ------------------------------------------------------------------
