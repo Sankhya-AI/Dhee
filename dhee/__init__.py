@@ -28,11 +28,16 @@ from dhee.adapters.base import DheePlugin
 from dhee.core.category import CategoryProcessor, Category, CategoryType, CategoryMatch
 from dhee.core.echo import EchoProcessor, EchoDepth, EchoResult
 from dhee.configs.base import MemoryConfig, FadeMemConfig, EchoMemConfig, CategoryMemConfig, ScopeConfig
+from dhee.core.belief import BeliefNode, BeliefStore, BeliefStatus
+from dhee.core.policy import PolicyCase, PolicyStore, PolicyStatus
+from dhee.core.task_state import TaskState, TaskStateStore, TaskStatus
+from dhee.core.episode import Episode, EpisodeStore, EpisodeStatus
+from dhee.core.trigger import TriggerManager, TriggerResult, TriggerContext
 
 # Default: CoreMemory (lightest, zero-config)
 Memory = CoreMemory
 
-__version__ = "2.1.0"
+__version__ = "2.2.0b1"
 __all__ = [
     # Tiered memory classes
     "CoreMemory",
@@ -59,6 +64,22 @@ __all__ = [
     "EchoMemConfig",
     "CategoryMemConfig",
     "ScopeConfig",
+    # Cognitive subsystems
+    "BeliefNode",
+    "BeliefStore",
+    "BeliefStatus",
+    "PolicyCase",
+    "PolicyStore",
+    "PolicyStatus",
+    "TaskState",
+    "TaskStateStore",
+    "TaskStatus",
+    "Episode",
+    "EpisodeStore",
+    "EpisodeStatus",
+    "TriggerManager",
+    "TriggerResult",
+    "TriggerContext",
 ]
 
 

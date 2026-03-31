@@ -7,7 +7,7 @@
 <h3 align="center">The cognition layer that turns your agent into a HyperAgent.</h3>
 
 <p align="center">
-  4 tools. 1 LLM call per session. ~$0.004 total cost.<br>
+  4-operation API. Deferred enrichment. Minimal hot-path cost.<br>
   Your agent remembers, learns from outcomes, and predicts what you need next.
 </p>
 
@@ -33,9 +33,17 @@ Most memory layers are glorified vector stores. Store text, retrieve text. Your 
 
 ### Benchmark: LongMemEval
 
-Dhee achieves near-perfect retrieval on [LongMemEval](https://arxiv.org/abs/2410.10813), the standard benchmark for long-term conversational memory — temporal reasoning, multi-session aggregation, knowledge updates, and counterfactual tracking across 500+ questions.
+Dhee is being evaluated on [LongMemEval](https://arxiv.org/abs/2410.10813), the standard benchmark for long-term conversational memory — temporal reasoning, multi-session aggregation, knowledge updates, and counterfactual tracking across 500+ questions. Preliminary results are promising.
 
-> Evaluation run in progress. Full results and methodology will be published in the benchmark report.
+> Full methodology and results will be published in the benchmark report.
+
+---
+
+## Status
+
+Dhee is **experimental software under active development**. The core 4-operation API (`remember`/`recall`/`context`/`checkpoint`) is stable. Advanced subsystems (belief tracking, policy extraction, episodic indexing) are functional but evolving.
+
+Use it. Build on it. But know that internals will change.
 
 ---
 
@@ -93,7 +101,7 @@ Every interface — MCP, Python, CLI, JS — exposes the same 4 operations.
 ### `remember(content)`
 Store a fact, preference, or observation.
 
-**Hot path**: 0 LLM calls, 1 embedding (~$0.0002). The memory is stored immediately. Echo enrichment (paraphrases, keywords, question-forms that make future recall dramatically better) is deferred to `checkpoint`.
+**Hot path**: 0 LLM calls, 1 embedding (~$0.0002 typical). The memory is stored immediately. Echo enrichment (paraphrases, keywords, question-forms that make future recall dramatically better) is deferred to `checkpoint`.
 
 ```python
 d.remember("User prefers FastAPI over Flask")
@@ -103,7 +111,7 @@ d.remember("Project uses PostgreSQL 15 with pgvector")
 ### `recall(query)`
 Search memory. Returns top-K results ranked by relevance.
 
-**Hot path**: 0 LLM calls, 1 embedding (~$0.0002). Pure vector search with echo-boosted re-ranking.
+**Hot path**: 0 LLM calls, 1 embedding (~$0.0002 typical). Pure vector search with echo-boosted re-ranking.
 
 ```python
 results = d.recall("what database does the project use?")
@@ -161,6 +169,8 @@ d.checkpoint(
 | `checkpoint` | 1 per ~10 memories | 0 | ~$0.001 |
 | **Typical session** | **1** | **~15** | **~$0.004** |
 
+> Costs assume OpenAI `text-embedding-3-small` at current pricing. Actual costs vary by provider, model, and configuration.
+
 ---
 
 ## How It Works (Under the Hood)
@@ -178,7 +188,7 @@ Stores memories in SQLite + a vector index. On the hot path (`remember`/`recall`
 
 All of this happens in **1 LLM call per ~10 memories**. Not 4 calls per memory. One batched call.
 
-Memory decays naturally (Ebbinghaus curve). Frequently accessed memories get promoted from short-term to long-term. Unused ones fade. ~45% less storage than systems that keep everything forever.
+Memory decays naturally (Ebbinghaus curve). Frequently accessed memories get promoted from short-term to long-term. Unused ones fade. Storage naturally reduces over time as unused memories decay, unlike systems that keep everything indefinitely.
 
 ### Cognition Engine — Buddhi
 
@@ -192,6 +202,17 @@ A parallel intelligence layer that observes the memory pipeline and builds meta-
 Zero LLM calls on the hot path. Pure pattern matching + statistics. Persistence via JSONL files (~3 files total).
 
 Inspired by [Meta's DGM-Hyperagents](https://arxiv.org/abs/2603.19461) — agents that emergently develop persistent memory and performance tracking achieve self-accelerating improvement that transfers across domains. Dhee provides these capabilities as infrastructure.
+
+#### Experimental Extensions
+
+Beyond the core cognition engine, Dhee includes experimental subsystems that are functional but still evolving:
+
+- **Belief store** — confidence-tracked facts with Bayesian updates and contradiction detection
+- **Policy store** — outcome-linked condition→action rules extracted from task completions
+- **Episodic indexing** — structured event extraction for temporal and aggregation queries
+- **Contrastive pairs & heuristic distillation** — learning from what worked vs. what failed
+
+These are surfaced through `context()` and `checkpoint()` automatically when enabled.
 
 ---
 
@@ -245,7 +266,7 @@ m.think("complex question requiring reasoning across memories")
 ```bash
 pip install dhee[openai,mcp]     # OpenAI (recommended, cheapest embeddings)
 pip install dhee[gemini,mcp]     # Google Gemini
-pip install dhee[ollama,mcp]     # Ollama (local, zero cost)
+pip install dhee[ollama,mcp]     # Ollama (local inference, no API costs)
 ```
 
 ---
@@ -262,7 +283,7 @@ pytest
 ---
 
 <p align="center">
-  <b>4 tools. 1 LLM call. Your agent remembers, learns, and predicts.</b>
+  <b>4 operations. Deferred enrichment. Your agent remembers, learns, and predicts.</b>
   <br><br>
   <a href="https://github.com/Sankhya-AI/Dhee">GitHub</a> &middot;
   <a href="https://pypi.org/project/dhee">PyPI</a> &middot;

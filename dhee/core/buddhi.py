@@ -352,13 +352,13 @@ class Buddhi:
         Called at session start or when context is needed. Returns
         everything: performance, insights, skills, intentions, warnings.
         """
-        # 1. Last session
+        # 1. Last session (via kernel handoff, not memory object)
         last_session = None
-        if memory and hasattr(memory, "get_last_session_digest"):
-            try:
-                last_session = memory.get_last_session_digest(user_id=user_id)
-            except Exception:
-                pass
+        try:
+            from dhee.core.kernel import get_last_session
+            last_session = get_last_session()
+        except Exception:
+            pass
 
         # 2. Performance snapshots for relevant task types
         performance = self._get_performance_snapshots(user_id, task_description)
