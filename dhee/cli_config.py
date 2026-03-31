@@ -125,7 +125,7 @@ def get_memory_instance(config: Optional[Dict[str, Any]] = None):
             provider="sqlite_vec",
             config={
                 "path": vec_db_path,
-                "collection_name": "fadem_memories",
+                "collection_name": "dhee_memories",
                 "embedding_model_dims": embedding_dims,
             },
         ),
@@ -133,7 +133,7 @@ def get_memory_instance(config: Optional[Dict[str, Any]] = None):
         embedder=EmbedderConfig(provider=provider, config=embedder_cfg),
         history_db_path=history_db_path,
         embedding_model_dims=embedding_dims,
-        engram=FadeMemConfig(enable_forgetting=True),
+        fade=FadeMemConfig(enable_forgetting=True),
     )
 
     return FullMemory(memory_config)

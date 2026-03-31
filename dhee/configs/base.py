@@ -24,7 +24,7 @@ class VectorStoreConfig(BaseModel):
     config: Dict[str, Any] = Field(
         default_factory=lambda: {
             "path": os.path.join(_dhee_data_dir(), "zvec"),
-            "collection_name": "fadem_memories",
+            "collection_name": "dhee_memories",
         }
     )
 
@@ -605,7 +605,7 @@ class MemoryConfig(BaseModel):
     history_db_path: str = Field(
         default_factory=lambda: os.path.join(_dhee_data_dir(), "history.db")
     )
-    collection_name: str = "fadem_memories"
+    collection_name: str = "dhee_memories"
     embedding_model_dims: int = 4096  # nvidia/nv-embed-v1 default dimensions
     version: str = "v1.4"  # Updated for CLS Distillation Memory
     custom_fact_extraction_prompt: Optional[str] = None
@@ -613,7 +613,7 @@ class MemoryConfig(BaseModel):
     custom_fusion_prompt: Optional[str] = None
     custom_echo_prompt: Optional[str] = None
     custom_category_prompt: Optional[str] = None
-    engram: FadeMemConfig = Field(default_factory=FadeMemConfig)
+    fade: FadeMemConfig = Field(default_factory=FadeMemConfig)
     echo: EchoMemConfig = Field(default_factory=EchoMemConfig)
     category: CategoryMemConfig = Field(default_factory=CategoryMemConfig)
     scope: ScopeConfig = Field(default_factory=ScopeConfig)

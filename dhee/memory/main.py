@@ -1287,7 +1287,7 @@ class FullMemory(SmartMemory, SceneProfileMixin):
                 "source_type": "mcp",
                 "source_app": items[i].get("source_app"),
                 "source_event_id": mem_metadata.get("source_event_id"),
-                "decay_lambda": self.fadem_config.sml_decay_rate,
+                "decay_lambda": self.fade_config.sml_decay_rate,
                 "status": "active",
                 "importance": mem_metadata.get("importance", 0.5),
                 "sensitivity": mem_metadata.get("sensitivity", "normal"),
@@ -1875,9 +1875,9 @@ class FullMemory(SmartMemory, SceneProfileMixin):
         return {"id": memory_id, "memory": content, "event": "UPDATE" if success else "ERROR"}
 
     def delete(self, memory_id: str) -> Dict[str, Any]:
-        logger.info("Deleting memory %s (tombstone=%s)", memory_id, self.fadem_config.use_tombstone_deletion)
+        logger.info("Deleting memory %s (tombstone=%s)", memory_id, self.fade_config.use_tombstone_deletion)
         memory = self.db.get_memory(memory_id)
-        self.db.delete_memory(memory_id, use_tombstone=self.fadem_config.use_tombstone_deletion)
+        self.db.delete_memory(memory_id, use_tombstone=self.fade_config.use_tombstone_deletion)
         self._delete_vectors_for_memory(memory_id)
         self._record_cost_counter(
             phase="write",
@@ -1960,7 +1960,7 @@ class FullMemory(SmartMemory, SceneProfileMixin):
 
     # FadeMem-specific methods
     def apply_decay(self, scope: Dict[str, Any] = None) -> Dict[str, Any]:
-        if not self.fadem_config.enable_forgetting:
+        if not self.fade_config.enable_forgetting:
             return {"decayed": 0, "forgotten": 0, "promoted": 0}
 
         stale_refs_removed = 0
@@ -2025,7 +2025,7 @@ class FullMemory(SmartMemory, SceneProfileMixin):
                     last_accessed=memory.get("last_accessed", datetime.now(timezone.utc).isoformat()),
                     access_count=memory.get("access_count", 0),
                     layer=memory.get("layer", "sml"),
-                    config=self.fadem_config,
+                    config=self.fade_config,
                 )
 
             if ref_aware and int(ref_state.get("weak", 0)) > 0:
@@ -2034,7 +2034,7 @@ class FullMemory(SmartMemory, SceneProfileMixin):
                 retained_floor = memory.get("strength", 1.0) * (1.0 - 0.03 / dampening)
                 new_strength = max(new_strength, retained_floor)
 
-            forget_threshold = self.fadem_config.forgetting_threshold
+            forget_threshold = self.fade_config.forgetting_threshold
             if ref_aware and int(ref_state.get("weak", 0)) > 0:
                 weak = min(int(ref_state.get("weak", 0)), 10)
                 forget_threshold = forget_threshold / (1.0 + weak * 0.25)
@@ -2056,13 +2056,13 @@ class FullMemory(SmartMemory, SceneProfileMixin):
                 memory.get("layer", "sml"),
                 memory.get("access_count", 0),
                 new_strength,
-                self.fadem_config,
+                self.fade_config,
             ):
                 self.db.update_memory(memory["id"], {"layer": "lml"})
                 self.db.log_event(memory["id"], "PROMOTE", old_layer="sml", new_layer="lml")
                 promoted += 1
 
-        if self.fadem_config.use_tombstone_deletion:
+        if self.fade_config.use_tombstone_deletion:
             self.db.purge_tombstoned()
 
         # Gap 3: Advanced forgetting mechanisms
@@ -2089,7 +2089,7 @@ class FullMemory(SmartMemory, SceneProfileMixin):
                 pruner = InterferencePruner(
                     db=self.db,
                     config=self.distillation_config,
-                    fadem_config=self.fadem_config,
+                    fade_config=self.fade_config,
                     resolve_conflict_fn=resolve_conflict,
                     search_fn=self.vector_store.search,
                     llm=self.llm,
@@ -2115,7 +2115,7 @@ class FullMemory(SmartMemory, SceneProfileMixin):
                     pruner = InterferencePruner(
                         db=self.db,
                         config=self.distillation_config,
-                        fadem_config=self.fadem_config,
+                        fade_config=self.fade_config,
                         resolve_conflict_fn=resolve_conflict,
                         search_fn=self.vector_store.search,
                         llm=self.llm,
@@ -2135,7 +2135,7 @@ class FullMemory(SmartMemory, SceneProfileMixin):
                 normalizer = HomeostaticNormalizer(
                     db=self.db,
                     config=self.distillation_config,
-                    fadem_config=self.fadem_config,
+                    fade_config=self.fade_config,
                     delete_fn=self.delete,
                 )
                 homeostasis_stats = normalizer.run(user_id)
@@ -2567,7 +2567,7 @@ class FullMemory(SmartMemory, SceneProfileMixin):
         if not cleaned:
             return {"deleted_count": 0, "deleted_ids": []}
 
-        threshold = max(self.fadem_config.conflict_similarity_threshold, 0.85)
+        threshold = max(self.fade_config.conflict_similarity_threshold, 0.85)
         query_embedding = self.embedder.embed(cleaned, memory_action="forget")
         results = self.vector_store.search(query=None, vectors=query_embedding, limit=20, filters=filters)
 
@@ -2592,7 +2592,7 @@ class FullMemory(SmartMemory, SceneProfileMixin):
 
     def _find_similar(self, embedding: List[float], filters: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         memory, similarity = self._nearest_memory(embedding, filters)
-        if memory and similarity >= self.fadem_config.conflict_similarity_threshold:
+        if memory and similarity >= self.fade_config.conflict_similarity_threshold:
             return memory
         return None
 
@@ -2602,7 +2602,7 @@ class FullMemory(SmartMemory, SceneProfileMixin):
             memory.get("layer", "sml"),
             memory.get("access_count", 0),
             memory.get("strength", 1.0),
-            self.fadem_config,
+            self.fade_config,
         ):
             self.db.update_memory(memory_id, {"layer": "lml"})
             self.db.log_event(memory_id, "PROMOTE", old_layer="sml", new_layer="lml")

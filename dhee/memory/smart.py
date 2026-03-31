@@ -281,7 +281,7 @@ class SmartMemory(CoreMemory):
             self.db.increment_access(existing["id"])
             if self.distillation_config and self.distillation_config.enable_multi_trace:
                 s_fast = existing.get("s_fast") or 0.0
-                boosted = boost_fast_trace(s_fast, self.fadem_config.access_strength_boost)
+                boosted = boost_fast_trace(s_fast, self.fade_config.access_strength_boost)
                 self.db.update_memory(existing["id"], {"s_fast": boosted})
             return {
                 "results": [{
@@ -373,7 +373,7 @@ class SmartMemory(CoreMemory):
             "confidentiality_scope": metadata.get("confidentiality_scope", "work"),
             "source_type": "mcp",
             "source_app": source_app,
-            "decay_lambda": self.fadem_config.sml_decay_rate,
+            "decay_lambda": self.fade_config.sml_decay_rate,
             "status": "active",
             "importance": metadata.get("importance", 0.5),
             "sensitivity": metadata.get("sensitivity", "normal"),

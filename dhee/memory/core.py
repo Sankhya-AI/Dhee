@@ -65,7 +65,7 @@ class CoreMemory:
         self.vector_store = VectorStoreFactory.create(
             self.config.vector_store.provider, self.config.vector_store.config
         )
-        self.fadem_config = self.config.engram
+        self.fade_config = self.config.fade
         self.distillation_config = getattr(self.config, "distillation", None)
 
         # Query embedding LRU cache
@@ -115,7 +115,7 @@ class CoreMemory:
             # Boost fast trace if multi-trace is enabled
             if self.distillation_config and self.distillation_config.enable_multi_trace:
                 s_fast = existing.get("s_fast") or 0.0
-                boosted = boost_fast_trace(s_fast, self.fadem_config.access_strength_boost)
+                boosted = boost_fast_trace(s_fast, self.fade_config.access_strength_boost)
                 self.db.update_memory(existing["id"], {"s_fast": boosted})
             return {
                 "results": [{
@@ -162,7 +162,7 @@ class CoreMemory:
             "confidentiality_scope": metadata.get("confidentiality_scope", "work"),
             "source_type": "mcp",
             "source_app": source_app,
-            "decay_lambda": self.fadem_config.sml_decay_rate,
+            "decay_lambda": self.fade_config.sml_decay_rate,
             "status": "active",
             "importance": metadata.get("importance", 0.5),
             "sensitivity": metadata.get("sensitivity", "normal"),
@@ -374,11 +374,11 @@ class CoreMemory:
                 last_accessed=mem.get("last_accessed", mem.get("created_at", "")),
                 access_count=int(mem.get("access_count", 0)),
                 layer=mem.get("layer", "sml"),
-                config=self.fadem_config,
+                config=self.fade_config,
             )
 
-            if should_forget(new_strength, self.fadem_config):
-                if self.fadem_config.use_tombstone_deletion:
+            if should_forget(new_strength, self.fade_config):
+                if self.fade_config.use_tombstone_deletion:
                     self.db.update_memory(mem["id"], {"tombstone": 1, "strength": new_strength})
                 else:
                     self.db.delete_memory(mem["id"])
@@ -391,7 +391,7 @@ class CoreMemory:
                 mem.get("layer", "sml"),
                 int(mem.get("access_count", 0)),
                 new_strength,
-                self.fadem_config,
+                self.fade_config,
             ):
                 self.db.update_memory(mem["id"], {"strength": new_strength, "layer": "lml"})
                 promoted += 1

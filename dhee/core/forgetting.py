@@ -29,14 +29,14 @@ class InterferencePruner:
         self,
         db: "SQLiteManager",
         config: "DistillationConfig",
-        fadem_config: "FadeMemConfig",
+        fade_config: "FadeMemConfig",
         resolve_conflict_fn=None,
         search_fn=None,
         llm=None,
     ):
         self.db = db
         self.config = config
-        self.fadem_config = fadem_config
+        self.fade_config = fade_config
         self.resolve_conflict_fn = resolve_conflict_fn
         self.search_fn = search_fn
         self.llm = llm
@@ -90,7 +90,7 @@ class InterferencePruner:
                 nearest = neighbors[0]
                 similarity = float(nearest.score)
 
-                if similarity < self.fadem_config.conflict_similarity_threshold:
+                if similarity < self.fade_config.conflict_similarity_threshold:
                     continue
 
                 # Fetch the neighbor memory from DB
@@ -319,12 +319,12 @@ class HomeostaticNormalizer:
         self,
         db: "SQLiteManager",
         config: "DistillationConfig",
-        fadem_config: "FadeMemConfig",
+        fade_config: "FadeMemConfig",
         delete_fn=None,
     ):
         self.db = db
         self.config = config
-        self.fadem_config = fadem_config
+        self.fade_config = fade_config
         self.delete_fn = delete_fn
 
     def run(
@@ -373,7 +373,7 @@ class HomeostaticNormalizer:
                 pressure = strength * pressure_factor * excess_ratio
                 new_strength = max(0.0, strength - pressure)
 
-                if new_strength < self.fadem_config.forgetting_threshold:
+                if new_strength < self.fade_config.forgetting_threshold:
                     if self.delete_fn:
                         try:
                             self.delete_fn(memory["id"])

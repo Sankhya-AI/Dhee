@@ -150,8 +150,8 @@ class MemoryWritePipeline:
     # ------------------------------------------------------------------
 
     @property
-    def _fadem_config(self):
-        return self._config.engram
+    def _fade_config(self):
+        return self._config.fade
 
     @property
     def _echo_config(self):
@@ -565,7 +565,7 @@ class MemoryWritePipeline:
                 write_embed_calls += 1.0
 
         nearest, similarity = self._nearest_memory_fn(embedding, store_filters)
-        repeated_threshold = max(self._fadem_config.conflict_similarity_threshold - 0.05, 0.7)
+        repeated_threshold = max(self._fade_config.conflict_similarity_threshold - 0.05, 0.7)
         if similarity >= repeated_threshold:
             policy_repeated = True
             high_confidence = True
@@ -577,10 +577,10 @@ class MemoryWritePipeline:
         event = "ADD"
         existing = None
         resolution = None
-        if nearest and similarity >= self._fadem_config.conflict_similarity_threshold:
+        if nearest and similarity >= self._fade_config.conflict_similarity_threshold:
             existing = nearest
 
-        if existing and self._fadem_config.enable_forgetting:
+        if existing and self._fade_config.enable_forgetting:
             conflict_input_tokens = estimate_token_count(existing.get("memory", "")) + estimate_token_count(content)
             _add_llm_cost(conflict_input_tokens)
             resolution = resolve_conflict(existing, content, self._llm, self._config.custom_conflict_prompt)
@@ -694,7 +694,7 @@ class MemoryWritePipeline:
             "source_type": source_type,
             "source_app": source_app or mem_metadata.get("source_app"),
             "source_event_id": mem_metadata.get("source_event_id"),
-            "decay_lambda": self._fadem_config.sml_decay_rate,
+            "decay_lambda": self._fade_config.sml_decay_rate,
             "status": "active",
             "importance": mem_metadata.get("importance", 0.5),
             "sensitivity": mem_metadata.get("sensitivity", "normal"),
@@ -1098,7 +1098,7 @@ class MemoryWritePipeline:
             "source_type": source_type,
             "source_app": source_app or mem_metadata.get("source_app"),
             "source_event_id": mem_metadata.get("source_event_id"),
-            "decay_lambda": self._fadem_config.sml_decay_rate,
+            "decay_lambda": self._fade_config.sml_decay_rate,
             "status": "active",
             "importance": mem_metadata.get("importance", 0.5),
             "sensitivity": mem_metadata.get("sensitivity", "normal"),

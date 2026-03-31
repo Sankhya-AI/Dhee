@@ -87,8 +87,8 @@ class SearchPipeline:
         return self._config.graph
 
     @property
-    def _fadem_config(self):
-        return self._config.engram
+    def _fade_config(self):
+        return self._config.fade
 
     @property
     def _distillation_config(self):
@@ -368,8 +368,8 @@ class SearchPipeline:
 
             if boost_on_access:
                 access_ids.append(memory["id"])
-                if self._fadem_config.access_strength_boost > 0:
-                    boosted_strength = min(1.0, strength + self._fadem_config.access_strength_boost)
+                if self._fade_config.access_strength_boost > 0:
+                    boosted_strength = min(1.0, strength + self._fade_config.access_strength_boost)
                     if boosted_strength != strength:
                         strength_updates[memory["id"]] = boosted_strength
                         strength = boosted_strength

@@ -57,7 +57,7 @@ def _get_embedding_dims_for_model(model: str, provider: str) -> int:
         "text-embedding-3-large": 3072,
         "text-embedding-ada-002": 1536,
     }
-    env_dims = os.environ.get("FADEM_EMBEDDING_DIMS")
+    env_dims = os.environ.get("DHEE_EMBEDDING_DIMS") or os.environ.get("FADEM_EMBEDDING_DIMS")
     if env_dims:
         return int(env_dims)
     if model in EMBEDDING_DIMS:
@@ -69,8 +69,8 @@ def _get_embedding_dims_for_model(model: str, provider: str) -> int:
     return 3072
 
 
-def get_memory_instance() -> Memory:
-    """Create and return a configured Memory instance (FullMemory for MCP)."""
+def get_memory_instance() -> FullMemory:
+    """Create and return a configured FullMemory instance for the MCP server."""
     openai_key = os.environ.get("OPENAI_API_KEY")
     gemini_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
     nvidia_key = (
@@ -79,13 +79,17 @@ def get_memory_instance() -> Memory:
         or os.environ.get("NVIDIA_EMBEDDING_API_KEY")
     )
 
+    def _env(key: str, default: str = "") -> str:
+        """Read DHEE_ env var with FADEM_ fallback for backward compat."""
+        return os.environ.get(f"DHEE_{key}") or os.environ.get(f"FADEM_{key}") or default
+
     if openai_key:
-        embedder_model = os.environ.get("FADEM_EMBEDDER_MODEL", "text-embedding-3-small")
+        embedder_model = _env("EMBEDDER_MODEL", "text-embedding-3-small")
         embedding_dims = _get_embedding_dims_for_model(embedder_model, "openai")
         llm_config = LLMConfig(
             provider="openai",
             config={
-                "model": os.environ.get("FADEM_LLM_MODEL", "gpt-4o-mini"),
+                "model": _env("LLM_MODEL", "gpt-4o-mini"),
                 "temperature": 0.1, "max_tokens": 1024, "api_key": openai_key,
             }
         )
@@ -94,12 +98,12 @@ def get_memory_instance() -> Memory:
             config={"model": embedder_model, "api_key": openai_key},
         )
     elif gemini_key:
-        embedder_model = os.environ.get("FADEM_EMBEDDER_MODEL", "gemini-embedding-001")
+        embedder_model = _env("EMBEDDER_MODEL", "gemini-embedding-001")
         embedding_dims = _get_embedding_dims_for_model(embedder_model, "gemini")
         llm_config = LLMConfig(
             provider="gemini",
             config={
-                "model": os.environ.get("FADEM_LLM_MODEL", "gemini-2.0-flash"),
+                "model": _env("LLM_MODEL", "gemini-2.0-flash"),
                 "temperature": 0.1, "max_tokens": 1024, "api_key": gemini_key,
             }
         )
@@ -108,13 +112,12 @@ def get_memory_instance() -> Memory:
             config={"model": embedder_model, "api_key": gemini_key},
         )
     elif nvidia_key:
-        # Internal provider — not customer-documented
-        embedder_model = os.environ.get("FADEM_EMBEDDER_MODEL", "nvidia/llama-nemotron-embed-vl-1b-v2")
+        embedder_model = _env("EMBEDDER_MODEL", "nvidia/llama-nemotron-embed-vl-1b-v2")
         embedding_dims = 2048
         llm_config = LLMConfig(
             provider="nvidia",
             config={
-                "model": os.environ.get("FADEM_LLM_MODEL", "qwen/qwen3.5-397b-a17b"),
+                "model": _env("LLM_MODEL", "qwen/qwen3.5-397b-a17b"),
                 "temperature": 0.2, "max_tokens": 4096, "api_key": nvidia_key,
             }
         )
@@ -131,17 +134,15 @@ def get_memory_instance() -> Memory:
         )
 
     from dhee.configs.base import _dhee_data_dir
-    vec_db_path = os.environ.get(
-        "FADEM_VEC_DB_PATH",
-        os.path.join(_dhee_data_dir(), "zvec"),
-    )
+    vec_db_path = _env("VEC_DB_PATH") or os.path.join(_dhee_data_dir(), "zvec")
+    collection = _env("COLLECTION", "dhee_memories")
 
     # Use in-memory vector store for simple embedder (no persistent storage needed)
     if embedder_config.provider == "simple":
         vector_store_config = VectorStoreConfig(
             provider="memory",
             config={
-                "collection_name": os.environ.get("FADEM_COLLECTION", "fadem_memories"),
+                "collection_name": collection,
                 "embedding_model_dims": embedding_dims,
             },
         )
@@ -150,20 +151,17 @@ def get_memory_instance() -> Memory:
             provider="zvec",
             config={
                 "path": vec_db_path,
-                "collection_name": os.environ.get("FADEM_COLLECTION", "fadem_memories"),
+                "collection_name": collection,
                 "embedding_model_dims": embedding_dims,
             },
         )
 
-    history_db_path = os.environ.get(
-        "FADEM_HISTORY_DB",
-        os.path.join(_dhee_data_dir(), "history.db"),
-    )
+    history_db_path = _env("HISTORY_DB") or os.path.join(_dhee_data_dir(), "history.db")
 
-    fadem_config = FadeMemConfig(
-        enable_forgetting=os.environ.get("FADEM_ENABLE_FORGETTING", "true").lower() == "true",
-        sml_decay_rate=float(os.environ.get("FADEM_SML_DECAY_RATE", "0.15")),
-        lml_decay_rate=float(os.environ.get("FADEM_LML_DECAY_RATE", "0.02")),
+    fade_config = FadeMemConfig(
+        enable_forgetting=_env("ENABLE_FORGETTING", "true").lower() == "true",
+        sml_decay_rate=float(_env("SML_DECAY_RATE", "0.15")),
+        lml_decay_rate=float(_env("LML_DECAY_RATE", "0.02")),
     )
 
     config = MemoryConfig(
@@ -172,18 +170,18 @@ def get_memory_instance() -> Memory:
         embedder=embedder_config,
         history_db_path=history_db_path,
         embedding_model_dims=embedding_dims,
-        engram=fadem_config,
+        fade=fade_config,
     )
 
     return FullMemory(config)
 
 
 # Global instances (lazy)
-_memory: Optional[Memory] = None
+_memory: Optional[FullMemory] = None
 _buddhi = None  # type: ignore
 
 
-def get_memory() -> Memory:
+def get_memory() -> FullMemory:
     global _memory
     if _memory is None:
         _memory = get_memory_instance()
@@ -203,7 +201,7 @@ def get_buddhi():
 
 server = Server("dhee")
 
-# Tool definitions — 8 tools total
+# Tool definitions — 24 tools
 TOOLS = [
     Tool(
         name="remember",
