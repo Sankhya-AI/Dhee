@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import time
 import uuid
@@ -46,11 +47,47 @@ class Heuristic:
     invalidation_count: int = 0
     tags: List[str] = field(default_factory=list)
 
+    # Utility tracking (EMA of measured performance deltas)
+    utility: float = 0.0
+    last_delta: float = 0.0
+    apply_count: int = 0
+
+    # EMA smoothing factor (class constant, not serialized)
+    _UTILITY_ALPHA: float = 0.3
+
+    def record_outcome(
+        self,
+        success: bool,
+        baseline_score: Optional[float] = None,
+        actual_score: Optional[float] = None,
+    ) -> float:
+        """Record outcome with optional measured delta. Mirrors PolicyCase."""
+        self.apply_count += 1
+        if success:
+            self.validation_count += 1
+            self.confidence = min(1.0, self.confidence + 0.05)
+        else:
+            self.invalidation_count += 1
+            self.confidence = max(0.0, self.confidence - 0.1)
+
+        delta = 0.0
+        if baseline_score is not None and actual_score is not None:
+            delta = actual_score - baseline_score
+            self.last_delta = delta
+            self.utility = (
+                self._UTILITY_ALPHA * delta
+                + (1 - self._UTILITY_ALPHA) * self.utility
+            )
+        return delta
+
     def strength(self) -> float:
         total = self.validation_count + self.invalidation_count
         if total == 0:
             return self.confidence
-        return self.confidence * (self.validation_count / total)
+        base = self.confidence * (self.validation_count / total)
+        # Incorporate utility via sigmoid: maps utility to [0.5, 1.0] range
+        utility_factor = 0.5 + 0.5 * (1.0 / (1.0 + math.exp(-3.0 * self.utility)))
+        return base * utility_factor
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -65,6 +102,9 @@ class Heuristic:
             "validation_count": self.validation_count,
             "invalidation_count": self.invalidation_count,
             "tags": self.tags,
+            "utility": self.utility,
+            "last_delta": self.last_delta,
+            "apply_count": self.apply_count,
         }
 
     @classmethod
@@ -80,6 +120,9 @@ class Heuristic:
             validation_count=d.get("validation_count", 0),
             invalidation_count=d.get("invalidation_count", 0),
             tags=d.get("tags", []),
+            utility=d.get("utility", 0.0),
+            last_delta=d.get("last_delta", 0.0),
+            apply_count=d.get("apply_count", 0),
         )
 
     def to_compact(self) -> Dict[str, Any]:
@@ -88,6 +131,7 @@ class Heuristic:
             "heuristic": self.content[:300],
             "level": self.abstraction_level,
             "confidence": round(self.strength(), 2),
+            "utility": round(self.utility, 3),
             "applies_to": self.source_task_types[:3],
         }
 

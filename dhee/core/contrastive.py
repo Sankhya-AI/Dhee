@@ -43,6 +43,30 @@ class ContrastivePair:
     tags: List[str] = field(default_factory=list)
     validation_count: int = 0       # times this contrast proved useful
 
+    # Utility tracking (EMA of measured performance deltas)
+    utility: float = 0.0
+    apply_count: int = 0
+    _UTILITY_ALPHA: float = 0.3
+
+    def record_outcome(
+        self,
+        success: bool,
+        baseline_score: Optional[float] = None,
+        actual_score: Optional[float] = None,
+    ) -> float:
+        """Record outcome with optional measured delta."""
+        self.apply_count += 1
+        if success:
+            self.validation_count += 1
+        delta = 0.0
+        if baseline_score is not None and actual_score is not None:
+            delta = actual_score - baseline_score
+            self.utility = (
+                self._UTILITY_ALPHA * delta
+                + (1 - self._UTILITY_ALPHA) * self.utility
+            )
+        return delta
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,
@@ -55,6 +79,8 @@ class ContrastivePair:
             "user_id": self.user_id,
             "tags": self.tags,
             "validation_count": self.validation_count,
+            "utility": self.utility,
+            "apply_count": self.apply_count,
         }
 
     @classmethod
@@ -70,6 +96,8 @@ class ContrastivePair:
             user_id=d.get("user_id", "default"),
             tags=d.get("tags", []),
             validation_count=d.get("validation_count", 0),
+            utility=d.get("utility", 0.0),
+            apply_count=d.get("apply_count", 0),
         )
 
     def to_compact(self) -> Dict[str, str]:
@@ -79,6 +107,7 @@ class ContrastivePair:
             "do": self.success_approach[:300],
             "avoid": self.failure_approach[:300],
             "confidence": round(min(1.0, 0.5 + 0.1 * self.validation_count), 2),
+            "utility": round(self.utility, 3),
         }
 
 

@@ -88,12 +88,18 @@ class CognitionKernel:
         except Exception:
             result["episodes"] = []
 
-        # Task states
+        # Task states + active step context
+        step_context = ""
+        active_task_type = task_description or "general"
         try:
             task_states = []
             active = self.tasks.get_active_task(user_id)
             if active:
                 task_states.append(active.to_compact())
+                current = active.current_step
+                if current:
+                    step_context = current.description
+                active_task_type = active.task_type or active_task_type
             recent_tasks = self.tasks.get_recent_tasks(user_id, limit=3)
             for t in recent_tasks:
                 c = t.to_compact()
@@ -103,17 +109,36 @@ class CognitionKernel:
         except Exception:
             result["task_states"] = []
 
-        # Policies
+        result["active_step"] = step_context if step_context else None
+
+        # Policies (pass step_context for better matching)
         try:
             matched = self.policies.match_policies(
                 user_id=user_id,
-                task_type=task_description or "general",
+                task_type=active_task_type,
                 task_description=task_description or "",
+                step_context=step_context,
                 limit=3,
             )
             result["policies"] = [p.to_compact() for p in matched]
         except Exception:
             result["policies"] = []
+
+        # Step policies (separate, for operational context)
+        try:
+            if step_context:
+                step_matched = self.policies.match_step_policies(
+                    user_id=user_id,
+                    task_type=active_task_type,
+                    task_description=task_description or "",
+                    step_context=step_context,
+                    limit=3,
+                )
+                result["step_policies"] = [p.to_compact() for p in step_matched]
+            else:
+                result["step_policies"] = []
+        except Exception:
+            result["step_policies"] = []
 
         # Beliefs
         belief_warnings: List[str] = []
@@ -169,6 +194,25 @@ class CognitionKernel:
                 content=summary[:500],
                 metadata={"status": status, "outcome_score": outcome_score},
             )
+
+            # Wire episode.connection_count for cross-primitive links
+            try:
+                open_eps = getattr(self.episodes, '_open_episodes', {})
+                ep_id = open_eps.get(user_id)
+                if ep_id:
+                    eps_dict = getattr(self.episodes, '_episodes', {})
+                    ep = eps_dict.get(ep_id)
+                    if ep:
+                        active_task = self.tasks.get_active_task(user_id)
+                        if active_task:
+                            ep.connection_count += 1
+                        matched_policies = self.policies.match_policies(
+                            user_id, summary[:50], summary[:200], limit=3,
+                        )
+                        ep.connection_count += len(matched_policies)
+            except Exception:
+                pass
+
             if status == "completed":
                 episode = self.episodes.end_episode(
                     user_id, outcome_score, summary
@@ -231,9 +275,55 @@ class CognitionKernel:
                     result["task_completed"] = active_task.id
 
                 self.tasks.update_task(active_task)
+
+                # Record outcomes on STEP policies for completed/failed steps
+                if status == "completed" and active_task.plan:
+                    for step in active_task.plan:
+                        if step.status.value == "completed":
+                            self.record_step_outcome(
+                                user_id, task_type, step.description,
+                                success=True, actual_score=outcome_score,
+                            )
+                        elif step.status.value == "failed":
+                            self.record_step_outcome(
+                                user_id, task_type, step.description,
+                                success=False, actual_score=outcome_score,
+                            )
         except Exception:
             pass
         return result
+
+    def record_step_outcome(
+        self,
+        user_id: str,
+        task_type: str,
+        step_description: str,
+        success: bool,
+        baseline_score: Optional[float] = None,
+        actual_score: Optional[float] = None,
+    ) -> None:
+        """Record outcome on STEP policies matching a completed/failed step.
+
+        Finds matching STEP policies and records their outcomes.
+        Zero LLM calls.
+        """
+        try:
+            matched = self.policies.match_step_policies(
+                user_id=user_id,
+                task_type=task_type,
+                task_description=f"{task_type} task",
+                step_context=step_description,
+                limit=5,
+            )
+            for policy in matched:
+                self.policies.record_outcome(
+                    policy.id,
+                    success=success,
+                    baseline_score=baseline_score,
+                    actual_score=actual_score,
+                )
+        except Exception:
+            pass
 
     def selective_forget(
         self,
