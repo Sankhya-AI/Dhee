@@ -399,6 +399,9 @@ class Dhee:
         data_dir: Optional[Union[str, Path]] = None,
         user_id: str = "default",
         in_memory: bool = False,
+        auto_context: bool = True,
+        auto_checkpoint: bool = True,
+        session_timeout: Optional[float] = None,
     ):
         self._user_id = user_id
         self._engram = Engram(
@@ -409,6 +412,14 @@ class Dhee:
         from dhee.core.buddhi import Buddhi
         buddhi_dir = str(self._engram.data_dir / "buddhi")
         self._buddhi = Buddhi(data_dir=buddhi_dir)
+
+        # Passive session tracker — auto-context + auto-checkpoint
+        from dhee.core.session_tracker import SessionTracker
+        self._tracker = SessionTracker(
+            session_timeout=session_timeout,
+            auto_context=auto_context,
+            auto_checkpoint=auto_checkpoint,
+        )
 
     # ------------------------------------------------------------------
     # Tool 1: remember
@@ -434,12 +445,29 @@ class Dhee:
             {"stored": True, "id": "<memory_id>"}
         """
         uid = user_id or self._user_id
-        result = self._engram.add(content, user_id=uid, infer=False, metadata=metadata)
+
+        # Auto-tier memory content (shruti/smriti)
+        from dhee.core.session_tracker import classify_tier
+        tier = classify_tier(content)
+        meta = dict(metadata) if metadata else {}
+        if tier != "smriti":
+            meta["tier"] = tier
+
+        result = self._engram.add(content, user_id=uid, infer=False, metadata=meta or None)
         response: Dict[str, Any] = {"stored": True}
+        memory_id = None
         if isinstance(result, dict):
             rs = result.get("results", [])
             if rs:
-                response["id"] = rs[0].get("id")
+                memory_id = rs[0].get("id")
+                response["id"] = memory_id
+        if tier == "shruti":
+            response["tier"] = "shruti"
+
+        # Session tracking — may trigger auto-context
+        signals = self._tracker.on_remember(content, memory_id)
+        self._handle_tracker_signals(signals, uid)
+
         # Detect intentions in the content
         intention = self._buddhi.on_memory_stored(content=content, user_id=uid)
         if intention:
@@ -470,7 +498,7 @@ class Dhee:
         """
         uid = user_id or self._user_id
         results = self._engram.search(query, user_id=uid, limit=limit)
-        return [
+        formatted = [
             {
                 "memory": r.get("memory", r.get("content", "")),
                 "score": round(r.get("composite_score", r.get("score", 0.0)), 3),
@@ -478,6 +506,12 @@ class Dhee:
             }
             for r in results
         ]
+
+        # Session tracking — may trigger auto-context
+        signals = self._tracker.on_recall(query, formatted)
+        self._handle_tracker_signals(signals, uid)
+
+        return formatted
 
     # ------------------------------------------------------------------
     # Tool 3: context
@@ -503,6 +537,7 @@ class Dhee:
             performance, memories, last_session, meta.
         """
         uid = user_id or self._user_id
+        self._tracker.on_context(task_description)
         hyper_ctx = self._buddhi.get_hyper_context(
             user_id=uid,
             task_description=task_description,
@@ -562,6 +597,21 @@ class Dhee:
             insights_created, intention_stored.
         """
         uid = user_id or self._user_id
+        self._tracker.on_checkpoint()
+
+        # Auto-fill task_type if not provided
+        if not task_type:
+            task_type = self._tracker.get_inferred_task_type()
+            if task_type == "general":
+                task_type = None  # don't store noise
+
+        # Auto-fill outcome if not provided and we have enough signals
+        if outcome_score is None and self._tracker.op_count >= 3:
+            outcome = self._tracker.get_outcome_signals()
+            outcome_score = outcome.get("outcome_score")
+            if not what_worked:
+                what_worked = outcome.get("what_worked")
+
         result: Dict[str, Any] = {}
 
         # 1. Session digest
@@ -627,3 +677,28 @@ class Dhee:
             result["intention_stored"] = intention.to_dict()
 
         return result
+
+    # ------------------------------------------------------------------
+    # Auto-lifecycle (driven by SessionTracker)
+    # ------------------------------------------------------------------
+
+    def _handle_tracker_signals(self, signals: Dict[str, Any], user_id: str) -> None:
+        """Process signals from the session tracker."""
+        if not signals:
+            return
+
+        # Auto-checkpoint a timed-out previous session
+        if signals.get("needs_auto_checkpoint"):
+            args = signals.get("auto_checkpoint_args", {})
+            try:
+                self.checkpoint(user_id=user_id, **args)
+            except Exception:
+                pass
+
+        # Auto-context for new session
+        if signals.get("needs_auto_context"):
+            task = signals.get("inferred_task")
+            try:
+                self.context(task_description=task, user_id=user_id)
+            except Exception:
+                pass
