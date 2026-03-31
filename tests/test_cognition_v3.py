@@ -665,6 +665,202 @@ class TestPolicyCase:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 8b. PolicyCase — dual-granularity + utility scoring (D2Skill)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestPolicyUtility:
+    """Tests for D2Skill-inspired dual-granularity and utility scoring."""
+
+    def test_utility_update_from_delta(self, tmpdir):
+        from dhee.core.policy import PolicyStore
+        store = PolicyStore(data_dir=os.path.join(tmpdir, "policies"))
+
+        policy = store.create_policy("u", "p1", ["bug_fix"], "git blame first")
+
+        # Apply with a positive performance delta
+        delta = store.record_outcome(
+            policy.id, success=True,
+            baseline_score=0.6, actual_score=0.9,
+        )
+        assert delta == pytest.approx(0.3)  # 0.9 - 0.6
+        p = store._policies[policy.id]
+        assert p.utility > 0  # EMA should be positive
+        assert p.last_delta == pytest.approx(0.3)
+        assert p.cumulative_delta == pytest.approx(0.3)
+
+    def test_utility_ema_smoothing(self, tmpdir):
+        from dhee.core.policy import PolicyStore
+        store = PolicyStore(data_dir=os.path.join(tmpdir, "policies"))
+
+        policy = store.create_policy("u", "p1", ["testing"], "write tests first")
+
+        # Series of outcomes with varying deltas
+        store.record_outcome(policy.id, True, baseline_score=0.5, actual_score=0.8)  # +0.3
+        u1 = store._policies[policy.id].utility
+        store.record_outcome(policy.id, True, baseline_score=0.5, actual_score=0.9)  # +0.4
+        u2 = store._policies[policy.id].utility
+        store.record_outcome(policy.id, False, baseline_score=0.5, actual_score=0.3)  # -0.2
+        u3 = store._policies[policy.id].utility
+
+        # Utility should have risen then fallen
+        assert u2 > u1
+        assert u3 < u2
+
+    def test_negative_utility_from_bad_outcomes(self, tmpdir):
+        from dhee.core.policy import PolicyStore
+        store = PolicyStore(data_dir=os.path.join(tmpdir, "policies"))
+
+        policy = store.create_policy("u", "bad", ["debug"], "random changes")
+
+        # Consistently worse outcomes when applied
+        for _ in range(5):
+            store.record_outcome(policy.id, False, baseline_score=0.7, actual_score=0.3)
+
+        p = store._policies[policy.id]
+        assert p.utility < 0  # Negative utility = policy makes things worse
+        assert p.cumulative_delta < 0
+
+    def test_dual_granularity_creation(self, tmpdir):
+        from dhee.core.policy import PolicyStore, PolicyGranularity
+        store = PolicyStore(data_dir=os.path.join(tmpdir, "policies"))
+
+        task_policy = store.create_policy(
+            "u", "task_strategy", ["bug_fix"],
+            approach="Start with git blame",
+            granularity=PolicyGranularity.TASK,
+        )
+        step_policy = store.create_step_policy(
+            "u", "import_check", ["bug_fix"],
+            step_patterns=["test", "fail", "import"],
+            approach="Check for missing imports before debugging logic",
+        )
+
+        assert task_policy.granularity == PolicyGranularity.TASK
+        assert step_policy.granularity == PolicyGranularity.STEP
+
+    def test_match_by_granularity(self, tmpdir):
+        from dhee.core.policy import PolicyStore, PolicyGranularity
+        store = PolicyStore(data_dir=os.path.join(tmpdir, "policies"))
+
+        store.create_policy(
+            "u", "task_strat", ["bug_fix"],
+            approach="Start with git blame",
+            granularity=PolicyGranularity.TASK,
+        )
+        store.create_step_policy(
+            "u", "step_fix", ["bug_fix"],
+            step_patterns=["test", "fail"],
+            approach="Check test imports",
+        )
+
+        task_only = store.match_task_policies("u", "bug_fix", "fix auth bug")
+        step_only = store.match_step_policies(
+            "u", "bug_fix", "fix auth bug", step_context="test fail import error",
+        )
+        all_policies = store.match_policies("u", "bug_fix", "fix auth bug")
+
+        assert len(task_only) == 1
+        assert task_only[0].granularity == PolicyGranularity.TASK
+        assert len(step_only) == 1
+        assert step_only[0].granularity == PolicyGranularity.STEP
+        assert len(all_policies) == 2
+
+    def test_retrieval_ranking_utility_beats_no_utility(self, tmpdir):
+        from dhee.core.policy import PolicyStore
+        store = PolicyStore(data_dir=os.path.join(tmpdir, "policies"))
+
+        # Create two policies with same match score
+        p_low = store.create_policy("u", "low_util", ["debug"], "approach A")
+        p_high = store.create_policy("u", "high_util", ["debug"], "approach B")
+
+        # Give p_high strong positive utility (5 successes with big delta)
+        for _ in range(5):
+            store.record_outcome(p_high.id, True, baseline_score=0.5, actual_score=0.9)
+        # Give p_low weak utility (5 successes with small delta) — stays ACTIVE, not DEPRECATED
+        for _ in range(5):
+            store.record_outcome(p_low.id, True, baseline_score=0.5, actual_score=0.55)
+
+        matched = store.match_policies("u", "debug", "debug the thing")
+        assert len(matched) >= 2
+        # High utility should rank first
+        assert matched[0].id == p_high.id
+
+    def test_exploration_bonus_for_new_policies(self, tmpdir):
+        from dhee.core.policy import PolicyStore
+        store = PolicyStore(data_dir=os.path.join(tmpdir, "policies"))
+
+        p_new = store.create_policy("u", "new_pol", ["t"], "approach new")
+        p_old = store.create_policy("u", "old_pol", ["t"], "approach old")
+
+        # Apply old policy many times but with zero utility
+        for _ in range(50):
+            store.record_outcome(p_old.id, True)
+
+        # New policy should have higher exploration bonus
+        assert p_new.exploration_bonus > p_old.exploration_bonus
+
+    def test_pruning(self, tmpdir):
+        from dhee.core.policy import PolicyStore, PolicyStatus
+        store = PolicyStore(data_dir=os.path.join(tmpdir, "policies"))
+
+        # Create many policies
+        ids = []
+        for i in range(10):
+            p = store.create_policy("u", f"p{i}", ["t"], f"approach {i}")
+            ids.append(p.id)
+
+        # Deprecate first 5
+        for pid in ids[:5]:
+            for _ in range(5):
+                store.record_outcome(pid, success=False)
+
+        # Validate last 2
+        for pid in ids[-2:]:
+            for _ in range(20):
+                store.record_outcome(pid, success=True)
+
+        stats = store.prune("u", max_policies=5)
+        assert stats["pruned"] == 5
+        assert stats["total"] == 5
+
+        # Validated policies should survive
+        for pid in ids[-2:]:
+            assert pid in store._policies
+
+    def test_step_condition_matching(self):
+        from dhee.core.policy import PolicyCondition
+        cond = PolicyCondition(
+            task_types=["bug_fix"],
+            step_patterns=["test", "fail"],
+        )
+
+        # Good match with step context
+        score = cond.matches("bug_fix", "fix auth", step_context="test fail import")
+        assert score > 0.5
+
+        # No step context — weak match
+        score_weak = cond.matches("bug_fix", "fix auth", step_context="")
+        assert score_weak < score
+
+    def test_compact_includes_utility_and_level(self, tmpdir):
+        from dhee.core.policy import PolicyStore, PolicyGranularity
+        store = PolicyStore(data_dir=os.path.join(tmpdir, "policies"))
+
+        p = store.create_policy(
+            "u", "p1", ["t"], "approach",
+            granularity=PolicyGranularity.STEP,
+        )
+        store.record_outcome(p.id, True, baseline_score=0.5, actual_score=0.8)
+
+        compact = store._policies[p.id].to_compact()
+        assert "utility" in compact
+        assert "level" in compact
+        assert compact["level"] == "step"
+        assert compact["utility"] > 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # 9. BeliefNode — confidence + contradiction
 # ═══════════════════════════════════════════════════════════════════════════
 

@@ -264,6 +264,7 @@ class DheePlugin:
                 user_id=uid, task_type=task_type or "general",
                 what_worked=what_worked, what_failed=what_failed,
                 key_decision=key_decision,
+                outcome_score=score if score is not None else None,
             )
             result["insights_created"] = len(insights)
 

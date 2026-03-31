@@ -1002,6 +1002,7 @@ class Buddhi:
         what_worked: Optional[str] = None,
         what_failed: Optional[str] = None,
         key_decision: Optional[str] = None,
+        outcome_score: Optional[float] = None,
     ) -> List[Insight]:
         """Agent-triggered reflection. Synthesizes insights from experience.
 
@@ -1009,6 +1010,9 @@ class Buddhi:
         This is the explicit version of DGM-H's persistent memory —
         the agent tells Dhee what it learned, and Dhee stores it as
         transferable insight.
+
+        If outcome_score is provided, policy utility is updated using the
+        performance delta between the moving-average baseline and actual score.
         """
         new_insights = []
 
@@ -1076,16 +1080,31 @@ class Buddhi:
             except Exception:
                 pass
 
-        # Phase 3: Extract policy from task outcomes
+        # Phase 3: Extract policy from task outcomes, with utility deltas
+        # Compute baseline from moving average for utility scoring (D2Skill)
+        baseline_score = None
+        if outcome_score is not None:
+            try:
+                key = f"{user_id}:{task_type}"
+                records = self._performance.get(key, [])
+                if len(records) >= 2:
+                    recent = records[-min(10, len(records)):]
+                    baseline_score = sum(r["score"] for r in recent) / len(recent)
+            except Exception:
+                pass
+
         if what_worked:
             try:
                 p_store = self._get_policy_store()
-                # Record success for any matching active policies
                 matched = p_store.match_policies(user_id, task_type, f"{task_type} task")
                 for policy in matched:
-                    p_store.record_outcome(policy.id, success=True)
+                    p_store.record_outcome(
+                        policy.id,
+                        success=True,
+                        baseline_score=baseline_score,
+                        actual_score=outcome_score,
+                    )
 
-                # If we have enough task history, try to extract a new policy
                 ts_store = self._get_task_state_store()
                 completed = ts_store.get_tasks_by_type(user_id, task_type, limit=10)
                 if len(completed) >= 3:
@@ -1099,7 +1118,12 @@ class Buddhi:
                 p_store = self._get_policy_store()
                 matched = p_store.match_policies(user_id, task_type, f"{task_type} task")
                 for policy in matched:
-                    p_store.record_outcome(policy.id, success=False)
+                    p_store.record_outcome(
+                        policy.id,
+                        success=False,
+                        baseline_score=baseline_score,
+                        actual_score=outcome_score,
+                    )
             except Exception:
                 pass
 
