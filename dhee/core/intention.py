@@ -44,6 +44,10 @@ class Intention:
     created_at: str
     triggered_at: Optional[str]
 
+    # Outcome tracking
+    outcome_score: Optional[float] = None
+    was_useful: Optional[bool] = None
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,
@@ -53,6 +57,8 @@ class Intention:
             "status": self.status,
             "trigger_keywords": self.trigger_keywords,
             "trigger_after": self.trigger_after,
+            "outcome_score": self.outcome_score,
+            "was_useful": self.was_useful,
         }
 
 
@@ -198,6 +204,20 @@ class IntentionStore:
             if i.user_id == user_id and i.status == "active"
         ]
 
+    def record_outcome(
+        self,
+        intention_id: str,
+        useful: bool,
+        outcome_score: Optional[float] = None,
+    ) -> None:
+        """Record whether a triggered intention was useful."""
+        intention = self._intentions.get(intention_id)
+        if not intention:
+            return
+        intention.was_useful = useful
+        intention.outcome_score = outcome_score
+        self._save()
+
     def get_stats(self, user_id: Optional[str] = None) -> Dict[str, Any]:
         """Stats for health checks."""
         intentions = list(self._intentions.values())
@@ -229,6 +249,8 @@ class IntentionStore:
                         "status": intention.status,
                         "created_at": intention.created_at,
                         "triggered_at": intention.triggered_at,
+                        "outcome_score": intention.outcome_score,
+                        "was_useful": intention.was_useful,
                     }
                     f.write(json.dumps(row, ensure_ascii=False) + "\n")
         except OSError as e:
@@ -256,6 +278,8 @@ class IntentionStore:
                         status=row.get("status", "active"),
                         created_at=row.get("created_at", ""),
                         triggered_at=row.get("triggered_at"),
+                        outcome_score=row.get("outcome_score"),
+                        was_useful=row.get("was_useful"),
                     )
                     self._intentions[intention.id] = intention
         except (OSError, json.JSONDecodeError) as e:

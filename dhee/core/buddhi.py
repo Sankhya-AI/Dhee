@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -66,12 +67,45 @@ class Insight:
     invalidation_count: int         # how many times contradicted
     tags: List[str]
 
+    # Utility tracking (EMA of measured performance deltas)
+    utility: float = 0.0
+    apply_count: int = 0
+    _UTILITY_ALPHA: float = 0.3
+
+    def record_outcome(
+        self,
+        success: bool,
+        baseline_score: Optional[float] = None,
+        actual_score: Optional[float] = None,
+    ) -> float:
+        """Record outcome with optional measured delta."""
+        self.apply_count += 1
+        if success:
+            self.validation_count += 1
+            self.confidence = min(1.0, self.confidence + 0.05)
+        else:
+            self.invalidation_count += 1
+            self.confidence = max(0.0, self.confidence - 0.1)
+        self.last_validated = datetime.now(timezone.utc).isoformat()
+
+        delta = 0.0
+        if baseline_score is not None and actual_score is not None:
+            delta = actual_score - baseline_score
+            self.utility = (
+                self._UTILITY_ALPHA * delta
+                + (1 - self._UTILITY_ALPHA) * self.utility
+            )
+        return delta
+
     def strength(self) -> float:
-        """Net strength: validated - invalidated, normalized."""
+        """Net strength: validated - invalidated, normalized, utility-weighted."""
         total = self.validation_count + self.invalidation_count
         if total == 0:
             return self.confidence
-        return self.confidence * (self.validation_count / total)
+        base = self.confidence * (self.validation_count / total)
+        # Incorporate utility via sigmoid
+        utility_factor = 0.5 + 0.5 * (1.0 / (1.0 + math.exp(-3.0 * self.utility)))
+        return base * utility_factor
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -83,6 +117,8 @@ class Insight:
             "source_task_types": self.source_task_types,
             "validations": self.validation_count,
             "tags": self.tags,
+            "utility": round(self.utility, 3),
+            "apply_count": self.apply_count,
         }
 
 
@@ -152,6 +188,13 @@ class HyperContext:
     policies: List[Dict[str, Any]] = field(default_factory=list)
     beliefs: List[Dict[str, Any]] = field(default_factory=list)
 
+    # Phase 4: operational cognition packet
+    active_step: Optional[Dict[str, Any]] = None
+    step_policies: List[Dict[str, Any]] = field(default_factory=list)
+    critical_blockers: List[str] = field(default_factory=list)
+    contradictions: List[Dict[str, Any]] = field(default_factory=list)
+    action_items: List[str] = field(default_factory=list)
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "user_id": self.user_id,
@@ -173,6 +216,11 @@ class HyperContext:
                  "strength": m.get("strength", 1.0)}
                 for m in self.memories[:10]
             ],
+            "active_step": self.active_step,
+            "step_policies": self.step_policies[:5],
+            "critical_blockers": self.critical_blockers[:5],
+            "contradictions": self.contradictions[:5],
+            "action_items": self.action_items[:10],
             "meta": {
                 "n_insights": len(self.insights),
                 "n_active_intentions": len(self.intentions),
@@ -183,9 +231,33 @@ class HyperContext:
                 "n_task_states": len(self.task_states),
                 "n_policies": len(self.policies),
                 "n_beliefs": len(self.beliefs),
+                "has_active_step": self.active_step is not None,
+                "n_action_items": len(self.action_items),
+                "n_critical_blockers": len(self.critical_blockers),
                 "performance_tracked": len(self.performance) > 0,
             },
         }
+
+    def to_operational_dict(self) -> Dict[str, Any]:
+        """Compact operational format for per-turn agent consumption.
+
+        Contains ONLY actionable items -- not full history.
+        Use to_dict() for deep context.
+        """
+        result: Dict[str, Any] = {}
+        if self.active_step:
+            result["current_step"] = self.active_step
+        if self.step_policies:
+            result["step_policies"] = self.step_policies[:3]
+        if self.action_items:
+            result["action_items"] = self.action_items[:5]
+        if self.critical_blockers:
+            result["critical_blockers"] = self.critical_blockers[:3]
+        if self.warnings:
+            result["warnings"] = self.warnings[:3]
+        if self.contradictions:
+            result["contradictions"] = self.contradictions[:3]
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +451,49 @@ class Buddhi:
         beliefs = cog_state.get("beliefs", [])
         warnings.extend(cog_state.get("belief_warnings", []))
 
+        # 15. Operational cognition packet (Phase 4)
+        active_step_desc = cog_state.get("active_step")
+        active_step = {"description": active_step_desc} if active_step_desc else None
+        step_policies_list = cog_state.get("step_policies", [])
+
+        # Critical blockers from active task states
+        critical_blockers = []
+        for ts in task_states:
+            if ts.get("status") in ("in_progress", "blocked") and ts.get("blockers"):
+                critical_blockers.extend(ts["blockers"])
+
+        # Contradictions from belief store
+        contradictions_list = []
+        try:
+            contradiction_pairs = self._kernel.beliefs.get_contradictions(user_id)
+            for b1, b2 in contradiction_pairs[:5]:
+                severity = abs(b1.confidence - b2.confidence)
+                contradictions_list.append({
+                    "belief_a": b1.claim[:100],
+                    "belief_b": b2.claim[:100],
+                    "confidence_a": round(b1.confidence, 2),
+                    "confidence_b": round(b2.confidence, 2),
+                    "severity": round(1.0 - severity, 2),
+                })
+        except Exception:
+            pass
+
+        # Build prioritized action items
+        action_items = []
+        for intention in triggered:
+            action_items.append(f"[INTENTION] {intention.action_payload}")
+        if active_step_desc:
+            action_items.append(f"[NEXT STEP] {active_step_desc}")
+        for sp in step_policies_list[:3]:
+            action_items.append(f"[CORRECTION] {sp.get('do', '')[:100]}")
+            avoid = sp.get("avoid")
+            if avoid:
+                avoids = avoid if isinstance(avoid, list) else [avoid]
+                for a in avoids[:2]:
+                    action_items.append(f"[AVOID] {a[:100]}")
+        for blocker in critical_blockers[:3]:
+            action_items.append(f"[BLOCKER] Resolve: {blocker}")
+
         return HyperContext(
             user_id=user_id,
             session_id=str(uuid.uuid4()),
@@ -395,6 +510,11 @@ class Buddhi:
             task_states=task_states,
             policies=policies,
             beliefs=beliefs,
+            active_step=active_step,
+            step_policies=step_policies_list,
+            critical_blockers=critical_blockers,
+            contradictions=contradictions_list,
+            action_items=action_items,
         )
 
     # ------------------------------------------------------------------
@@ -871,6 +991,19 @@ class Buddhi:
             except Exception:
                 pass
 
+        # Compute baseline from moving average for utility scoring (D2Skill)
+        # Moved before heuristic/policy blocks so all can use it
+        baseline_score = None
+        if outcome_score is not None:
+            try:
+                key = f"{user_id}:{task_type}"
+                records = self._performance.get(key, [])
+                if len(records) >= 2:
+                    recent = records[-min(10, len(records)):]
+                    baseline_score = sum(r["score"] for r in recent) / len(recent)
+            except Exception:
+                pass
+
         # Phase 2: Distill heuristic from what_worked
         if what_worked:
             try:
@@ -882,22 +1015,12 @@ class Buddhi:
                     what_failed=what_failed,
                     user_id=user_id,
                 )
-                # Close the heuristic validation loop: validate any previously
-                # retrieved heuristics that were used for this task type
-                self._validate_used_heuristics(user_id, task_type, what_worked is not None)
-            except Exception:
-                pass
-
-        # Phase 3: Extract policy from task outcomes, with utility deltas
-        # Compute baseline from moving average for utility scoring (D2Skill)
-        baseline_score = None
-        if outcome_score is not None:
-            try:
-                key = f"{user_id}:{task_type}"
-                records = self._performance.get(key, [])
-                if len(records) >= 2:
-                    recent = records[-min(10, len(records)):]
-                    baseline_score = sum(r["score"] for r in recent) / len(recent)
+                # Close the heuristic validation loop with measured deltas
+                self._validate_used_heuristics(
+                    user_id, task_type, what_worked is not None,
+                    baseline_score=baseline_score,
+                    actual_score=outcome_score,
+                )
             except Exception:
                 pass
 
@@ -922,6 +1045,10 @@ class Buddhi:
                     self._kernel.policies.extract_from_tasks(
                         user_id, task_dicts, task_type,
                     )
+                    # Step-level policy extraction from failure patterns
+                    self._kernel.policies.extract_step_policies(
+                        user_id, task_dicts, task_type,
+                    )
             except Exception:
                 pass
 
@@ -936,6 +1063,19 @@ class Buddhi:
                         success=False,
                         baseline_score=baseline_score,
                         actual_score=outcome_score,
+                    )
+            except Exception:
+                pass
+
+            # Extract step policies from failure patterns
+            try:
+                completed = self._kernel.tasks.get_tasks_by_type(
+                    user_id, task_type, limit=10,
+                )
+                if len(completed) >= 3:
+                    task_dicts = [t.to_dict() for t in completed]
+                    self._kernel.policies.extract_step_policies(
+                        user_id, task_dicts, task_type,
                     )
             except Exception:
                 pass
@@ -965,16 +1105,122 @@ class Buddhi:
             except Exception:
                 pass
 
+            # Cross-structure: when beliefs are challenged, check dependent policies
+            try:
+                for belief in relevant:
+                    if belief.confidence < 0.3:
+                        claim_words = set(belief.claim.lower().split()[:5])
+                        for policy in self._kernel.policies._policies.values():
+                            if policy.user_id != user_id:
+                                continue
+                            approach_words = set(policy.action.approach.lower().split())
+                            if len(claim_words & approach_words) >= 2:
+                                policy.utility *= 0.8
+                                policy.updated_at = time.time()
+            except Exception:
+                pass
+
+        # Record outcomes on matched insights (utility tracking)
+        if what_worked:
+            try:
+                matched_insights = self._get_relevant_insights(
+                    user_id, f"{task_type} task",
+                )
+                for insight in matched_insights[:5]:
+                    insight.record_outcome(
+                        success=True,
+                        baseline_score=baseline_score,
+                        actual_score=outcome_score,
+                    )
+                self._save_insights()
+            except Exception:
+                pass
+
+        if what_failed:
+            try:
+                matched_insights = self._get_relevant_insights(
+                    user_id, f"{task_type} task",
+                )
+                for insight in matched_insights[:5]:
+                    insight.record_outcome(
+                        success=False,
+                        baseline_score=baseline_score,
+                        actual_score=outcome_score,
+                    )
+                self._save_insights()
+            except Exception:
+                pass
+
+        # Record outcomes on matched contrastive pairs
+        try:
+            store = self._get_contrastive()
+            matched_pairs = store.retrieve_contrasts(
+                f"{task_type} task", user_id=user_id, limit=5,
+            )
+            task_succeeded = what_worked is not None
+            for pair in matched_pairs:
+                pair.record_outcome(
+                    success=task_succeeded,
+                    baseline_score=baseline_score,
+                    actual_score=outcome_score,
+                )
+            store._save_all()
+        except Exception:
+            pass
+
+        # Cross-structure: positive policy delta -> reinforce related heuristics
+        if what_worked:
+            try:
+                matched_policies = self._kernel.policies.match_policies(
+                    user_id, task_type, f"{task_type} task",
+                )
+                for policy in matched_policies:
+                    if policy.last_delta > 0:
+                        distiller = self._get_heuristic_distiller()
+                        related = distiller.retrieve_relevant(
+                            policy.action.approach, user_id=user_id, limit=3,
+                        )
+                        for h in related:
+                            h.record_outcome(
+                                success=True,
+                                baseline_score=baseline_score,
+                                actual_score=outcome_score,
+                            )
+                        distiller._save_all()
+            except Exception:
+                pass
+
+        # Record outcomes on recently triggered intentions
+        try:
+            triggered = [
+                i for i in self._kernel.intentions._intentions.values()
+                if i.user_id == user_id
+                and i.status == "triggered"
+                and i.was_useful is None
+            ]
+            task_succeeded = what_worked is not None and (
+                outcome_score is None or outcome_score >= 0.5
+            )
+            for intention in triggered:
+                self._kernel.intentions.record_outcome(
+                    intention.id,
+                    useful=task_succeeded,
+                    outcome_score=outcome_score,
+                )
+        except Exception:
+            pass
+
         return new_insights
 
     def _validate_used_heuristics(
         self, user_id: str, task_type: str, success: bool,
+        baseline_score: Optional[float] = None,
+        actual_score: Optional[float] = None,
     ) -> None:
-        """Close the heuristic validation loop.
+        """Close the heuristic validation loop with measured utility deltas.
 
-        When a task completes, validate heuristics that were retrieved for
-        this task type. This is the missing feedback loop that turns
-        scaffolding into real self-improvement.
+        When a task completes, update heuristics that were retrieved for
+        this task type with EMA utility tracking (not just boolean validate).
         """
         try:
             distiller = self._get_heuristic_distiller()
@@ -984,7 +1230,12 @@ class Buddhi:
                 limit=5,
             )
             for h in relevant:
-                distiller.validate(h.id, validated=success)
+                h.record_outcome(
+                    success=success,
+                    baseline_score=baseline_score,
+                    actual_score=actual_score,
+                )
+            distiller._save_all()
         except Exception:
             pass
 
@@ -1009,6 +1260,8 @@ class Buddhi:
                         "validation_count": insight.validation_count,
                         "invalidation_count": insight.invalidation_count,
                         "tags": insight.tags,
+                        "utility": insight.utility,
+                        "apply_count": insight.apply_count,
                     }
                     f.write(json.dumps(row, ensure_ascii=False) + "\n")
         except OSError as e:
@@ -1050,6 +1303,8 @@ class Buddhi:
                             validation_count=row.get("validation_count", 0),
                             invalidation_count=row.get("invalidation_count", 0),
                             tags=row.get("tags", []),
+                            utility=row.get("utility", 0.0),
+                            apply_count=row.get("apply_count", 0),
                         )
                         self._insights[insight.id] = insight
             except (OSError, json.JSONDecodeError) as e:

@@ -528,6 +528,7 @@ class Dhee:
         self,
         task_description: Optional[str] = None,
         user_id: Optional[str] = None,
+        operational: bool = False,
     ) -> Dict[str, Any]:
         """HyperAgent session bootstrap. Call once at conversation start.
 
@@ -538,10 +539,11 @@ class Dhee:
         Args:
             task_description: What you're about to work on.
             user_id: Override default user_id.
+            operational: If True, return compact actionable-only format
+                for per-turn consumption instead of full context.
 
         Returns:
-            HyperContext dict with keys: warnings, insights, intentions,
-            performance, memories, last_session, meta.
+            HyperContext dict (full or operational).
         """
         uid = user_id or self._user_id
         self._tracker.on_context(task_description)
@@ -550,6 +552,8 @@ class Dhee:
             task_description=task_description,
             memory=self._engram._memory,
         )
+        if operational:
+            return hyper_ctx.to_operational_dict()
         return hyper_ctx.to_dict()
 
     # ------------------------------------------------------------------

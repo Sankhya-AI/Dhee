@@ -195,8 +195,13 @@ class DheePlugin:
         self,
         task_description: Optional[str] = None,
         user_id: Optional[str] = None,
+        operational: bool = False,
     ) -> Dict[str, Any]:
-        """HyperAgent session bootstrap. Returns everything the agent needs."""
+        """HyperAgent session bootstrap. Returns everything the agent needs.
+
+        Args:
+            operational: If True, return compact actionable-only format.
+        """
         uid = user_id or self._user_id
         self._tracker.on_context(task_description)
         hyper_ctx = self._buddhi.get_hyper_context(
@@ -204,6 +209,8 @@ class DheePlugin:
             task_description=task_description,
             memory=self._engram._memory,
         )
+        if operational:
+            return hyper_ctx.to_operational_dict()
         return hyper_ctx.to_dict()
 
     # ------------------------------------------------------------------

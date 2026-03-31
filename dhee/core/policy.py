@@ -535,6 +535,99 @@ class PolicyStore:
             source_task_ids=[t.get("id", "") for t in successful[:5]],
         )
 
+    def extract_step_policies(
+        self,
+        user_id: str,
+        completed_tasks: List[Dict[str, Any]],
+        task_type: str,
+    ) -> List[PolicyCase]:
+        """Extract STEP-granularity policies from repeated failure patterns.
+
+        Analyzes failed steps across completed tasks of the same type.
+        When the same step fails >=2 times at the same position AND a
+        different approach succeeded at that position in other tasks,
+        creates a STEP correction policy.
+
+        Pure structural analysis, zero LLM calls.
+        """
+        # Collect failed steps grouped by (position, normalized description)
+        failure_counts: Dict[tuple, List[str]] = {}  # (pos, desc) -> [task_ids]
+        success_at_pos: Dict[int, List[str]] = {}    # pos -> [successful step descriptions]
+
+        for task in completed_tasks:
+            plan = task.get("plan", [])
+            task_id = task.get("id", "")
+            task_score = task.get("outcome_score", 0)
+
+            for idx, step in enumerate(plan):
+                status = step.get("status", "pending")
+                desc = step.get("description", "").lower().strip()
+                if not desc:
+                    continue
+
+                if status == "failed":
+                    key = (idx, desc)
+                    if key not in failure_counts:
+                        failure_counts[key] = []
+                    failure_counts[key].append(task_id)
+                elif status == "completed" and task_score >= 0.6:
+                    if idx not in success_at_pos:
+                        success_at_pos[idx] = []
+                    success_at_pos[idx].append(desc)
+
+        # Filter to steps that fail >=2 times
+        new_policies: List[PolicyCase] = []
+        for (pos, failed_desc), task_ids in failure_counts.items():
+            if len(task_ids) < 2:
+                continue
+
+            # Find a successful alternative at the same position
+            alternatives = success_at_pos.get(pos, [])
+            if not alternatives:
+                continue
+
+            # Pick the most common successful alternative
+            alt_freq: Dict[str, int] = {}
+            for alt in alternatives:
+                if alt != failed_desc:  # Must be different from the failing step
+                    alt_freq[alt] = alt_freq.get(alt, 0) + 1
+            if not alt_freq:
+                continue
+            best_alt = max(alt_freq, key=alt_freq.get)
+
+            # Extract keywords from failed step as step_patterns
+            stop = {"the", "a", "an", "to", "of", "in", "for", "on", "and", "or", "is", "it", "with"}
+            step_patterns = [
+                w for w in failed_desc.split()
+                if len(w) > 2 and w not in stop
+            ][:5]
+
+            if not step_patterns:
+                continue
+
+            # Deduplicate against existing STEP policies
+            existing = self._find_similar_step_policy(user_id, task_type, step_patterns)
+            if existing:
+                existing.success_count += 1
+                existing.apply_count += 1
+                existing.updated_at = time.time()
+                self._save_policy(existing)
+                new_policies.append(existing)
+                continue
+
+            policy = self.create_step_policy(
+                user_id=user_id,
+                name=f"{task_type}_step_fix_v{len(self._policies) + 1}",
+                task_types=[task_type],
+                step_patterns=step_patterns,
+                approach=best_alt,
+                avoid=[failed_desc],
+                source_task_ids=task_ids[:5],
+            )
+            new_policies.append(policy)
+
+        return new_policies
+
     def match_policies(
         self,
         user_id: str,
@@ -736,6 +829,31 @@ class PolicyStore:
             if not policy_words:
                 continue
             overlap = len(step_words & policy_words) / len(step_words | policy_words)
+            if overlap > self.SIMILARITY_THRESHOLD:
+                return policy
+
+        return None
+
+    def _find_similar_step_policy(
+        self, user_id: str, task_type: str, step_patterns: List[str],
+    ) -> Optional[PolicyCase]:
+        """Find an existing STEP policy with similar step_patterns."""
+        pattern_words = set(w.lower() for w in step_patterns)
+        if not pattern_words:
+            return None
+
+        for policy in self._policies.values():
+            if policy.user_id != user_id:
+                continue
+            if policy.granularity != PolicyGranularity.STEP:
+                continue
+            if task_type not in policy.condition.task_types:
+                continue
+
+            existing_words = set(w.lower() for w in policy.condition.step_patterns)
+            if not existing_words:
+                continue
+            overlap = len(pattern_words & existing_words) / len(pattern_words | existing_words)
             if overlap > self.SIMILARITY_THRESHOLD:
                 return policy
 
