@@ -1,16 +1,16 @@
-"""engram CLI — memory layer for AI agents.
+"""dhee CLI — cognition layer for AI agents.
 
 Usage:
-    engram setup              Interactive setup wizard
-    engram add "text"         Add a memory
-    engram search "query"     Search memories
-    engram list               List all memories
-    engram stats              Memory statistics
-    engram decay              Apply forgetting
-    engram categories         List categories
-    engram export             Export to JSON
-    engram import <file>      Import from JSON
-    engram status             Version, config, DB info
+    dhee setup              Interactive setup wizard
+    dhee add "text"         Add a memory
+    dhee search "query"     Search memories
+    dhee list               List all memories
+    dhee stats              Memory statistics
+    dhee decay              Apply forgetting
+    dhee categories         List categories
+    dhee export             Export to JSON
+    dhee import <file>      Import from JSON
+    dhee status             Version, config, DB info
 """
 
 import argparse
@@ -323,7 +323,7 @@ def cmd_benchmark(args: argparse.Namespace) -> None:
     from dhee import Memory
 
     print("=" * 60)
-    print(" engram benchmark")
+    print(" dhee benchmark")
     print("=" * 60)
 
     # Cold start

@@ -1,14 +1,14 @@
 """Simplified Dhee interface for 3-line integration.
 
-This module provides the Engram class - a simplified, batteries-included
-interface for the Dhee memory layer.
+This module provides the Dhee class — a batteries-included interface
+for the 4-operation cognition API (remember/recall/context/checkpoint).
 
 Usage:
-    from dhee import Engram
+    from dhee import Dhee
 
-    memory = Engram()  # Auto-configures based on environment
-    memory.add("User prefers Python over JavaScript", user_id="u123")
-    results = memory.search("programming preferences", user_id="u123")
+    d = Dhee()
+    d.remember("User prefers Python over JavaScript")
+    d.recall("programming preferences")
 
 Environment Variables:
     OPENAI_API_KEY: OpenAI API key (recommended)
@@ -32,7 +32,7 @@ from dhee.configs.base import (
     MemoryConfig,
     VectorStoreConfig,
 )
-from dhee.memory.main import Memory
+from dhee.memory.main import FullMemory
 
 
 def _detect_provider() -> str:
@@ -91,7 +91,7 @@ class Engram:
         enable_echo: bool = True,
         enable_categories: bool = True,
         enable_decay: bool = True,
-        collection_name: str = "engram",
+        collection_name: str = "dhee",
         in_memory: bool = False,
     ):
         # Auto-detect provider
@@ -144,12 +144,12 @@ class Engram:
             category=CategoryMemConfig(
                 enable_categories=enable_categories,
             ),
-            history_db_path=str(self._data_dir / "engram.db"),
+            history_db_path=str(self._data_dir / "history.db"),
             collection_name=collection_name,
             embedding_model_dims=embedding_dims,
         )
 
-        self._memory = Memory(config)
+        self._memory = FullMemory(config)
 
     def add(
         self,

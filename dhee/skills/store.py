@@ -23,7 +23,7 @@ class SkillStore:
         skill_dirs: List[str],
         embedder: Any = None,
         vector_store: Any = None,
-        collection_name: str = "engram_skills",
+        collection_name: str = "dhee_skills",
     ):
         self._skill_dirs = skill_dirs
         self._embedder = embedder

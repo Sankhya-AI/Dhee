@@ -5,7 +5,7 @@ Tools:
  2. search_memory        — Semantic search
  3. get_memory           — Fetch by ID
  4. get_all_memories     — List with filters
- 5. engram_context       — HyperAgent session bootstrap (Buddhi-powered)
+ 5. dhee_context         — HyperAgent session bootstrap (Buddhi-powered)
  6. get_last_session     — Handoff: load prior session
  7. save_session_digest  — Handoff: save current session
  8. get_memory_stats     — Quick health check
@@ -36,7 +36,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
-from dhee.memory.main import FullMemory, Memory
+from dhee.memory.main import FullMemory
 from dhee.configs.base import (
     MemoryConfig,
     VectorStoreConfig,
@@ -230,7 +230,7 @@ TOOLS = [
     ),
     Tool(
         name="search_memory",
-        description="Search engram for relevant memories by semantic query. The UserPromptSubmit hook handles background search automatically — call this tool only for explicit user recall requests such as 'what did we discuss about X?' or 'recall my preference for Y'.",
+        description="Search memory for relevant memories by semantic query. The UserPromptSubmit hook handles background search automatically — call this tool only for explicit user recall requests such as 'what did we discuss about X?' or 'recall my preference for Y'.",
         inputSchema={
             "type": "object",
             "properties": {
@@ -276,7 +276,7 @@ TOOLS = [
         },
     ),
     Tool(
-        name="engram_context",
+        name="dhee_context",
         description="HyperAgent session bootstrap. Call at conversation start to get EVERYTHING: performance trends, synthesized insights from prior runs, relevant skills, pending intentions, proactive warnings, and top memories. This single call turns any agent into a HyperAgent with persistent memory and self-improvement awareness.",
         inputSchema={
             "type": "object",
@@ -324,7 +324,7 @@ TOOLS = [
     ),
     Tool(
         name="get_memory_stats",
-        description="Get statistics about the memory store including counts and layer distribution. Call when the user asks about memory health, wants an overview of what's stored, or runs /engram:status.",
+        description="Get statistics about the memory store including counts and layer distribution. Call when the user asks about memory health, wants an overview of what's stored, or runs /dhee:status.",
         inputSchema={
             "type": "object",
             "properties": {
@@ -673,7 +673,7 @@ def _handle_get_all_memories(memory, args):
     return result
 
 
-def _handle_engram_context(memory, args):
+def _handle_dhee_context(memory, args):
     """HyperAgent session bootstrap — Buddhi-powered.
 
     Returns performance trends, synthesized insights, relevant skills,
@@ -961,7 +961,7 @@ HANDLERS = {
     "search_memory": _handle_search_memory,
     "get_memory": _handle_get_memory,
     "get_all_memories": _handle_get_all_memories,
-    "engram_context": _handle_engram_context,
+    "dhee_context": _handle_dhee_context,
     "get_last_session": _handle_get_last_session,
     "save_session_digest": _handle_save_session_digest,
     "get_memory_stats": _handle_get_memory_stats,

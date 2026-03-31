@@ -38,12 +38,12 @@ def minimal_config():
         vector_store=VectorStoreConfig(
             provider="memory",
             config={
-                "collection_name": "engram_memories",
+                "collection_name": "dhee_memories",
                 "embedding_model_dims": 384,
             },
         ),
         history_db_path=os.path.join(data_dir, "history.db"),
-        collection_name="engram_memories",
+        collection_name="dhee_memories",
         embedding_model_dims=384,
         engram=FadeMemConfig(enable_forgetting=True),
         echo=EchoMemConfig(enable_echo=False),
@@ -99,7 +99,7 @@ def smart_config():
             provider="zvec",
             config={
                 "path": os.path.join(data_dir, "zvec"),
-                "collection_name": "engram_memories",
+                "collection_name": "dhee_memories",
                 "embedding_model_dims": dims,
             },
         )
@@ -107,7 +107,7 @@ def smart_config():
         vs = VectorStoreConfig(
             provider="memory",
             config={
-                "collection_name": "engram_memories",
+                "collection_name": "dhee_memories",
                 "embedding_model_dims": dims,
             },
         )
@@ -120,7 +120,7 @@ def smart_config():
         llm=LLMConfig(provider=llm_provider, config={}),
         vector_store=vs,
         history_db_path=os.path.join(data_dir, "history.db"),
-        collection_name="engram_memories",
+        collection_name="dhee_memories",
         embedding_model_dims=dims,
         engram=FadeMemConfig(enable_forgetting=True),
         echo=EchoMemConfig(enable_echo=has_llm),

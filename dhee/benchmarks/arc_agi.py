@@ -206,7 +206,7 @@ def run_arc_benchmark(args: argparse.Namespace) -> Dict[str, Any]:
     memory = None
     if args.mode == "memory":
         from dhee.configs.base import MemoryConfig
-        from dhee.memory.main import Memory
+        from dhee.memory.main import FullMemory
 
         tmpdir = tempfile.mkdtemp(prefix="arc_bench_")
         config = MemoryConfig(
@@ -221,7 +221,7 @@ def run_arc_benchmark(args: argparse.Namespace) -> Dict[str, Any]:
             scene={"enable_scenes": False},
             profile={"enable_profiles": False},
         )
-        memory = Memory(config)
+        memory = FullMemory(config)
         print(f"Embedder: {args.embedder_provider}/{args.embedder_model}")
         print(f"Memory DB: {tmpdir}")
         print()

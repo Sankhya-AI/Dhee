@@ -10,7 +10,7 @@ import tempfile
 import pytest
 
 from dhee.configs.base import MemoryConfig, TaskConfig
-from dhee.memory.main import Memory
+from dhee.memory.main import FullMemory as Memory
 from dhee.memory.tasks import TaskManager, TASK_STATUSES, ACTIVE_STATUSES
 
 

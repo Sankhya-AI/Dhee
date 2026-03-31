@@ -460,7 +460,7 @@ class EngramExtractionConfig(BaseModel):
 class SkillConfig(BaseModel):
     """Configuration for the skill-learning agent memory system."""
     enable_skills: bool = True
-    skill_collection_name: str = "engram_skills"
+    skill_collection_name: str = "dhee_skills"
     min_confidence_for_auto_apply: float = 0.3
     enable_mining: bool = True
     min_trajectory_steps: int = 3
