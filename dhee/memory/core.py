@@ -369,6 +369,17 @@ class CoreMemory:
             if mem.get("immutable"):
                 continue
 
+            # Shruti-tier memories are immune to decay
+            mem_meta = mem.get("metadata") or {}
+            if isinstance(mem_meta, str):
+                try:
+                    import json
+                    mem_meta = json.loads(mem_meta)
+                except Exception:
+                    mem_meta = {}
+            if mem_meta.get("tier") == "shruti":
+                continue
+
             new_strength = calculate_decayed_strength(
                 current_strength=float(mem.get("strength", 1.0)),
                 last_accessed=mem.get("last_accessed", mem.get("created_at", "")),
@@ -378,15 +389,29 @@ class CoreMemory:
             )
 
             if should_forget(new_strength, self.fade_config):
-                if self.fade_config.use_tombstone_deletion:
+                access_count = int(mem.get("access_count", 0))
+                # Vasana: memories recalled 3+ times compress instead of dying
+                if access_count >= 3:
+                    content = mem.get("memory", mem.get("content", ""))
+                    # Compress to first 100 chars + keep keywords
+                    compressed = content[:100].rstrip() + "..." if len(content) > 100 else content
+                    update = {
+                        "strength": self.fade_config.forgetting_threshold + 0.01,
+                        "memory": compressed,
+                        "metadata": json.dumps({**mem_meta, "tier": "vasana"}),
+                    }
+                    self.db.update_memory(mem["id"], update)
+                    decayed += 1
+                elif self.fade_config.use_tombstone_deletion:
                     self.db.update_memory(mem["id"], {"tombstone": 1, "strength": new_strength})
+                    forgotten += 1
                 else:
                     self.db.delete_memory(mem["id"])
-                try:
-                    self.vector_store.delete(mem["id"])
-                except Exception:
-                    pass
-                forgotten += 1
+                    try:
+                        self.vector_store.delete(mem["id"])
+                    except Exception:
+                        pass
+                    forgotten += 1
             elif should_promote(
                 mem.get("layer", "sml"),
                 int(mem.get("access_count", 0)),

@@ -45,6 +45,18 @@ def _get_plugin():
         if hasattr(memory, "config") and hasattr(memory.config, "enrichment"):
             memory.config.enrichment.defer_enrichment = True
             memory.config.enrichment.enable_unified = True
+
+        # Auto-checkpoint on server shutdown
+        import atexit
+        def _auto_checkpoint_on_exit():
+            try:
+                args = _plugin._tracker.finalize()
+                if args:
+                    _plugin.checkpoint(**args)
+            except Exception:
+                pass
+        atexit.register(_auto_checkpoint_on_exit)
+
     return _plugin
 
 

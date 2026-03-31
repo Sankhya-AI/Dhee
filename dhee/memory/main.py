@@ -1980,6 +1980,17 @@ class FullMemory(SmartMemory, SceneProfileMixin):
             if memory.get("immutable"):
                 continue
 
+            # Shruti-tier memories are immune to decay
+            _tier_md = memory.get("metadata") or {}
+            if isinstance(_tier_md, str):
+                import json as _tjson
+                try:
+                    _tier_md = _tjson.loads(_tier_md)
+                except (ValueError, TypeError):
+                    _tier_md = {}
+            if _tier_md.get("tier") == "shruti":
+                continue
+
             # Task-aware decay: active tasks don't decay
             if memory.get("memory_type") == "task":
                 _md = memory.get("metadata") or {}

@@ -84,7 +84,11 @@ class DheePlugin:
         buddhi_dir = str(self._engram.data_dir / "buddhi")
         self._buddhi = Buddhi(data_dir=buddhi_dir)
 
-        # Session tracking
+        # Passive session tracker — auto-context + auto-checkpoint
+        from dhee.core.session_tracker import SessionTracker
+        self._tracker = SessionTracker()
+
+        # Session tracking (kept for backward compat with session_start/session_end)
         self._session_id: Optional[str] = None
         self._session_start_time: Optional[float] = None
 
@@ -120,7 +124,15 @@ class DheePlugin:
         checks for "remember to X when Y" patterns.
         """
         uid = user_id or self._user_id
-        result = self._engram.add(content, user_id=uid, infer=False, metadata=metadata)
+
+        # Auto-tier memory content
+        from dhee.core.session_tracker import classify_tier
+        tier = classify_tier(content)
+        meta = dict(metadata) if metadata else {}
+        if tier != "smriti":
+            meta["tier"] = tier
+
+        result = self._engram.add(content, user_id=uid, infer=False, metadata=meta or None)
 
         response: Dict[str, Any] = {"stored": True}
         memory_id = None
@@ -129,6 +141,12 @@ class DheePlugin:
             if rs:
                 memory_id = rs[0].get("id")
                 response["id"] = memory_id
+        if tier == "shruti":
+            response["tier"] = "shruti"
+
+        # Session tracking — may trigger auto-context
+        signals = self._tracker.on_remember(content, memory_id)
+        self._handle_tracker_signals(signals, uid)
 
         # Buddhi: detect intentions, record episode event, create beliefs
         intention = self._buddhi.on_memory_stored(
@@ -152,7 +170,7 @@ class DheePlugin:
         """Search memory for relevant facts. 0 LLM calls. 1 embedding."""
         uid = user_id or self._user_id
         results = self._engram.search(query, user_id=uid, limit=limit)
-        return [
+        formatted = [
             {
                 "memory": r.get("memory", r.get("content", "")),
                 "score": round(r.get("composite_score", r.get("score", 0.0)), 3),
@@ -160,6 +178,12 @@ class DheePlugin:
             }
             for r in results
         ]
+
+        # Session tracking
+        signals = self._tracker.on_recall(query, formatted)
+        self._handle_tracker_signals(signals, uid)
+
+        return formatted
 
     # ------------------------------------------------------------------
     # Tool 3: context
@@ -172,6 +196,7 @@ class DheePlugin:
     ) -> Dict[str, Any]:
         """HyperAgent session bootstrap. Returns everything the agent needs."""
         uid = user_id or self._user_id
+        self._tracker.on_context(task_description)
         hyper_ctx = self._buddhi.get_hyper_context(
             user_id=uid,
             task_description=task_description,
@@ -219,6 +244,21 @@ class DheePlugin:
         8. Selective forgetting → utility-based cleanup
         """
         uid = user_id or self._user_id
+        self._tracker.on_checkpoint()
+
+        # Auto-fill task_type if not provided
+        if not task_type:
+            task_type = self._tracker.get_inferred_task_type()
+            if task_type == "general":
+                task_type = None
+
+        # Auto-fill outcome if not provided
+        if outcome_score is None and self._tracker.op_count >= 3:
+            outcome = self._tracker.get_outcome_signals()
+            outcome_score = outcome.get("outcome_score")
+            if not what_worked:
+                what_worked = outcome.get("what_worked")
+
         result: Dict[str, Any] = {}
 
         # 1. Session digest
@@ -400,6 +440,31 @@ class DheePlugin:
         self._session_id = None
         self._session_start_time = None
         return result
+
+    # ------------------------------------------------------------------
+    # Auto-lifecycle (driven by SessionTracker)
+    # ------------------------------------------------------------------
+
+    def _handle_tracker_signals(self, signals: Dict[str, Any], user_id: str) -> None:
+        """Process signals from the session tracker."""
+        if not signals:
+            return
+
+        # Auto-checkpoint a timed-out previous session
+        if signals.get("needs_auto_checkpoint"):
+            args = signals.get("auto_checkpoint_args", {})
+            try:
+                self.checkpoint(user_id=user_id, **args)
+            except Exception:
+                pass
+
+        # Auto-context for new session
+        if signals.get("needs_auto_context"):
+            task = signals.get("inferred_task")
+            try:
+                self.context(task_description=task, user_id=user_id)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Phase 3: Belief management
