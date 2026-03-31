@@ -41,7 +41,7 @@ from dhee.configs.base import (
     MemoryConfig, LLMConfig, EmbedderConfig, VectorStoreConfig,
     EchoMemConfig, CategoryMemConfig, ProfileConfig,
 )
-from dhee.memory.main import Memory
+from dhee.memory.main import FullMemory as Memory
 
 
 def create_memory():

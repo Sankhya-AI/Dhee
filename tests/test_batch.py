@@ -9,7 +9,7 @@ import tempfile
 import pytest
 
 from dhee.configs.base import BatchConfig, MemoryConfig
-from dhee.memory.main import Memory
+from dhee.memory.main import FullMemory as Memory
 
 
 def _make_memory(tmpdir, batch_enabled=True, echo_enabled=True, categories_enabled=True):

@@ -14,7 +14,7 @@ from dhee.configs.active import ActiveMemoryConfig
 from dhee.core.active_memory import ActiveMemoryStore
 
 if TYPE_CHECKING:
-    from dhee.memory.main import Memory
+    from dhee.memory.main import FullMemory
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ class ConsolidationEngine:
     def __init__(
         self,
         active_store: ActiveMemoryStore,
-        memory: "Memory",
+        memory: "FullMemory",
         config: ActiveMemoryConfig,
     ):
         self.active = active_store

@@ -11,7 +11,7 @@ import logging
 from contextlib import contextmanager
 from typing import Any, Dict, Iterator
 
-logger = logging.getLogger("engram")
+logger = logging.getLogger("dhee")
 
 
 class _NoOpMetrics:

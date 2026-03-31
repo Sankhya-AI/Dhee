@@ -1,52 +1,45 @@
-"""dhee — Cognition as a Service. The memory layer that makes ANY agent intelligent.
+"""dhee — The cognition layer that turns any agent into a HyperAgent.
 
-- FadeMem: Dual-layer (SML/LML) with natural decay
-- EchoMem: Multi-modal encoding for stronger retention
-- CategoryMem: Dynamic hierarchical category organization
-- Universal Engram: Structured facts + context anchoring
-- Cognition Engine: Memory-grounded recursive reasoning
-- Prospective Scenes: Memory-driven future anticipation
+4 operations. Deferred enrichment. Minimal hot-path cost.
+Your agent remembers, learns from outcomes, and predicts what you need next.
 
-Quick Start (zero-config, no API key):
-    from dhee import Memory
-    m = Memory()
-    m.add("User prefers Python")
-    results = m.search("programming preferences")
+Quick Start:
+    from dhee import Dhee
 
-Tiered Memory Classes:
+    d = Dhee()
+    d.remember("User prefers dark mode")
+    d.recall("what theme does the user like?")
+    d.context("fixing auth bug")
+    d.checkpoint("Fixed it", what_worked="git blame first")
+
+Memory Classes:
     CoreMemory   — lightweight: add/search/delete + decay (no LLM)
     SmartMemory  — + echo encoding, categories, knowledge graph (needs LLM)
-    FullMemory   — + scenes, profiles, tasks, cognition (everything)
+    FullMemory   — + scenes, profiles, orchestration, cognition (everything)
     Memory       — alias for CoreMemory (lightest default)
 """
 
 from dhee.memory.core import CoreMemory
 from dhee.memory.smart import SmartMemory
 from dhee.memory.main import FullMemory
-from dhee.simple import Engram, Dhee
+from dhee.simple import Dhee
 from dhee.adapters.base import DheePlugin
 from dhee.core.category import CategoryProcessor, Category, CategoryType, CategoryMatch
 from dhee.core.echo import EchoProcessor, EchoDepth, EchoResult
 from dhee.configs.base import MemoryConfig, FadeMemConfig, EchoMemConfig, CategoryMemConfig, ScopeConfig
-from dhee.core.belief import BeliefNode, BeliefStore, BeliefStatus
-from dhee.core.policy import PolicyCase, PolicyStore, PolicyStatus
-from dhee.core.task_state import TaskState, TaskStateStore, TaskStatus
-from dhee.core.episode import Episode, EpisodeStore, EpisodeStatus
-from dhee.core.trigger import TriggerManager, TriggerResult, TriggerContext
 
 # Default: CoreMemory (lightest, zero-config)
 Memory = CoreMemory
 
 __version__ = "2.2.0b1"
 __all__ = [
-    # Tiered memory classes
+    # Memory classes
     "CoreMemory",
     "SmartMemory",
     "FullMemory",
     "Memory",
-    # Simplified interface
+    # Simplified interface (the 4-operation API)
     "Dhee",
-    "Engram",
     # Universal plugin
     "DheePlugin",
     # CategoryMem
@@ -64,26 +57,4 @@ __all__ = [
     "EchoMemConfig",
     "CategoryMemConfig",
     "ScopeConfig",
-    # Cognitive subsystems
-    "BeliefNode",
-    "BeliefStore",
-    "BeliefStatus",
-    "PolicyCase",
-    "PolicyStore",
-    "PolicyStatus",
-    "TaskState",
-    "TaskStateStore",
-    "TaskStatus",
-    "Episode",
-    "EpisodeStore",
-    "EpisodeStatus",
-    "TriggerManager",
-    "TriggerResult",
-    "TriggerContext",
 ]
-
-
-def _load_teaching():
-    """Lazy-load teaching module to avoid import overhead when not needed."""
-    from dhee.teaching import ConceptStore, StudentModel, TeachingMemory, TeachingConfig
-    return ConceptStore, StudentModel, TeachingMemory, TeachingConfig

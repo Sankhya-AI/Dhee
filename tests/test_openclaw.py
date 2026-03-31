@@ -6,7 +6,7 @@ import tempfile
 import pytest
 
 from dhee.configs.base import MemoryConfig
-from dhee.memory.main import Memory
+from dhee.memory.main import FullMemory as Memory
 from dhee.memory.projects import ProjectManager
 from dhee.memory.tasks import TaskManager
 from engram_bus import Bus

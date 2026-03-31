@@ -9,7 +9,7 @@ import time
 import pytest
 
 from dhee.configs.base import MemoryConfig, LLMConfig, EmbedderConfig, VectorStoreConfig
-from dhee.memory.main import Memory
+from dhee.memory.main import FullMemory as Memory
 
 # Load keys from .env file in project root
 _ENV_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")

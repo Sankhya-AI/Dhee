@@ -33,14 +33,6 @@ from dhee.core.category import CategoryProcessor, CategoryMatch
 from dhee.core.graph import KnowledgeGraph
 from dhee.core.scene import SceneProcessor
 from dhee.core.profile import ProfileProcessor
-from dhee.core.answer_orchestration import should_override_with_reducer
-from dhee.core.episodic_index import (
-    extract_entity_aggregates,
-    extract_episodic_events,
-    intent_event_types,
-    score_event_match,
-    tokenize_query_terms,
-)
 from dhee.db.sqlite import SQLiteManager
 from dhee.exceptions import FadeMemValidationError
 from dhee.memory.base import MemoryBase
@@ -3128,6 +3120,3 @@ class FullMemory(SmartMemory, SceneProfileMixin):
         """Get recent decay history for dashboard sparkline."""
         return self.db.get_decay_log_entries(limit=limit)
 
-
-# Backward-compatible alias — existing code that imports Memory still works.
-Memory = FullMemory

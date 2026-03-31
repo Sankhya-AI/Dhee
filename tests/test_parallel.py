@@ -145,7 +145,7 @@ class TestParallelMemoryIntegration:
     def test_memory_no_executor_by_default(self):
         """With default config, no executor is created."""
         from dhee.configs.base import MemoryConfig
-        from dhee.memory.main import Memory
+        from dhee.memory.main import FullMemory as Memory
         import tempfile, os
         with tempfile.TemporaryDirectory() as tmpdir:
             config = MemoryConfig(
@@ -165,7 +165,7 @@ class TestParallelMemoryIntegration:
     def test_memory_creates_executor_when_enabled(self):
         """With enable_parallel=True, executor is created."""
         from dhee.configs.base import MemoryConfig, ParallelConfig
-        from dhee.memory.main import Memory
+        from dhee.memory.main import FullMemory as Memory
         import tempfile, os
         with tempfile.TemporaryDirectory() as tmpdir:
             config = MemoryConfig(
@@ -187,7 +187,7 @@ class TestParallelMemoryIntegration:
     def test_memory_close_shuts_down_executor(self):
         """close() cleanly shuts down the executor."""
         from dhee.configs.base import MemoryConfig, ParallelConfig
-        from dhee.memory.main import Memory
+        from dhee.memory.main import FullMemory as Memory
         import tempfile, os
         with tempfile.TemporaryDirectory() as tmpdir:
             config = MemoryConfig(

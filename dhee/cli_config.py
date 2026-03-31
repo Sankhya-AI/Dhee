@@ -84,7 +84,7 @@ def get_api_key(provider: str) -> Optional[str]:
 
 def get_memory_instance(config: Optional[Dict[str, Any]] = None):
     """Build a Memory instance from CLI config."""
-    from dhee.memory.main import Memory
+    from dhee.memory.main import FullMemory
     from dhee.configs.base import (
         MemoryConfig,
         VectorStoreConfig,
@@ -136,4 +136,4 @@ def get_memory_instance(config: Optional[Dict[str, Any]] = None):
         engram=FadeMemConfig(enable_forgetting=True),
     )
 
-    return Memory(memory_config)
+    return FullMemory(memory_config)
