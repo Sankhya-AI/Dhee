@@ -339,6 +339,7 @@ class CognitionKernel:
         - Belief-policy interaction (challenged beliefs degrade policies)
         - Intention outcome recording
         - Episode connection wiring
+        - Temporal failure pattern detection (decision stumps)
 
         Zero LLM calls. Pure structural feedback.
         """
@@ -347,6 +348,7 @@ class CognitionKernel:
             "step_policies_created": 0,
             "intentions_updated": 0,
             "beliefs_policy_decays": 0,
+            "patterns_detected": 0,
         }
         task_desc = f"{task_type} task"
 
@@ -428,6 +430,37 @@ class CognitionKernel:
         except Exception:
             pass
 
+        # 6. Temporal failure pattern detection (decision stumps)
+        try:
+            from dhee.core.pattern_detector import (
+                FailurePatternDetector, extract_features,
+            )
+            recent = self.tasks.get_recent_tasks(
+                user_id, limit=100, include_terminal=True,
+            )
+            terminal = [t for t in recent if t.is_terminal]
+            if len(terminal) >= FailurePatternDetector.MIN_SAMPLES:
+                # Build episode lookup via public API
+                episode_map = {}
+                for t in terminal:
+                    if t.episode_id:
+                        ep = self.episodes.get_episode(t.episode_id)
+                        if ep:
+                            episode_map[ep.id] = ep
+
+                features = extract_features(terminal, episode_map)
+                detector = FailurePatternDetector()
+                patterns = detector.detect_and_describe(features)
+
+                for pattern in patterns[:3]:
+                    stored = self._store_pattern_as_policy(
+                        user_id, task_type, pattern,
+                    )
+                    if stored:
+                        result["patterns_detected"] += 1
+        except Exception:
+            pass
+
         return result
 
     def selective_forget(
@@ -450,6 +483,53 @@ class CognitionKernel:
         except Exception:
             pass
         return result
+
+    # ------------------------------------------------------------------
+    # Pattern detection helpers
+    # ------------------------------------------------------------------
+
+    def _store_pattern_as_policy(
+        self,
+        user_id: str,
+        task_type: str,
+        pattern: Any,
+    ) -> Optional[Any]:
+        """Convert a detected TemporalPattern into an enriched PolicyCase.
+
+        Deduplication: checks if a policy with tags=['temporal_pattern']
+        and matching feature+direction+threshold already exists.
+
+        Returns the created/existing PolicyCase, or None.
+        """
+        # Dedup check: look for existing temporal_pattern policy with same signature
+        pattern_sig = f"{pattern.feature}_{pattern.direction}_{pattern.threshold}"
+        for existing in self.policies.get_user_policies(user_id):
+            if "temporal_pattern" in existing.tags:
+                existing_sig = "_".join(
+                    p for p in existing.condition.context_patterns[:3]
+                )
+                if existing_sig == pattern_sig:
+                    return existing  # Already stored
+
+        # Build avoidance description
+        avoid_desc = (
+            f"Proceeding when {pattern.feature} is "
+            f"{pattern.direction} {pattern.threshold}"
+        )
+
+        policy = self.policies.create_policy(
+            user_id=user_id,
+            name=f"temporal_{pattern.feature}_{pattern.direction}",
+            task_types=[task_type],
+            approach=pattern.description,
+            context_patterns=[
+                pattern.feature, pattern.direction, str(pattern.threshold),
+            ],
+            avoid=[avoid_desc],
+        )
+        policy.tags = ["auto_detected", "temporal_pattern"]
+        self.policies._save_policy(policy)
+        return policy
 
     # ------------------------------------------------------------------
     # Lifecycle
