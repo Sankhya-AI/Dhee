@@ -546,6 +546,18 @@ class TestHandoffSessions:
         assert session["task_summary"] == "second"  # most recent
         bus.close()
 
+    def test_get_session_scoped_by_repo(self):
+        bus = Bus()
+        bus.save_session("agent-1", repo="/tmp/repo-a", task_summary="repo a")
+        bus.save_session("agent-1", repo="/tmp/repo-b", task_summary="repo b")
+
+        session = bus.get_session(agent_id="agent-1", repo="/tmp/repo-a")
+
+        assert session is not None
+        assert session["task_summary"] == "repo a"
+        assert session["repo"] == "/tmp/repo-a"
+        bus.close()
+
     def test_get_session_not_found(self):
         bus = Bus()
         assert bus.get_session(session_id="nonexistent") is None
@@ -560,6 +572,18 @@ class TestHandoffSessions:
         assert len(all_sessions) == 3
         a1_sessions = bus.list_sessions(agent_id="a1")
         assert len(a1_sessions) == 2
+        bus.close()
+
+    def test_list_sessions_by_repo(self):
+        bus = Bus()
+        bus.save_session("a1", repo="/tmp/repo-a", task_summary="t1")
+        bus.save_session("a2", repo="/tmp/repo-b", task_summary="t2")
+        bus.save_session("a1", repo="/tmp/repo-a", task_summary="t3")
+
+        repo_a_sessions = bus.list_sessions(repo="/tmp/repo-a")
+
+        assert len(repo_a_sessions) == 2
+        assert all(session["repo"] == "/tmp/repo-a" for session in repo_a_sessions)
         bus.close()
 
     def test_list_sessions_by_status(self):

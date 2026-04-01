@@ -13,6 +13,7 @@ Quick Start:
     d.checkpoint("Fixed it", what_worked="git blame first")
 
 Memory Classes:
+    Engram       — batteries-included memory interface with sensible defaults
     CoreMemory   — lightweight: add/search/delete + decay (no LLM)
     SmartMemory  — + echo encoding, categories, knowledge graph (needs LLM)
     FullMemory   — + scenes, profiles, orchestration, cognition (everything)
@@ -22,7 +23,7 @@ Memory Classes:
 from dhee.memory.core import CoreMemory
 from dhee.memory.smart import SmartMemory
 from dhee.memory.main import FullMemory
-from dhee.simple import Dhee
+from dhee.simple import Dhee, Engram
 from dhee.adapters.base import DheePlugin
 from dhee.core.category import CategoryProcessor, Category, CategoryType, CategoryMatch
 from dhee.core.echo import EchoProcessor, EchoDepth, EchoResult
@@ -31,9 +32,10 @@ from dhee.configs.base import MemoryConfig, FadeMemConfig, EchoMemConfig, Catego
 # Default: CoreMemory (lightest, zero-config)
 Memory = CoreMemory
 
-__version__ = "3.0.0"
+__version__ = "3.0.1"
 __all__ = [
     # Memory classes
+    "Engram",
     "CoreMemory",
     "SmartMemory",
     "FullMemory",

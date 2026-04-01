@@ -95,6 +95,8 @@ class TestCognitionKernel:
         assert "beliefs" in state
         assert "triggered_intentions" in state
         assert "belief_warnings" in state
+        assert "state_errors" in state
+        assert state["state_errors"] == []
 
     def test_get_cognitive_state_with_data(self, kernel):
         kernel.beliefs.add_belief("u", "Python is great", "programming", 0.9)
@@ -102,10 +104,42 @@ class TestCognitionKernel:
         state = kernel.get_cognitive_state("u", "programming")
         assert len(state["beliefs"]) > 0 or len(state["episodes"]) > 0
 
+    def test_get_cognitive_state_reports_component_failures(self, kernel, monkeypatch):
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("belief store unavailable")
+
+        monkeypatch.setattr(kernel.beliefs, "get_relevant_beliefs", _boom)
+
+        state = kernel.get_cognitive_state("u", "programming")
+
+        assert state["beliefs"] == []
+        assert len(state["state_errors"]) == 1
+        assert state["state_errors"][0]["component"] == "beliefs"
+        assert "belief store unavailable" in state["state_errors"][0]["error"]
+
     def test_record_checkpoint_event(self, kernel):
         kernel.episodes.begin_episode("u", "working on auth", "bug_fix")
         result = kernel.record_checkpoint_event("u", "fixed auth bug", "completed", 0.9)
         assert "episode_closed" in result
+
+    def test_record_checkpoint_event_reports_errors_without_hiding_progress(
+        self, kernel, monkeypatch
+    ):
+        kernel.episodes.begin_episode("u", "working on auth", "bug_fix")
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("event write failed")
+
+        monkeypatch.setattr(kernel.episodes, "record_event", _boom)
+
+        result = kernel.record_checkpoint_event("u", "fixed auth bug", "completed", 0.9)
+
+        assert "episode_closed" in result
+        assert any(
+            err["component"] == "episodes.record_event"
+            and "event write failed" in err["error"]
+            for err in result.get("errors", [])
+        )
 
     def test_update_task_on_checkpoint(self, kernel):
         result = kernel.update_task_on_checkpoint(
@@ -119,14 +153,81 @@ class TestCognitionKernel:
         )
         assert "task_created" in result or "task_completed" in result
 
+    def test_update_task_on_checkpoint_surfaces_step_outcome_errors(
+        self, kernel, monkeypatch
+    ):
+        def _step_result(*_args, **_kwargs):
+            return {
+                "policies_updated": 0,
+                "errors": [
+                    {
+                        "operation": "record_step_outcome",
+                        "component": "policies.record_outcome",
+                        "error": "RuntimeError: step policy write failed",
+                    }
+                ],
+            }
+
+        monkeypatch.setattr(kernel, "record_step_outcome", _step_result)
+
+        result = kernel.update_task_on_checkpoint(
+            user_id="u",
+            goal="Fix login crash",
+            plan=["reproduce", "debug", "fix"],
+            task_type="bug_fix",
+            status="completed",
+            outcome_score=0.8,
+            summary="Fixed the crash",
+        )
+
+        assert "task_created" in result or "task_completed" in result
+        assert any(
+            err["component"] == "policies.record_outcome"
+            and "step policy write failed" in err["error"]
+            for err in result.get("errors", [])
+        )
+
     def test_selective_forget(self, kernel):
         # Should not error on empty state
         result = kernel.selective_forget("u")
         assert isinstance(result, dict)
 
+    def test_selective_forget_reports_store_failures(self, kernel, monkeypatch):
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("belief pruning failed")
+
+        monkeypatch.setattr(kernel.beliefs, "prune_retracted", _boom)
+
+        result = kernel.selective_forget("u")
+
+        assert any(
+            err["component"] == "beliefs.prune_retracted"
+            and "belief pruning failed" in err["error"]
+            for err in result.get("errors", [])
+        )
+
     def test_flush(self, kernel):
         kernel.intentions.store("u", "test intention")
         kernel.flush()  # Should not error
+
+    def test_flush_raises_aggregated_store_failures(self, kernel, monkeypatch):
+        def _task_boom():
+            raise RuntimeError("task flush failed")
+
+        def _policy_boom():
+            raise RuntimeError("policy flush failed")
+
+        monkeypatch.setattr(kernel.tasks, "flush", _task_boom)
+        monkeypatch.setattr(kernel.policies, "flush", _policy_boom)
+
+        with pytest.raises(RuntimeError) as exc_info:
+            kernel.flush()
+
+        message = str(exc_info.value)
+        assert "tasks.flush" in message
+        assert "task flush failed" in message
+        assert "policies.flush" in message
+        assert "policy flush failed" in message
 
     def test_get_stats(self, kernel):
         stats = kernel.get_stats()
@@ -135,6 +236,41 @@ class TestCognitionKernel:
         assert "beliefs" in stats
         assert "policies" in stats
         assert "intentions" in stats
+
+    def test_get_stats_reports_store_failures(self, kernel, monkeypatch):
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("task stats unavailable")
+
+        monkeypatch.setattr(kernel.tasks, "get_stats", _boom)
+
+        stats = kernel.get_stats()
+
+        assert "error" in stats["tasks"]
+        assert "task stats unavailable" in stats["tasks"]["error"]
+        assert any(
+            err["component"] == "tasks.get_stats"
+            and "task stats unavailable" in err["error"]
+            for err in stats.get("errors", [])
+        )
+
+    def test_record_learning_outcomes_reports_component_failures(
+        self, kernel, monkeypatch
+    ):
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("policy matching failed")
+
+        monkeypatch.setattr(kernel.policies, "match_policies", _boom)
+
+        result = kernel.record_learning_outcomes(
+            "u", "bug_fix", success=True, baseline_score=0.5, actual_score=0.8
+        )
+
+        assert result["policies_updated"] == 0
+        assert any(
+            err["component"] == "policies.match_policies"
+            and "policy matching failed" in err["error"]
+            for err in result.get("errors", [])
+        )
 
     def test_repr(self, kernel):
         r = repr(kernel)
@@ -206,6 +342,57 @@ class TestBuddhiKernelIntegration:
         buddhi, kernel = buddhi_with_kernel
         kernel.intentions.store("u", "test")
         buddhi.flush()  # Should flush kernel too
+
+    def test_buddhi_flush_raises_aggregated_failures(
+        self, buddhi_with_kernel, monkeypatch
+    ):
+        buddhi, kernel = buddhi_with_kernel
+
+        class BrokenContrastive:
+            def flush(self):
+                raise RuntimeError("contrastive flush failed")
+
+        def _kernel_boom():
+            raise RuntimeError("kernel flush failed")
+
+        buddhi._contrastive = BrokenContrastive()
+        monkeypatch.setattr(kernel, "flush", _kernel_boom)
+
+        with pytest.raises(RuntimeError) as exc_info:
+            buddhi.flush()
+
+        message = str(exc_info.value)
+        assert "kernel.flush" in message
+        assert "kernel flush failed" in message
+        assert "contrastive.flush" in message
+        assert "contrastive flush failed" in message
+
+    def test_buddhi_get_stats_reports_errors_once(
+        self, buddhi_with_kernel
+    ):
+        buddhi, _kernel = buddhi_with_kernel
+
+        class CountingContrastive:
+            def __init__(self):
+                self.calls = 0
+
+            def get_stats(self):
+                self.calls += 1
+                raise RuntimeError("contrastive stats unavailable")
+
+        store = CountingContrastive()
+        buddhi._contrastive = store
+
+        stats = buddhi.get_stats()
+
+        assert store.calls == 1
+        assert "error" in stats["contrastive"]
+        assert "contrastive stats unavailable" in stats["contrastive"]["error"]
+        assert any(
+            err["component"] == "contrastive.get_stats"
+            and "contrastive stats unavailable" in err["error"]
+            for err in stats.get("errors", [])
+        )
 
 
 # ── Dhee + Kernel integration ──────────────────────────────────────
@@ -352,6 +539,38 @@ class TestStepPolicyExtraction:
         step_policy = [p for p in policies if p.granularity.value == "step"][0]
         assert step_policy.apply_count == 1
         assert step_policy.success_count == 1
+
+    def test_record_step_outcome_reports_policy_write_failures(
+        self, tmp_path, monkeypatch
+    ):
+        """record_step_outcome returns explicit errors for policy update failures."""
+        from dhee.core.cognition_kernel import CognitionKernel
+
+        kernel = CognitionKernel(data_dir=str(tmp_path / "kernel"))
+        kernel.policies.create_step_policy(
+            user_id="u",
+            name="check_imports_fix",
+            task_types=["bug_fix"],
+            step_patterns=["check", "imports"],
+            approach="trace call stack instead",
+        )
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("policy write failed")
+
+        monkeypatch.setattr(kernel.policies, "record_outcome", _boom)
+
+        result = kernel.record_step_outcome(
+            "u", "bug_fix", "check imports first",
+            success=True, actual_score=0.8,
+        )
+
+        assert result["policies_updated"] == 0
+        assert any(
+            err["component"] == "policies.record_outcome"
+            and "policy write failed" in err["error"]
+            for err in result.get("errors", [])
+        )
 
 
 # ── Utility Tracking (Phase 3) ───────────────────────────────────
@@ -525,6 +744,65 @@ class TestOperationalContext:
         # Full has many keys, operational is a subset
         assert "user_id" in full
         assert "user_id" not in op
+
+    def test_hyper_context_surfaces_state_errors(self, tmp_path, monkeypatch):
+        """Buddhi should expose degraded kernel state instead of hiding it."""
+        from dhee.core.buddhi import Buddhi
+        from dhee.core.cognition_kernel import CognitionKernel
+
+        kernel = CognitionKernel(data_dir=str(tmp_path / "buddhi"))
+        buddhi = Buddhi(data_dir=str(tmp_path / "buddhi"), kernel=kernel)
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("intentions unavailable")
+
+        monkeypatch.setattr(kernel.intentions, "check_triggers", _boom)
+
+        ctx = buddhi.get_hyper_context(user_id="u", task_description="bug_fix")
+        payload = ctx.to_dict()
+
+        assert len(payload["state_errors"]) >= 1
+        assert any("intentions unavailable" in msg for msg in payload["state_errors"])
+        assert any("Cognitive state degraded" in warning for warning in payload["warnings"])
+
+    def test_hyper_context_surfaces_context_assembly_errors(
+        self, tmp_path, monkeypatch
+    ):
+        """Buddhi should expose degraded non-kernel context assembly too."""
+        from dhee.core import kernel as handoff_kernel
+        from dhee.core.buddhi import Buddhi
+        from dhee.core.cognition_kernel import CognitionKernel
+
+        kernel = CognitionKernel(data_dir=str(tmp_path / "buddhi"))
+        buddhi = Buddhi(data_dir=str(tmp_path / "buddhi"), kernel=kernel)
+
+        class BrokenSkillStore:
+            def search(self, *_args, **_kwargs):
+                raise RuntimeError("skill store unavailable")
+
+        class BrokenMemory:
+            def __init__(self):
+                self.skill_store = BrokenSkillStore()
+
+            def search(self, *_args, **_kwargs):
+                raise RuntimeError("memory search unavailable")
+
+        def _handoff_boom(*_args, **_kwargs):
+            raise RuntimeError("handoff store offline")
+
+        monkeypatch.setattr(handoff_kernel, "get_last_session", _handoff_boom)
+
+        ctx = buddhi.get_hyper_context(
+            user_id="u",
+            task_description="bug_fix",
+            memory=BrokenMemory(),
+        )
+        payload = ctx.to_dict()
+
+        assert any("handoff store offline" in msg for msg in payload["state_errors"])
+        assert any("skill store unavailable" in msg for msg in payload["state_errors"])
+        assert any("memory search unavailable" in msg for msg in payload["state_errors"])
+        assert any("Context assembly degraded" in warning for warning in payload["warnings"])
 
     def test_critical_blockers_surfaced(self, tmp_path):
         """Blockers from active task appear in critical_blockers."""

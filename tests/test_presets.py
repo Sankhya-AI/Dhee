@@ -20,8 +20,8 @@ class TestMemoryPresets:
     def test_smart_detects_provider(self):
         c = MemoryConfig.smart()
         # Smart should use the best available provider
-        assert c.embedder.provider in {"gemini", "openai", "ollama", "simple"}
-        assert c.llm.provider in {"gemini", "openai", "ollama", "mock"}
+        assert c.embedder.provider in {"gemini", "openai", "ollama", "nvidia", "qwen", "simple"}
+        assert c.llm.provider in {"dhee", "gemini", "openai", "ollama", "nvidia", "mock"}
 
     def test_smart_no_scenes(self):
         c = MemoryConfig.smart()

@@ -156,6 +156,7 @@ class _ClientHandler(socketserver.StreamRequestHandler):
             result = bus.get_session(
                 session_id=req.get("session_id"),
                 agent_id=req.get("agent_id"),
+                repo=req.get("repo"),
             )
             return {"ok": True, "session": result}
 
@@ -163,6 +164,7 @@ class _ClientHandler(socketserver.StreamRequestHandler):
             result = bus.list_sessions(
                 agent_id=req.get("agent_id"),
                 status=req.get("status"),
+                repo=req.get("repo"),
             )
             return {"ok": True, "sessions": result}
 
@@ -405,16 +407,32 @@ class BusClient:
         self,
         session_id: Optional[str] = None,
         agent_id: Optional[str] = None,
+        repo: Optional[str] = None,
     ) -> Optional[Dict]:
-        resp = self._send({"op": "get_session", "session_id": session_id, "agent_id": agent_id})
+        resp = self._send(
+            {
+                "op": "get_session",
+                "session_id": session_id,
+                "agent_id": agent_id,
+                "repo": repo,
+            }
+        )
         return resp.get("session")
 
     def list_sessions(
         self,
         agent_id: Optional[str] = None,
         status: Optional[str] = None,
+        repo: Optional[str] = None,
     ) -> List[Dict]:
-        resp = self._send({"op": "list_sessions", "agent_id": agent_id, "status": status})
+        resp = self._send(
+            {
+                "op": "list_sessions",
+                "agent_id": agent_id,
+                "status": status,
+                "repo": repo,
+            }
+        )
         return resp.get("sessions", [])
 
     def update_session(self, session_id: str, **kwargs: Any) -> None:

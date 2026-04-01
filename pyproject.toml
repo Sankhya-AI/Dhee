@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dhee"
-version = "3.0.0"
+version = "3.0.1"
 description = "Cognition layer for AI agents — persistent memory, performance tracking, and insight synthesis"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -27,7 +27,6 @@ dependencies = [
     "pydantic>=2.0",
     "requests>=2.28.0",
     "pyyaml>=6.0",
-    "dhee-accel>=0.1.0",
 ]
 
 [project.optional-dependencies]
@@ -56,13 +55,14 @@ all = [
     "mcp>=1.0.0",
     "fastapi>=0.100.0",
     "uvicorn>=0.20.0",
-    "dhee-accel>=0.1.0",
     "engram-bus>=0.1.0",
     "llama-cpp-python>=0.3",
     "sentence-transformers>=3.0",
 ]
 dev = [
     "pytest>=7.0.0",
+    "pytest-asyncio>=0.23.0",
+    "openai>=1.0.0",
     "build>=1.0.0",
     "twine>=5.0.0",
 ]
@@ -81,4 +81,4 @@ Changelog = "https://github.com/Sankhya-AI/Dhee/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["dhee*"]
+include = ["dhee*", "engram*"]

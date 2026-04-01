@@ -266,6 +266,78 @@ class TestHandoffQuality:
         assert session_b is None or session_b.get("agent_id") != "agent-a", \
             "Agent B should not find Agent A's session"
 
+    def test_handoff_lookup_respects_repo(self):
+        """Repo-scoped handoff lookup should not bleed across repositories."""
+        if not self.has_bus:
+            pytest.skip("engram-bus not installed")
+
+        from dhee.core.kernel import save_session_digest, get_last_session
+
+        save_session_digest(
+            task_summary="Repo A work",
+            agent_id="agent-repo",
+            repo="/tmp/repo-a",
+            status="paused",
+            db_path=self.db_path,
+        )
+        save_session_digest(
+            task_summary="Repo B work",
+            agent_id="agent-repo",
+            repo="/tmp/repo-b",
+            status="paused",
+            db_path=self.db_path,
+        )
+
+        session_a = get_last_session(
+            agent_id="agent-repo",
+            repo="/tmp/repo-a",
+            fallback_log_recovery=False,
+            db_path=self.db_path,
+        )
+        session_b = get_last_session(
+            agent_id="agent-repo",
+            repo="/tmp/repo-b",
+            fallback_log_recovery=False,
+            db_path=self.db_path,
+        )
+
+        assert session_a is not None
+        assert session_a["repo"] == "/tmp/repo-a"
+        assert "Repo A" in session_a["task_summary"]
+        assert session_b is not None
+        assert session_b["repo"] == "/tmp/repo-b"
+        assert "Repo B" in session_b["task_summary"]
+
+    def test_handoff_helpers_accept_continuity_kwargs(self):
+        """Continuity helper kwargs should be accepted even if unused internally."""
+        if not self.has_bus:
+            pytest.skip("engram-bus not installed")
+
+        from dhee.core.kernel import save_session_digest, get_last_session
+
+        save_session_digest(
+            task_summary="Continuity compatibility session",
+            agent_id="agent-compat",
+            repo="/tmp/test-repo",
+            status="paused",
+            db_path=self.db_path,
+            user_id="default",
+            requester_agent_id="codex",
+        )
+
+        session = get_last_session(
+            agent_id="agent-compat",
+            repo="/tmp/test-repo",
+            fallback_log_recovery=False,
+            db_path=self.db_path,
+            user_id="default",
+            requester_agent_id="codex",
+        )
+
+        assert session is not None
+        assert session["repo"] == "/tmp/test-repo"
+        assert "Continuity compatibility" in session["task_summary"]
+
     def test_cognitive_state_in_handoff(self):
         """Store beliefs + policies + intentions. Do checkpoint. Verify
         get_cognitive_state() returns these primitives intact."""

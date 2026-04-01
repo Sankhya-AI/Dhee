@@ -95,7 +95,10 @@ async def handoff_checkpoint(request: CheckpointRequest):
         bus = _get_bus()
 
         # Find or create a session for this agent
-        session = bus.get_session(agent_id=request.agent_id)
+        session = bus.get_session(
+            agent_id=request.agent_id,
+            repo=request.repo_path,
+        )
         if session is None:
             sid = bus.save_session(
                 agent_id=request.agent_id,

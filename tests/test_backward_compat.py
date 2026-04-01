@@ -21,6 +21,21 @@ def db():
 class TestMemoryBackwardCompat:
     """Existing memory CRUD operations should work unchanged."""
 
+    def test_top_level_engram_import(self):
+        from dhee import Engram
+
+        memory = Engram(provider="mock", in_memory=True)
+
+        assert memory is not None
+
+    def test_legacy_engram_namespace_imports(self):
+        from engram.configs.base import MemoryConfig
+        from engram.memory.main import FullMemory, Memory
+
+        assert MemoryConfig is not None
+        assert FullMemory is not None
+        assert Memory is FullMemory
+
     def test_add_memory(self, db):
         mem_id = db.add_memory({
             "memory": "The user prefers dark mode",

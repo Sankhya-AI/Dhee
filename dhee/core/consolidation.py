@@ -18,15 +18,29 @@ because the content was already enriched when it entered active memory.
 """
 
 import logging
-from typing import Any, Dict, TYPE_CHECKING
+from typing import Any, Dict, Protocol, TYPE_CHECKING
 
 from dhee.configs.active import ActiveMemoryConfig
-from dhee.core.active_memory import ActiveMemoryStore
 
 if TYPE_CHECKING:
     from dhee.memory.main import FullMemory
 
 logger = logging.getLogger(__name__)
+
+
+class ActiveMemoryStore(Protocol):
+    """Structural contract for consolidation's active-memory dependency."""
+
+    def get_consolidation_candidates(
+        self,
+        *,
+        min_age_seconds: int,
+        min_reads: int,
+    ) -> list[Dict[str, Any]]:
+        ...
+
+    def mark_consolidated(self, signal_ids: list[str]) -> None:
+        ...
 
 
 class ConsolidationEngine:

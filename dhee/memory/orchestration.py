@@ -17,9 +17,7 @@ from dhee.core.answer_orchestration import (
     build_map_candidates,
     build_query_plan,
     deterministic_inconsistency_check,
-    extract_atomic_facts,
     is_low_confidence_answer,
-    reduce_atomic_facts,
     render_fact_context,
 )
 
@@ -47,6 +45,8 @@ class OrchestrationEngine:
         profile_processor_fn: Callable,
         evolution_layer_fn: Callable,
         llm_fn: Callable,
+        extract_atomic_facts_fn: Callable,
+        reduce_atomic_facts_fn: Callable,
     ):
         self._config = config
         self._db = db
@@ -59,6 +59,8 @@ class OrchestrationEngine:
         self._profile_processor_fn = profile_processor_fn
         self._evolution_layer_fn = evolution_layer_fn
         self._llm_fn = llm_fn
+        self._extract_atomic_facts_fn = extract_atomic_facts_fn
+        self._reduce_atomic_facts_fn = reduce_atomic_facts_fn
         # Internal state
         self._reducer_cache: Dict[str, Dict[str, Any]] = {}
         self._guardrail_auto_disabled: bool = False
@@ -676,7 +678,11 @@ class OrchestrationEngine:
         reason_codes: List[str] = []
         active_orchestrator_llm = orchestrator_llm or self._llm_fn()
         orch_cfg = getattr(self._config, "orchestration", None)
-        max_query_llm_calls = int(getattr(orch_cfg, "max_query_llm_calls", 2) or 2)
+        raw_max_query_llm_calls = getattr(orch_cfg, "max_query_llm_calls", 2)
+        try:
+            max_query_llm_calls = int(raw_max_query_llm_calls if raw_max_query_llm_calls is not None else 2)
+        except (TypeError, ValueError):
+            max_query_llm_calls = 2
 
         coverage_sufficient = bool((coverage or {}).get("sufficient"))
         if coverage_sufficient:
@@ -697,12 +703,16 @@ class OrchestrationEngine:
         # NOTE: Event-first reduction (Phase 2) disabled — episodic events
         # alone lack sufficient coverage for accurate multi-session counting.
         # The LLM-based map-reduce path below is more reliable.
+        if mode == "strict":
+            mode_requires_map_reduce = True
+        else:
+            mode_requires_map_reduce = (not coverage_sufficient) or inconsistency_detected
 
         should_run_map_reduce = bool(
             query_plan.should_map_reduce
             and active_orchestrator_llm is not None
             and results
-            and (mode in ("strict", "hybrid") or not coverage_sufficient or inconsistency_detected)
+            and mode_requires_map_reduce
         )
         if query_plan.should_map_reduce and active_orchestrator_llm is None:
             reason_codes.append("no_orchestrator_llm")
@@ -733,14 +743,14 @@ class OrchestrationEngine:
                     per_candidate_max_chars=map_max_chars_value,
                 )
                 if llm_calls_used < float(max_query_llm_calls):
-                    facts = extract_atomic_facts(
+                    facts = self._extract_atomic_facts_fn(
                         llm=active_orchestrator_llm,
                         question=query,
                         question_type=question_type,
                         question_date=question_date,
                         candidates=map_candidates,
                     )
-                    reduced_answer, _ = reduce_atomic_facts(
+                    reduced_answer, _ = self._reduce_atomic_facts_fn(
                         question=query,
                         intent=query_plan.intent,
                         facts=facts,
@@ -808,14 +818,14 @@ class OrchestrationEngine:
                     per_candidate_max_chars=map_max_chars_value,
                 )
                 if llm_calls_used < float(max_query_llm_calls):
-                    facts = extract_atomic_facts(
+                    facts = self._extract_atomic_facts_fn(
                         llm=active_orchestrator_llm,
                         question=query,
                         question_type=question_type,
                         question_date=question_date,
                         candidates=map_candidates,
                     )
-                    reduced_answer, _ = reduce_atomic_facts(
+                    reduced_answer, _ = self._reduce_atomic_facts_fn(
                         question=query,
                         intent=query_plan.intent,
                         facts=facts,

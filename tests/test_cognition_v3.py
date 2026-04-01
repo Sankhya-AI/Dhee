@@ -49,6 +49,20 @@ class TestExperienceStorage:
         stats = e.stats()
         assert isinstance(stats, dict)
 
+    def test_in_memory_engram_isolates_cognition_state(self, tmpdir):
+        """In-memory Engram should keep cognition sidecars under its temp root."""
+        from dhee.simple import Engram
+
+        e = Engram(provider="mock", in_memory=True, data_dir=tmpdir)
+
+        buddhi = e._memory.buddhi_layer
+        evolution = e._memory.evolution_layer
+
+        assert buddhi is not None
+        assert evolution is not None
+        assert buddhi._data_dir == os.path.join(tmpdir, "buddhi")
+        assert evolution._data_dir == tmpdir
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 2. Contrastive Pairs — closed loop
