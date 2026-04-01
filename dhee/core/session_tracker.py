@@ -13,11 +13,44 @@ Explicit calls still work and override auto-inferred values.
 from __future__ import annotations
 
 import logging
+import os
+import platform
 import re
+import subprocess
+import sys
 import time
 from typing import Any, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
+
+
+# ── Environment snapshot (zero LLM, pure os/subprocess) ─────────────
+
+def capture_environment() -> Dict[str, str]:
+    """Capture a lightweight environment snapshot. Zero LLM calls.
+
+    Returns platform, Python version, cwd, git branch, and agent_id.
+    Safe to call in any environment — all fields have fallbacks.
+    """
+    env: Dict[str, str] = {
+        "platform": platform.platform(),
+        "python": sys.version.split()[0],
+        "cwd": os.getcwd(),
+        "agent_id": os.environ.get("DHEE_AGENT_ID", "unknown"),
+    }
+
+    # Git branch (best-effort, 2s timeout)
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=2,
+        )
+        if result.returncode == 0:
+            env["git_branch"] = result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+
+    return env
 
 
 # ── Memory tiers (Shruti / Smriti / Vasana) ──────────────────────────
@@ -152,8 +185,8 @@ class SessionTracker:
             self._start_session(now)
             if self.AUTO_CONTEXT and not self._context_loaded:
                 signals["needs_auto_context"] = True
-                # Infer task from content
                 signals["inferred_task"] = content[:200]
+                signals["environment"] = capture_environment()
 
         # Track
         self._last_activity_time = now
@@ -178,6 +211,7 @@ class SessionTracker:
             if self.AUTO_CONTEXT and not self._context_loaded:
                 signals["needs_auto_context"] = True
                 signals["inferred_task"] = query[:200]
+                signals["environment"] = capture_environment()
 
         self._last_activity_time = now
         self._op_count += 1

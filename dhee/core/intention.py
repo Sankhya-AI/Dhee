@@ -218,6 +218,15 @@ class IntentionStore:
         intention.outcome_score = outcome_score
         self._save()
 
+    def get_triggered_pending_feedback(self, user_id: str) -> List[Intention]:
+        """Get triggered intentions that haven't received outcome feedback yet."""
+        return [
+            i for i in self._intentions.values()
+            if i.user_id == user_id
+            and i.status == "triggered"
+            and i.was_useful is None
+        ]
+
     def get_stats(self, user_id: Optional[str] = None) -> Dict[str, Any]:
         """Stats for health checks."""
         intentions = list(self._intentions.values())

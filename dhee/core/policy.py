@@ -804,6 +804,18 @@ class PolicyStore:
             ),
         }
 
+    def get_user_policies(self, user_id: str) -> List[PolicyCase]:
+        """Get all policies for a user (public access, no internals)."""
+        return [p for p in self._policies.values() if p.user_id == user_id]
+
+    def decay_utility(self, policy_id: str, factor: float = 0.8) -> None:
+        """Decay a policy's utility by a factor. For cross-structure feedback."""
+        policy = self._policies.get(policy_id)
+        if policy:
+            policy.utility *= factor
+            policy.updated_at = time.time()
+            self._save_policy(policy)
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------

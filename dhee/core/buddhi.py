@@ -1024,63 +1024,22 @@ class Buddhi:
             except Exception:
                 pass
 
+        # Delegate cross-structure learning to kernel
+        # Kernel handles: policy outcomes, step extraction, belief-policy decay,
+        # intention feedback, episode connections
+        success = what_worked is not None
         if what_worked:
-            try:
-                matched = self._kernel.policies.match_policies(
-                    user_id, task_type, f"{task_type} task",
-                )
-                for policy in matched:
-                    self._kernel.policies.record_outcome(
-                        policy.id,
-                        success=True,
-                        baseline_score=baseline_score,
-                        actual_score=outcome_score,
-                    )
-
-                completed = self._kernel.tasks.get_tasks_by_type(
-                    user_id, task_type, limit=10,
-                )
-                if len(completed) >= 3:
-                    task_dicts = [t.to_dict() for t in completed]
-                    self._kernel.policies.extract_from_tasks(
-                        user_id, task_dicts, task_type,
-                    )
-                    # Step-level policy extraction from failure patterns
-                    self._kernel.policies.extract_step_policies(
-                        user_id, task_dicts, task_type,
-                    )
-            except Exception:
-                pass
-
+            self._kernel.record_learning_outcomes(
+                user_id, task_type, success=True,
+                baseline_score=baseline_score, actual_score=outcome_score,
+            )
         if what_failed:
-            try:
-                matched = self._kernel.policies.match_policies(
-                    user_id, task_type, f"{task_type} task",
-                )
-                for policy in matched:
-                    self._kernel.policies.record_outcome(
-                        policy.id,
-                        success=False,
-                        baseline_score=baseline_score,
-                        actual_score=outcome_score,
-                    )
-            except Exception:
-                pass
+            self._kernel.record_learning_outcomes(
+                user_id, task_type, success=False,
+                baseline_score=baseline_score, actual_score=outcome_score,
+            )
 
-            # Extract step policies from failure patterns
-            try:
-                completed = self._kernel.tasks.get_tasks_by_type(
-                    user_id, task_type, limit=10,
-                )
-                if len(completed) >= 3:
-                    task_dicts = [t.to_dict() for t in completed]
-                    self._kernel.policies.extract_step_policies(
-                        user_id, task_dicts, task_type,
-                    )
-            except Exception:
-                pass
-
-        # Update beliefs based on outcomes (via kernel)
+        # Update beliefs based on outcomes (buddhi-owned: text-based matching)
         if what_worked:
             try:
                 relevant = self._kernel.beliefs.get_relevant_beliefs(
@@ -1105,62 +1064,30 @@ class Buddhi:
             except Exception:
                 pass
 
-            # Cross-structure: when beliefs are challenged, check dependent policies
-            try:
-                for belief in relevant:
-                    if belief.confidence < 0.3:
-                        claim_words = set(belief.claim.lower().split()[:5])
-                        for policy in self._kernel.policies._policies.values():
-                            if policy.user_id != user_id:
-                                continue
-                            approach_words = set(policy.action.approach.lower().split())
-                            if len(claim_words & approach_words) >= 2:
-                                policy.utility *= 0.8
-                                policy.updated_at = time.time()
-            except Exception:
-                pass
-
-        # Record outcomes on matched insights (utility tracking)
-        if what_worked:
-            try:
-                matched_insights = self._get_relevant_insights(
-                    user_id, f"{task_type} task",
+        # Buddhi-owned: insight utility tracking (buddhi owns insights)
+        try:
+            matched_insights = self._get_relevant_insights(
+                user_id, f"{task_type} task",
+            )
+            for insight in matched_insights[:5]:
+                insight.record_outcome(
+                    success=success,
+                    baseline_score=baseline_score,
+                    actual_score=outcome_score,
                 )
-                for insight in matched_insights[:5]:
-                    insight.record_outcome(
-                        success=True,
-                        baseline_score=baseline_score,
-                        actual_score=outcome_score,
-                    )
-                self._save_insights()
-            except Exception:
-                pass
+            self._save_insights()
+        except Exception:
+            pass
 
-        if what_failed:
-            try:
-                matched_insights = self._get_relevant_insights(
-                    user_id, f"{task_type} task",
-                )
-                for insight in matched_insights[:5]:
-                    insight.record_outcome(
-                        success=False,
-                        baseline_score=baseline_score,
-                        actual_score=outcome_score,
-                    )
-                self._save_insights()
-            except Exception:
-                pass
-
-        # Record outcomes on matched contrastive pairs
+        # Buddhi-owned: contrastive pair utility (buddhi owns contrastive store)
         try:
             store = self._get_contrastive()
             matched_pairs = store.retrieve_contrasts(
                 f"{task_type} task", user_id=user_id, limit=5,
             )
-            task_succeeded = what_worked is not None
             for pair in matched_pairs:
                 pair.record_outcome(
-                    success=task_succeeded,
+                    success=success,
                     baseline_score=baseline_score,
                     actual_score=outcome_score,
                 )
@@ -1168,7 +1095,7 @@ class Buddhi:
         except Exception:
             pass
 
-        # Cross-structure: positive policy delta -> reinforce related heuristics
+        # Buddhi-owned: heuristic reinforcement from positive policy deltas
         if what_worked:
             try:
                 matched_policies = self._kernel.policies.match_policies(
@@ -1189,26 +1116,6 @@ class Buddhi:
                         distiller._save_all()
             except Exception:
                 pass
-
-        # Record outcomes on recently triggered intentions
-        try:
-            triggered = [
-                i for i in self._kernel.intentions._intentions.values()
-                if i.user_id == user_id
-                and i.status == "triggered"
-                and i.was_useful is None
-            ]
-            task_succeeded = what_worked is not None and (
-                outcome_score is None or outcome_score >= 0.5
-            )
-            for intention in triggered:
-                self._kernel.intentions.record_outcome(
-                    intention.id,
-                    useful=task_succeeded,
-                    outcome_score=outcome_score,
-                )
-        except Exception:
-            pass
 
         return new_insights
 
