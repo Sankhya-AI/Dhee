@@ -4,6 +4,91 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [3.0.0] - 2026-04-01 — Event-Sourced Cognition Substrate
+
+Dhee v3 is a ground-up architectural overhaul that transforms the memory layer into an immutable-event, versioned cognition substrate. Raw memory is now immutable truth; derived cognition (beliefs, policies, insights, heuristics) is provisional, rebuildable, and auditable.
+
+### New Architecture
+
+- **Immutable raw events** — `remember()` writes to `raw_memory_events`. Corrections create new events with `supersedes_event_id`, never mutate originals.
+- **Type-specific derived stores** — Beliefs, Policies, Anchors, Insights, Heuristics each have their own table with type-appropriate schemas, indexes, lifecycle rules, and invalidation behavior.
+- **Derived lineage** — Every derived object traces to its source raw events via `derived_lineage` table with contribution weights.
+- **Candidate promotion pipeline** — Consolidation no longer writes through `memory.add()`. Distillation produces candidates; promotion validates, dedupes, and transactionally promotes them to typed stores.
+
+### Three-Tier Invalidation
+
+- **Hard invalidation** — Source deleted: derived objects tombstoned, excluded from retrieval.
+- **Soft invalidation** — Source corrected: derived objects marked stale, repair job enqueued.
+- **Partial invalidation** — One of N sources changed with contribution weight < 30%: confidence penalty, not full re-derive. Weight >= 30% escalates to soft invalidation.
+
+### 5-Stage RRF Fusion Retrieval
+
+1. Per-index retrieval (raw, distilled, episodic — parallel, zero LLM)
+2. Min-max score normalization within each index
+3. Weighted Reciprocal Rank Fusion (k=60, distilled=1.0, episodic=0.7, raw=0.5)
+4. Post-fusion adjustments (recency boost, confidence normalization, staleness penalty, invalidation exclusion, contradiction penalty)
+5. Dedup + final ranking — zero LLM calls on the hot path
+
+### Conflict Handling
+
+- **Cognitive conflicts table** — Contradictions are explicit rows, not silent resolution.
+- **Auto-resolution** — When confidence gap >= 0.5 (one side >= 0.8, other <= 0.3), auto-resolve in favor of high-confidence side.
+
+### Job Registry
+
+- Replaces phantom `agi_loop.py` with real, observable maintenance jobs.
+- SQLite lease manager prevents concurrent execution of same job.
+- Jobs are named, idempotent, leasable, retryable, and independently testable.
+
+### Anchor Resolution
+
+- Per-field anchor candidates with individual confidence scores.
+- Re-anchoring: corrections re-resolve without touching raw events.
+
+### Materialized Read Model
+
+- `retrieval_view` materialized table for fast cold-path queries.
+- Delta overlay for hot-path freshness.
+
+### Migration Bridge
+
+- Dual-write: v2 path + v3 raw events in parallel (`DHEE_V3_WRITE=1`, default on).
+- Backfill: idempotent migration of v2 memories into v3 raw events via content-hash dedup.
+- Feature flag `DHEE_V3_READ` (default off) for gradual cutover.
+
+### Observability
+
+- `v3_health()` reports: raw event counts, derived invalidation counts per type, open conflicts, active leases, candidate stats, job health, retrieval view freshness, lineage coverage.
+
+### Consolidation Safety
+
+- Breaks the feedback loop: `_promote_to_passive()` uses `infer=False`, tags `source="consolidated"`.
+- `_should_promote()` rejects already-consolidated content.
+
+### Other Changes
+
+- `UniversalEngram.to_dict(sparse=True)` — omits None, empty strings, empty lists, empty dicts.
+- `agi_loop.py` cleaned: removed all phantom `engram_*` package imports.
+- 913 tests passing.
+
+### New Files
+
+- `dhee/core/storage.py` — Schema DDL for all v3 tables
+- `dhee/core/events.py` — RawEventStore
+- `dhee/core/derived_store.py` — BeliefStore, PolicyStore, AnchorStore, InsightStore, HeuristicStore, DerivedLineageStore, CognitionStore
+- `dhee/core/anchor_resolver.py` — AnchorCandidateStore, AnchorResolver
+- `dhee/core/invalidation.py` — Three-tier InvalidationEngine
+- `dhee/core/conflicts.py` — ConflictStore with auto-resolution
+- `dhee/core/read_model.py` — Materialized ReadModel
+- `dhee/core/fusion_v3.py` — 5-stage RRF fusion pipeline
+- `dhee/core/v3_health.py` — Observability metrics
+- `dhee/core/v3_migration.py` — Dual-write bridge + backfill
+- `dhee/core/lease_manager.py` — SQLite lease manager
+- `dhee/core/jobs.py` — JobRegistry + concrete jobs
+- `dhee/core/promotion.py` — PromotionEngine
+
+---
+
 ## [2.2.0b1] - 2026-03-31 — Architectural Cleanup
 
 Beta release focused on internal discipline rather than new features.

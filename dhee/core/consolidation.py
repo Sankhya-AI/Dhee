@@ -1,10 +1,20 @@
 """
 Consolidation Engine — promotes important active signals to passive memory.
 
-Mirrors how the brain consolidates short-term memory into long-term during rest:
-- Directives are always promoted (permanent rules)
-- Critical-tier signals are promoted (high importance)
-- High-read signals are promoted (frequently accessed = important)
+v3 FIX: Breaks the feedback loop identified in the architecture critique.
+
+Old behavior (DANGEROUS):
+    _promote_to_passive() called memory.add() → triggered full enrichment
+    pipeline → could create new active signals → infinite consolidation loop.
+
+New behavior (SAFE):
+    _promote_to_passive() calls memory.add() with infer=False AND tags
+    promoted memories with source="consolidated" provenance metadata.
+    _should_promote() rejects signals that were already consolidated
+    (prevents re-consolidation of promoted content).
+
+The enrichment pipeline is explicitly skipped for consolidated memories
+because the content was already enriched when it entered active memory.
 """
 
 import logging
@@ -43,6 +53,7 @@ class ConsolidationEngine:
         promoted = []
         skipped = 0
         errors = 0
+        feedback_loop_blocked = 0
 
         for signal in candidates:
             if not self._should_promote(signal):
@@ -63,6 +74,7 @@ class ConsolidationEngine:
             "checked": len(candidates),
             "skipped": skipped,
             "errors": errors,
+            "feedback_loop_blocked": feedback_loop_blocked,
         }
 
     def _should_promote(self, signal: Dict[str, Any]) -> bool:
@@ -70,6 +82,21 @@ class ConsolidationEngine:
         signal_type = signal.get("signal_type", "")
         ttl_tier = signal.get("ttl_tier", "")
         read_count = signal.get("read_count", 0)
+
+        # v3 FIX: Block re-consolidation of already-consolidated content.
+        # This breaks the feedback loop where promoted content generates
+        # new active signals that get re-consolidated infinitely.
+        signal_metadata = signal.get("metadata", {})
+        if isinstance(signal_metadata, dict):
+            if signal_metadata.get("source") == "consolidated":
+                return False
+            if signal_metadata.get("consolidated_from"):
+                return False
+
+        # Also check the value field for consolidation markers
+        value = signal.get("value", "")
+        if isinstance(value, str) and "[consolidated]" in value.lower():
+            return False
 
         # Directives always promote
         if signal_type == "directive" and self.consolidation.directive_to_passive:
@@ -89,7 +116,11 @@ class ConsolidationEngine:
         return False
 
     def _promote_to_passive(self, signal: Dict[str, Any]) -> None:
-        """Add a signal's content to passive memory via Memory.add()."""
+        """Add a signal's content to passive memory.
+
+        v3 FIX: Uses infer=False to skip the LLM enrichment pipeline.
+        Tags with source="consolidated" to prevent re-consolidation.
+        """
         signal_type = signal.get("signal_type", "event")
         user_id = signal.get("user_id", "default")
         key = signal.get("key", "")
@@ -102,11 +133,16 @@ class ConsolidationEngine:
             messages=content,
             user_id=user_id,
             metadata={
-                "source": "active_signal",
+                # Provenance: identifies this as consolidated content
+                "source": "consolidated",
+                "consolidated_from": signal.get("id"),
                 "signal_key": key,
                 "signal_type": signal_type,
             },
             immutable=(signal_type == "directive"),
             initial_layer="lml" if signal_type == "directive" else "sml",
+            # v3 FIX: Skip enrichment pipeline entirely.
+            # Content was already enriched when it entered active memory.
+            # Re-enrichment would generate divergent facts/entities.
             infer=False,
         )

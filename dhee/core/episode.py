@@ -430,6 +430,10 @@ class EpisodeStore:
             return self._episodes.get(ep_id)
         return None
 
+    def get_episode(self, episode_id: str) -> Optional[Episode]:
+        """Get an episode by its ID (public access)."""
+        return self._episodes.get(episode_id)
+
     def increment_connections(self, user_id: str, count: int = 1) -> None:
         """Increment connection_count on the open episode for cross-primitive links."""
         ep = self.get_open_episode(user_id)

@@ -31,7 +31,7 @@ from dhee.configs.base import MemoryConfig, FadeMemConfig, EchoMemConfig, Catego
 # Default: CoreMemory (lightest, zero-config)
 Memory = CoreMemory
 
-__version__ = "2.2.0b1"
+__version__ = "3.0.0"
 __all__ = [
     # Memory classes
     "CoreMemory",

@@ -370,8 +370,8 @@ class UniversalEngram:
             if not fact.canonical_key:
                 fact.canonical_key = fact.make_canonical_key()
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {
+    def to_dict(self, *, sparse: bool = False) -> Dict[str, Any]:
+        d = {
             "id": self.id,
             "raw_content": self.raw_content,
             "context": self.context.to_dict(),
@@ -391,6 +391,12 @@ class UniversalEngram:
             "user_id": self.user_id,
             "metadata": self.metadata,
         }
+        if sparse:
+            d = {
+                k: v for k, v in d.items()
+                if v is not None and v != "" and v != [] and v != {}
+            }
+        return d
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "UniversalEngram":
