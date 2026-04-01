@@ -135,6 +135,10 @@ TOOLS = [
                     "type": "string",
                     "description": "User identifier (default: 'default')",
                 },
+                "operational": {
+                    "type": "boolean",
+                    "description": "If true, return compact actionable-only format for per-turn use (default: false)",
+                },
             },
         },
     ),
@@ -277,6 +281,7 @@ def _handle_context(args: Dict[str, Any]) -> Dict[str, Any]:
     return _get_plugin().context(
         task_description=args.get("task_description"),
         user_id=args.get("user_id", "default"),
+        operational=bool(args.get("operational", False)),
     )
 
 

@@ -197,19 +197,16 @@ class CognitionKernel:
 
             # Wire episode.connection_count for cross-primitive links
             try:
-                open_eps = getattr(self.episodes, '_open_episodes', {})
-                ep_id = open_eps.get(user_id)
-                if ep_id:
-                    eps_dict = getattr(self.episodes, '_episodes', {})
-                    ep = eps_dict.get(ep_id)
-                    if ep:
-                        active_task = self.tasks.get_active_task(user_id)
-                        if active_task:
-                            ep.connection_count += 1
-                        matched_policies = self.policies.match_policies(
-                            user_id, summary[:50], summary[:200], limit=3,
-                        )
-                        ep.connection_count += len(matched_policies)
+                connections = 0
+                active_task = self.tasks.get_active_task(user_id)
+                if active_task:
+                    connections += 1
+                matched_policies = self.policies.match_policies(
+                    user_id, summary[:50], summary[:200], limit=3,
+                )
+                connections += len(matched_policies)
+                if connections > 0:
+                    self.episodes.increment_connections(user_id, connections)
             except Exception:
                 pass
 
@@ -324,6 +321,114 @@ class CognitionKernel:
                 )
         except Exception:
             pass
+
+    def record_learning_outcomes(
+        self,
+        user_id: str,
+        task_type: str,
+        success: bool,
+        baseline_score: Optional[float] = None,
+        actual_score: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Cross-structure learning from task outcomes.
+
+        Handles all cross-primitive feedback that was previously scattered
+        in Buddhi.reflect(). Owns:
+        - Policy outcome recording (TASK-level)
+        - Step policy extraction from completed tasks
+        - Belief-policy interaction (challenged beliefs degrade policies)
+        - Intention outcome recording
+        - Episode connection wiring
+
+        Zero LLM calls. Pure structural feedback.
+        """
+        result: Dict[str, Any] = {
+            "policies_updated": 0,
+            "step_policies_created": 0,
+            "intentions_updated": 0,
+            "beliefs_policy_decays": 0,
+        }
+        task_desc = f"{task_type} task"
+
+        # 1. Record outcomes on matched TASK policies
+        try:
+            matched = self.policies.match_policies(
+                user_id, task_type, task_desc,
+            )
+            for policy in matched:
+                self.policies.record_outcome(
+                    policy.id,
+                    success=success,
+                    baseline_score=baseline_score,
+                    actual_score=actual_score,
+                )
+                result["policies_updated"] += 1
+        except Exception:
+            pass
+
+        # 2. Extract TASK + STEP policies from completed tasks
+        try:
+            completed = self.tasks.get_tasks_by_type(
+                user_id, task_type, limit=10,
+            )
+            if len(completed) >= 3:
+                task_dicts = [t.to_dict() for t in completed]
+                self.policies.extract_from_tasks(
+                    user_id, task_dicts, task_type,
+                )
+                step_policies = self.policies.extract_step_policies(
+                    user_id, task_dicts, task_type,
+                )
+                result["step_policies_created"] = len(step_policies)
+        except Exception:
+            pass
+
+        # 3. Belief-policy interaction: challenged beliefs degrade dependent policies
+        if not success:
+            try:
+                relevant_beliefs = self.beliefs.get_relevant_beliefs(
+                    user_id, task_desc, limit=3,
+                )
+                for belief in relevant_beliefs:
+                    if belief.confidence < 0.3:
+                        claim_words = set(belief.claim.lower().split()[:5])
+                        for policy in self.policies.get_user_policies(user_id):
+                            approach_words = set(policy.action.approach.lower().split())
+                            if len(claim_words & approach_words) >= 2:
+                                self.policies.decay_utility(policy.id, factor=0.8)
+                                result["beliefs_policy_decays"] += 1
+            except Exception:
+                pass
+
+        # 4. Intention outcome recording
+        try:
+            triggered = self.intentions.get_triggered_pending_feedback(user_id)
+            for intention in triggered:
+                self.intentions.record_outcome(
+                    intention.id,
+                    useful=success,
+                    outcome_score=actual_score,
+                )
+                result["intentions_updated"] += 1
+        except Exception:
+            pass
+
+        # 5. Episode connection wiring
+        try:
+            active_task = self.tasks.get_active_task(user_id)
+            connections = 0
+            if active_task:
+                connections += 1
+            matched_policies = self.policies.match_policies(
+                user_id, task_type, task_desc, limit=3,
+            )
+            connections += len(matched_policies)
+            if connections > 0:
+                self.episodes.increment_connections(user_id, connections)
+        except Exception:
+            pass
+
+        return result
 
     def selective_forget(
         self,

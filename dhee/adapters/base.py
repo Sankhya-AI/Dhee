@@ -90,6 +90,9 @@ class DheePlugin:
         from dhee.core.session_tracker import SessionTracker
         self._tracker = SessionTracker()
 
+        # Hook registry for harness integration
+        self._hooks: Dict[str, List[Callable]] = self._init_hooks()
+
         # Session tracking (kept for backward compat with session_start/session_end)
         self._session_id: Optional[str] = None
         self._session_start_time: Optional[float] = None
@@ -110,6 +113,46 @@ class DheePlugin:
     def buddhi(self):
         return self._buddhi
 
+    @property
+    def kernel(self):
+        """Access the CognitionKernel for direct state manipulation."""
+        return self._kernel
+
+    # ------------------------------------------------------------------
+    # Hook registry
+    # ------------------------------------------------------------------
+
+    _HOOK_EVENTS = frozenset([
+        "pre_remember", "post_remember",
+        "pre_recall", "post_recall",
+        "pre_context", "post_context",
+        "pre_checkpoint", "post_checkpoint",
+    ])
+
+    def _init_hooks(self) -> Dict[str, List[Callable]]:
+        """Create a fresh hook registry."""
+        return {event: [] for event in self._HOOK_EVENTS}
+
+    def register_hook(self, event: str, callback: Callable) -> None:
+        """Register a callback for a lifecycle event.
+
+        Events: pre_remember, post_remember, pre_recall, post_recall,
+                pre_context, post_context, pre_checkpoint, post_checkpoint.
+
+        Pre-hooks receive the arguments dict. Post-hooks receive the result dict.
+        """
+        if event not in self._hooks:
+            raise ValueError(f"Unknown hook event: {event}. Valid: {list(self._hooks.keys())}")
+        self._hooks[event].append(callback)
+
+    def _fire_hooks(self, event: str, data: Any) -> None:
+        """Fire all registered hooks for an event."""
+        for callback in self._hooks.get(event, []):
+            try:
+                callback(data)
+            except Exception:
+                logger.debug("Hook %s failed", event)
+
     # ------------------------------------------------------------------
     # Tool 1: remember
     # ------------------------------------------------------------------
@@ -126,6 +169,7 @@ class DheePlugin:
         checks for "remember to X when Y" patterns.
         """
         uid = user_id or self._user_id
+        self._fire_hooks("pre_remember", {"content": content, "user_id": uid, "metadata": metadata})
 
         # Auto-tier memory content
         from dhee.core.session_tracker import classify_tier
@@ -157,6 +201,7 @@ class DheePlugin:
         if intention:
             response["detected_intention"] = intention.to_dict()
 
+        self._fire_hooks("post_remember", response)
         return response
 
     # ------------------------------------------------------------------
@@ -171,6 +216,7 @@ class DheePlugin:
     ) -> List[Dict[str, Any]]:
         """Search memory for relevant facts. 0 LLM calls. 1 embedding."""
         uid = user_id or self._user_id
+        self._fire_hooks("pre_recall", {"query": query, "user_id": uid, "limit": limit})
         results = self._engram.search(query, user_id=uid, limit=limit)
         formatted = [
             {
@@ -185,6 +231,7 @@ class DheePlugin:
         signals = self._tracker.on_recall(query, formatted)
         self._handle_tracker_signals(signals, uid)
 
+        self._fire_hooks("post_recall", formatted)
         return formatted
 
     # ------------------------------------------------------------------
@@ -203,6 +250,9 @@ class DheePlugin:
             operational: If True, return compact actionable-only format.
         """
         uid = user_id or self._user_id
+        self._fire_hooks("pre_context", {
+            "task_description": task_description, "user_id": uid, "operational": operational,
+        })
         self._tracker.on_context(task_description)
         hyper_ctx = self._buddhi.get_hyper_context(
             user_id=uid,
@@ -210,8 +260,11 @@ class DheePlugin:
             memory=self._engram._memory,
         )
         if operational:
-            return hyper_ctx.to_operational_dict()
-        return hyper_ctx.to_dict()
+            result = hyper_ctx.to_operational_dict()
+        else:
+            result = hyper_ctx.to_dict()
+        self._fire_hooks("post_context", result)
+        return result
 
     # ------------------------------------------------------------------
     # Tool 4: checkpoint
@@ -253,6 +306,10 @@ class DheePlugin:
         8. Selective forgetting → utility-based cleanup
         """
         uid = user_id or self._user_id
+        self._fire_hooks("pre_checkpoint", {
+            "summary": summary, "user_id": uid, "task_type": task_type,
+            "outcome_score": outcome_score, "status": status,
+        })
         self._tracker.on_checkpoint()
 
         # Auto-fill task_type if not provided
@@ -269,6 +326,7 @@ class DheePlugin:
                 what_worked = outcome.get("what_worked")
 
         result: Dict[str, Any] = {}
+        score = max(0.0, min(1.0, float(outcome_score))) if outcome_score is not None else None
 
         # 1. Session digest
         try:
@@ -298,8 +356,7 @@ class DheePlugin:
                 pass
 
         # 3. Outcome recording
-        if task_type and outcome_score is not None:
-            score = max(0.0, min(1.0, float(outcome_score)))
+        if task_type and score is not None:
             insight = self._buddhi.record_outcome(
                 user_id=uid, task_type=task_type, score=score,
             )
@@ -351,6 +408,7 @@ class DheePlugin:
         forget_result = self._kernel.selective_forget(uid)
         result.update(forget_result)
 
+        self._fire_hooks("post_checkpoint", result)
         return result
 
     # ------------------------------------------------------------------
@@ -432,6 +490,40 @@ class DheePlugin:
                 self.context(task_description=task, user_id=user_id)
             except Exception:
                 pass
+
+    # ------------------------------------------------------------------
+    # Cognition health (harness monitoring)
+    # ------------------------------------------------------------------
+
+    def cognition_health(self, user_id: Optional[str] = None) -> Dict[str, Any]:
+        """Health status of all cognitive subsystems.
+
+        Returns counts, utility stats, and degradation warnings.
+        Useful for harness dashboards and monitoring. Zero LLM calls.
+        """
+        uid = user_id or self._user_id
+        health: Dict[str, Any] = {}
+
+        health["kernel"] = self._kernel.get_stats()
+        health["buddhi"] = self._buddhi.get_stats()
+
+        warnings: List[str] = []
+        try:
+            policies = self._kernel.policies.get_user_policies(uid)
+            low_util = [p for p in policies if p.utility < -0.2 and p.apply_count >= 3]
+            if low_util:
+                warnings.append(f"{len(low_util)} policies with negative utility")
+            active_intentions = self._kernel.intentions.get_active(uid)
+            if len(active_intentions) > 20:
+                warnings.append(f"{len(active_intentions)} active intentions (consider cleanup)")
+            contradictions = self._kernel.beliefs.get_contradictions(uid)
+            if len(contradictions) > 5:
+                warnings.append(f"{len(contradictions)} unresolved belief contradictions")
+        except Exception:
+            pass
+
+        health["warnings"] = warnings
+        return health
 
     # ------------------------------------------------------------------
     # Phase 3: Belief management

@@ -423,6 +423,19 @@ class EpisodeStore:
 
         return archived
 
+    def get_open_episode(self, user_id: str) -> Optional[Episode]:
+        """Get the currently open episode for a user (public access)."""
+        ep_id = self._open_episodes.get(user_id)
+        if ep_id:
+            return self._episodes.get(ep_id)
+        return None
+
+    def increment_connections(self, user_id: str, count: int = 1) -> None:
+        """Increment connection_count on the open episode for cross-primitive links."""
+        ep = self.get_open_episode(user_id)
+        if ep:
+            ep.connection_count += count
+
     def get_stats(self, user_id: Optional[str] = None) -> Dict[str, Any]:
         """Get episode store statistics."""
         episodes = list(self._episodes.values())
