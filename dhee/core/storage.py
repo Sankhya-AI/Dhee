@@ -367,7 +367,7 @@ CREATE TABLE IF NOT EXISTS distillation_candidates (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_distill_idempotency
     ON distillation_candidates(idempotency_key)
-    WHERE idempotency_key IS NOT NULL;
+    WHERE idempotency_key IS NOT NULL AND status != 'rejected';
 CREATE INDEX IF NOT EXISTS idx_distill_status
     ON distillation_candidates(status, target_type);
 """

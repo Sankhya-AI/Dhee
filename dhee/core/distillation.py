@@ -4,13 +4,18 @@ During sleep cycles, the ReplayDistiller samples recent episodic memories,
 groups them by scene or time window, and uses an LLM to extract durable
 semantic facts. This models the hippocampus-to-neocortex transfer in
 Complementary Learning Systems theory.
+
+v3 addition: DistillationStore and DistillationCandidate for the
+event-sourced candidate promotion pipeline.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
@@ -23,6 +28,11 @@ if TYPE_CHECKING:
     from dhee.llms.base import BaseLLM
 
 logger = logging.getLogger(__name__)
+
+
+# ===========================================================================
+# v2 ReplayDistiller (used by dhee.memory.main sleep_cycle)
+# ===========================================================================
 
 
 class ReplayDistiller:
@@ -230,3 +240,238 @@ class ReplayDistiller:
                                 logger.warning("Failed to record provenance: %s", e)
 
         return (created, deduplicated)
+
+
+# ===========================================================================
+# v3 Distillation: episodic-to-semantic candidate creation
+# ===========================================================================
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+# Current distillation algorithm version. Bump when extraction logic changes.
+DERIVATION_VERSION = 1
+
+
+def compute_idempotency_key(
+    source_event_ids: List[str],
+    derivation_version: int,
+    canonical_key: str,
+) -> str:
+    """Deterministic key from sorted source IDs + version + canonical key."""
+    payload = (
+        "|".join(sorted(source_event_ids))
+        + f"|v{derivation_version}"
+        + f"|{canonical_key}"
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()[:24]
+
+
+@dataclass
+class DistillationCandidate:
+    """A proposed derived object awaiting promotion."""
+
+    candidate_id: str
+    source_event_ids: List[str]
+    target_type: str  # belief, policy, insight, heuristic
+    canonical_key: str  # human-readable dedup key
+    payload: Dict[str, Any]  # type-specific data for the derived object
+    confidence: float = 0.5
+    derivation_version: int = DERIVATION_VERSION
+    idempotency_key: str = ""
+    status: str = "pending_validation"
+
+    def __post_init__(self):
+        if not self.idempotency_key:
+            self.idempotency_key = compute_idempotency_key(
+                self.source_event_ids,
+                self.derivation_version,
+                self.canonical_key,
+            )
+
+
+class DistillationStore:
+    """Manages distillation candidates in the database."""
+
+    def __init__(self, conn: "sqlite3.Connection", lock: "threading.RLock"):
+        import sqlite3
+        import threading
+        self._conn = conn
+        self._lock = lock
+
+    def submit(self, candidate: DistillationCandidate) -> Optional[str]:
+        """Submit a candidate. Returns candidate_id if new, None if duplicate."""
+        now = _utcnow_iso()
+
+        with self._lock:
+            try:
+                # Idempotency check — if same key exists and is not rejected, skip
+                existing = self._conn.execute(
+                    """SELECT candidate_id, status FROM distillation_candidates
+                       WHERE idempotency_key = ? AND status != 'rejected'
+                       LIMIT 1""",
+                    (candidate.idempotency_key,),
+                ).fetchone()
+
+                if existing:
+                    logger.debug(
+                        "Candidate dedup hit: %s (existing=%s, status=%s)",
+                        candidate.idempotency_key,
+                        existing["candidate_id"],
+                        existing["status"],
+                    )
+                    return None
+
+                self._conn.execute(
+                    """INSERT INTO distillation_candidates
+                       (candidate_id, source_event_ids, derivation_version,
+                        confidence, canonical_key, idempotency_key,
+                        target_type, payload_json, status, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        candidate.candidate_id,
+                        json.dumps(candidate.source_event_ids),
+                        candidate.derivation_version,
+                        candidate.confidence,
+                        candidate.canonical_key,
+                        candidate.idempotency_key,
+                        candidate.target_type,
+                        json.dumps(candidate.payload),
+                        candidate.status,
+                        now,
+                    ),
+                )
+                self._conn.commit()
+                return candidate.candidate_id
+
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def get_pending(
+        self,
+        target_type: Optional[str] = None,
+        *,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """Get pending candidates for promotion."""
+        query = """SELECT * FROM distillation_candidates
+                   WHERE status = 'pending_validation'"""
+        params: list = []
+        if target_type:
+            query += " AND target_type = ?"
+            params.append(target_type)
+        query += " ORDER BY confidence DESC, created_at ASC LIMIT ?"
+        params.append(limit)
+
+        with self._lock:
+            rows = self._conn.execute(query, params).fetchall()
+
+        return [self._row_to_dict(r) for r in rows]
+
+    def set_status(
+        self,
+        candidate_id: str,
+        status: str,
+        *,
+        promoted_id: Optional[str] = None,
+    ) -> bool:
+        """Update candidate status (promoted, rejected, quarantined)."""
+        with self._lock:
+            try:
+                if promoted_id:
+                    result = self._conn.execute(
+                        """UPDATE distillation_candidates
+                           SET status = ?, promoted_id = ?
+                           WHERE candidate_id = ?""",
+                        (status, promoted_id, candidate_id),
+                    )
+                else:
+                    result = self._conn.execute(
+                        """UPDATE distillation_candidates
+                           SET status = ?
+                           WHERE candidate_id = ?""",
+                        (status, candidate_id),
+                    )
+                self._conn.commit()
+                return result.rowcount > 0
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def get(self, candidate_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM distillation_candidates WHERE candidate_id = ?",
+                (candidate_id,),
+            ).fetchone()
+        return self._row_to_dict(row) if row else None
+
+    @staticmethod
+    def _row_to_dict(row) -> Dict[str, Any]:
+        source_ids = row["source_event_ids"]
+        if isinstance(source_ids, str):
+            try:
+                source_ids = json.loads(source_ids)
+            except (json.JSONDecodeError, TypeError):
+                source_ids = []
+
+        payload = row["payload_json"]
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except (json.JSONDecodeError, TypeError):
+                payload = {}
+
+        return {
+            "candidate_id": row["candidate_id"],
+            "source_event_ids": source_ids,
+            "derivation_version": row["derivation_version"],
+            "confidence": row["confidence"],
+            "canonical_key": row["canonical_key"],
+            "idempotency_key": row["idempotency_key"],
+            "target_type": row["target_type"],
+            "payload": payload,
+            "status": row["status"],
+            "promoted_id": row["promoted_id"],
+            "created_at": row["created_at"],
+        }
+
+
+def distill_belief_from_events(
+    events: List[Dict[str, Any]],
+    *,
+    user_id: str,
+    domain: str = "general",
+) -> Optional[DistillationCandidate]:
+    """Create a belief candidate from a set of corroborating events.
+
+    This is a rule-based distillation. No LLM call.
+    Finds recurring factual claims across events and proposes them as beliefs.
+    """
+    if not events:
+        return None
+
+    # Simple: use the first event's content as the claim
+    # In a fuller implementation, this would extract common facts
+    source_ids = [e["event_id"] for e in events]
+    claim = events[0].get("content", "")
+    if not claim:
+        return None
+
+    canonical_key = f"belief:{user_id}:{domain}:{claim[:80]}"
+
+    return DistillationCandidate(
+        candidate_id=str(uuid.uuid4()),
+        source_event_ids=source_ids,
+        target_type="belief",
+        canonical_key=canonical_key,
+        confidence=min(0.3 + 0.1 * len(events), 0.9),
+        payload={
+            "user_id": user_id,
+            "claim": claim,
+            "domain": domain,
+            "source_memory_ids": source_ids,
+        },
+    )
