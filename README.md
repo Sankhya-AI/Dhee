@@ -276,8 +276,20 @@ pip install dhee[ollama,mcp]     # Ollama (local inference, no API costs)
 ```bash
 git clone https://github.com/Sankhya-AI/Dhee.git
 cd Dhee
-pip install -e ".[dev]"
+
+./scripts/bootstrap_dev_env.sh
+source .venv-dhee/bin/activate
+
+# optional if you prefer manual bootstrap:
+# python3 -m venv .venv-dhee
+# .venv-dhee/bin/python -m pip install -e ./dhee-accel -e ./engram-bus -e ".[dev]"
+
 pytest
+
+# live vendor-backed suites are explicit opt-in:
+# DHEE_RUN_LIVE_TESTS=1 pytest -q tests/test_e2e_all_features.py tests/test_power_packages.py
+
+# manual smoke scripts live under scripts/manual/
 ```
 
 ---

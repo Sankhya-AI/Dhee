@@ -65,6 +65,69 @@ class CognitionKernel:
     # Cognitive state snapshot (for HyperContext assembly)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _state_error(component: str, exc: Exception) -> Dict[str, str]:
+        return {
+            "component": component,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    @staticmethod
+    def _operation_error(
+        operation: str,
+        component: str,
+        exc: Exception,
+        *,
+        target: Optional[str] = None,
+    ) -> Dict[str, str]:
+        entry = {
+            "operation": operation,
+            "component": component,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+        if target is not None:
+            entry["target"] = target
+        return entry
+
+    def _record_operation_error(
+        self,
+        result: Dict[str, Any],
+        *,
+        operation: str,
+        component: str,
+        exc: Exception,
+        target: Optional[str] = None,
+    ) -> None:
+        if target is None:
+            logger.exception(
+                "CognitionKernel %s failed for %s", operation, component
+            )
+        else:
+            logger.exception(
+                "CognitionKernel %s failed for %s (%s)",
+                operation,
+                component,
+                target,
+            )
+        result.setdefault("errors", []).append(
+            self._operation_error(
+                operation,
+                component,
+                exc,
+                target=target,
+            )
+        )
+
+    @staticmethod
+    def _merge_operation_errors(
+        result: Dict[str, Any], nested_result: Optional[Dict[str, Any]]
+    ) -> None:
+        if not nested_result:
+            return
+        nested_errors = nested_result.get("errors", [])
+        if nested_errors:
+            result.setdefault("errors", []).extend(nested_errors)
+
     def get_cognitive_state(
         self,
         user_id: str,
@@ -75,7 +138,8 @@ class CognitionKernel:
         Returns a dict with episodes, task_states, policies, beliefs,
         triggered_intentions, and belief_warnings.
         """
-        result: Dict[str, Any] = {}
+        result: Dict[str, Any] = {"state_errors": []}
+        state_errors: List[Dict[str, str]] = result["state_errors"]
 
         # Episodes
         try:
@@ -85,7 +149,9 @@ class CognitionKernel:
                 limit=5,
             )
             result["episodes"] = [ep.to_compact() for ep in recent_eps]
-        except Exception:
+        except Exception as exc:
+            logger.exception("Failed to load cognitive state component 'episodes'")
+            state_errors.append(self._state_error("episodes", exc))
             result["episodes"] = []
 
         # Task states + active step context
@@ -106,7 +172,9 @@ class CognitionKernel:
                 if c not in task_states:
                     task_states.append(c)
             result["task_states"] = task_states
-        except Exception:
+        except Exception as exc:
+            logger.exception("Failed to load cognitive state component 'task_states'")
+            state_errors.append(self._state_error("task_states", exc))
             result["task_states"] = []
 
         result["active_step"] = step_context if step_context else None
@@ -121,7 +189,9 @@ class CognitionKernel:
                 limit=3,
             )
             result["policies"] = [p.to_compact() for p in matched]
-        except Exception:
+        except Exception as exc:
+            logger.exception("Failed to load cognitive state component 'policies'")
+            state_errors.append(self._state_error("policies", exc))
             result["policies"] = []
 
         # Step policies (separate, for operational context)
@@ -137,7 +207,9 @@ class CognitionKernel:
                 result["step_policies"] = [p.to_compact() for p in step_matched]
             else:
                 result["step_policies"] = []
-        except Exception:
+        except Exception as exc:
+            logger.exception("Failed to load cognitive state component 'step_policies'")
+            state_errors.append(self._state_error("step_policies", exc))
             result["step_policies"] = []
 
         # Beliefs
@@ -157,7 +229,9 @@ class CognitionKernel:
                     f"Contradicting beliefs: '{b1.claim[:80]}' vs '{b2.claim[:80]}' "
                     f"(confidence: {b1.confidence:.2f} vs {b2.confidence:.2f})"
                 )
-        except Exception:
+        except Exception as exc:
+            logger.exception("Failed to load cognitive state component 'beliefs'")
+            state_errors.append(self._state_error("beliefs", exc))
             result["beliefs"] = []
 
         result["belief_warnings"] = belief_warnings
@@ -166,7 +240,9 @@ class CognitionKernel:
         try:
             triggered = self.intentions.check_triggers(user_id, task_description)
             result["triggered_intentions"] = triggered
-        except Exception:
+        except Exception as exc:
+            logger.exception("Failed to load cognitive state component 'triggered_intentions'")
+            state_errors.append(self._state_error("triggered_intentions", exc))
             result["triggered_intentions"] = []
 
         return result
@@ -194,30 +270,66 @@ class CognitionKernel:
                 content=summary[:500],
                 metadata={"status": status, "outcome_score": outcome_score},
             )
+        except Exception as exc:
+            self._record_operation_error(
+                result,
+                operation="record_checkpoint_event",
+                component="episodes.record_event",
+                exc=exc,
+            )
 
-            # Wire episode.connection_count for cross-primitive links
+        # Wire episode.connection_count for cross-primitive links
+        connections = 0
+        try:
+            active_task = self.tasks.get_active_task(user_id)
+            if active_task:
+                connections += 1
+        except Exception as exc:
+            self._record_operation_error(
+                result,
+                operation="record_checkpoint_event",
+                component="tasks.get_active_task",
+                exc=exc,
+            )
+
+        try:
+            matched_policies = self.policies.match_policies(
+                user_id, summary[:50], summary[:200], limit=3,
+            )
+            connections += len(matched_policies)
+        except Exception as exc:
+            self._record_operation_error(
+                result,
+                operation="record_checkpoint_event",
+                component="policies.match_policies",
+                exc=exc,
+            )
+
+        if connections > 0:
             try:
-                connections = 0
-                active_task = self.tasks.get_active_task(user_id)
-                if active_task:
-                    connections += 1
-                matched_policies = self.policies.match_policies(
-                    user_id, summary[:50], summary[:200], limit=3,
+                self.episodes.increment_connections(user_id, connections)
+            except Exception as exc:
+                self._record_operation_error(
+                    result,
+                    operation="record_checkpoint_event",
+                    component="episodes.increment_connections",
+                    exc=exc,
                 )
-                connections += len(matched_policies)
-                if connections > 0:
-                    self.episodes.increment_connections(user_id, connections)
-            except Exception:
-                pass
 
-            if status == "completed":
+        if status == "completed":
+            try:
                 episode = self.episodes.end_episode(
                     user_id, outcome_score, summary
                 )
                 if episode:
                     result["episode_closed"] = episode.id
-        except Exception:
-            pass
+            except Exception as exc:
+                self._record_operation_error(
+                    result,
+                    operation="record_checkpoint_event",
+                    component="episodes.end_episode",
+                    exc=exc,
+                )
         return result
 
     def update_task_on_checkpoint(
@@ -238,11 +350,20 @@ class CognitionKernel:
         Replaces the scattered task logic in DheePlugin.checkpoint().
         """
         result: Dict[str, Any] = {}
+        active_task = None
         try:
             active_task = self.tasks.get_active_task(user_id)
+        except Exception as exc:
+            self._record_operation_error(
+                result,
+                operation="update_task_on_checkpoint",
+                component="tasks.get_active_task",
+                exc=exc,
+            )
 
-            if goal or plan:
-                if not active_task or active_task.goal != (goal or active_task.goal):
+        if goal or plan:
+            if not active_task or active_task.goal != (goal or active_task.goal):
+                try:
                     active_task = self.tasks.create_task(
                         user_id=user_id,
                         goal=goal or summary,
@@ -252,15 +373,40 @@ class CognitionKernel:
                     )
                     active_task.start()
                     result["task_created"] = active_task.id
-                elif plan:
+                except Exception as exc:
+                    self._record_operation_error(
+                        result,
+                        operation="update_task_on_checkpoint",
+                        component="tasks.create_task",
+                        exc=exc,
+                    )
+            elif plan:
+                try:
                     active_task.set_plan(plan, plan_rationale)
+                except Exception as exc:
+                    self._record_operation_error(
+                        result,
+                        operation="update_task_on_checkpoint",
+                        component="tasks.set_plan",
+                        exc=exc,
+                    )
 
-            if active_task:
-                if blockers:
-                    for b in blockers:
-                        active_task.add_blocker(b, severity="soft")
+        if active_task:
+            if blockers:
+                for blocker in blockers:
+                    try:
+                        active_task.add_blocker(blocker, severity="soft")
+                    except Exception as exc:
+                        self._record_operation_error(
+                            result,
+                            operation="update_task_on_checkpoint",
+                            component="tasks.add_blocker",
+                            exc=exc,
+                            target=blocker,
+                        )
 
-                if status == "completed" and outcome_score is not None:
+            if status == "completed" and outcome_score is not None:
+                try:
                     if outcome_score >= 0.5:
                         active_task.complete(
                             score=outcome_score,
@@ -270,24 +416,52 @@ class CognitionKernel:
                     else:
                         active_task.fail(summary, evidence=outcome_evidence)
                     result["task_completed"] = active_task.id
+                except Exception as exc:
+                    self._record_operation_error(
+                        result,
+                        operation="update_task_on_checkpoint",
+                        component="tasks.complete_or_fail",
+                        exc=exc,
+                    )
 
+            try:
                 self.tasks.update_task(active_task)
+            except Exception as exc:
+                self._record_operation_error(
+                    result,
+                    operation="update_task_on_checkpoint",
+                    component="tasks.update_task",
+                    exc=exc,
+                )
 
-                # Record outcomes on STEP policies for completed/failed steps
-                if status == "completed" and active_task.plan:
-                    for step in active_task.plan:
-                        if step.status.value == "completed":
-                            self.record_step_outcome(
-                                user_id, task_type, step.description,
-                                success=True, actual_score=outcome_score,
-                            )
-                        elif step.status.value == "failed":
-                            self.record_step_outcome(
-                                user_id, task_type, step.description,
-                                success=False, actual_score=outcome_score,
-                            )
-        except Exception:
-            pass
+            # Record outcomes on STEP policies for completed/failed steps
+            if status == "completed" and active_task.plan:
+                step_updates = 0
+                for step in active_task.plan:
+                    if step.status.value == "completed":
+                        step_result = self.record_step_outcome(
+                            user_id,
+                            task_type,
+                            step.description,
+                            success=True,
+                            actual_score=outcome_score,
+                        )
+                    elif step.status.value == "failed":
+                        step_result = self.record_step_outcome(
+                            user_id,
+                            task_type,
+                            step.description,
+                            success=False,
+                            actual_score=outcome_score,
+                        )
+                    else:
+                        continue
+
+                    step_updates += step_result.get("policies_updated", 0)
+                    self._merge_operation_errors(result, step_result)
+
+                if step_updates:
+                    result["step_policies_updated"] = step_updates
         return result
 
     def record_step_outcome(
@@ -298,12 +472,13 @@ class CognitionKernel:
         success: bool,
         baseline_score: Optional[float] = None,
         actual_score: Optional[float] = None,
-    ) -> None:
+    ) -> Dict[str, Any]:
         """Record outcome on STEP policies matching a completed/failed step.
 
         Finds matching STEP policies and records their outcomes.
         Zero LLM calls.
         """
+        result: Dict[str, Any] = {"policies_updated": 0}
         try:
             matched = self.policies.match_step_policies(
                 user_id=user_id,
@@ -312,15 +487,33 @@ class CognitionKernel:
                 step_context=step_description,
                 limit=5,
             )
-            for policy in matched:
+        except Exception as exc:
+            self._record_operation_error(
+                result,
+                operation="record_step_outcome",
+                component="policies.match_step_policies",
+                exc=exc,
+            )
+            return result
+
+        for policy in matched:
+            try:
                 self.policies.record_outcome(
                     policy.id,
                     success=success,
                     baseline_score=baseline_score,
                     actual_score=actual_score,
                 )
-        except Exception:
-            pass
+                result["policies_updated"] += 1
+            except Exception as exc:
+                self._record_operation_error(
+                    result,
+                    operation="record_step_outcome",
+                    component="policies.record_outcome",
+                    exc=exc,
+                    target=policy.id,
+                )
+        return result
 
     def record_learning_outcomes(
         self,
@@ -357,33 +550,70 @@ class CognitionKernel:
             matched = self.policies.match_policies(
                 user_id, task_type, task_desc,
             )
+        except Exception as exc:
+            self._record_operation_error(
+                result,
+                operation="record_learning_outcomes",
+                component="policies.match_policies",
+                exc=exc,
+            )
+        else:
             for policy in matched:
-                self.policies.record_outcome(
-                    policy.id,
-                    success=success,
-                    baseline_score=baseline_score,
-                    actual_score=actual_score,
-                )
-                result["policies_updated"] += 1
-        except Exception:
-            pass
+                try:
+                    self.policies.record_outcome(
+                        policy.id,
+                        success=success,
+                        baseline_score=baseline_score,
+                        actual_score=actual_score,
+                    )
+                    result["policies_updated"] += 1
+                except Exception as exc:
+                    self._record_operation_error(
+                        result,
+                        operation="record_learning_outcomes",
+                        component="policies.record_outcome",
+                        exc=exc,
+                        target=policy.id,
+                    )
 
         # 2. Extract TASK + STEP policies from completed tasks
         try:
             completed = self.tasks.get_tasks_by_type(
                 user_id, task_type, limit=10,
             )
+        except Exception as exc:
+            self._record_operation_error(
+                result,
+                operation="record_learning_outcomes",
+                component="tasks.get_tasks_by_type",
+                exc=exc,
+            )
+        else:
             if len(completed) >= 3:
                 task_dicts = [t.to_dict() for t in completed]
-                self.policies.extract_from_tasks(
-                    user_id, task_dicts, task_type,
-                )
-                step_policies = self.policies.extract_step_policies(
-                    user_id, task_dicts, task_type,
-                )
-                result["step_policies_created"] = len(step_policies)
-        except Exception:
-            pass
+                try:
+                    self.policies.extract_from_tasks(
+                        user_id, task_dicts, task_type,
+                    )
+                except Exception as exc:
+                    self._record_operation_error(
+                        result,
+                        operation="record_learning_outcomes",
+                        component="policies.extract_from_tasks",
+                        exc=exc,
+                    )
+                try:
+                    step_policies = self.policies.extract_step_policies(
+                        user_id, task_dicts, task_type,
+                    )
+                    result["step_policies_created"] = len(step_policies)
+                except Exception as exc:
+                    self._record_operation_error(
+                        result,
+                        operation="record_learning_outcomes",
+                        component="policies.extract_step_policies",
+                        exc=exc,
+                    )
 
         # 3. Belief-policy interaction: challenged beliefs degrade dependent policies
         if not success:
@@ -391,75 +621,177 @@ class CognitionKernel:
                 relevant_beliefs = self.beliefs.get_relevant_beliefs(
                     user_id, task_desc, limit=3,
                 )
+            except Exception as exc:
+                self._record_operation_error(
+                    result,
+                    operation="record_learning_outcomes",
+                    component="beliefs.get_relevant_beliefs",
+                    exc=exc,
+                )
+            else:
+                try:
+                    user_policies = list(self.policies.get_user_policies(user_id))
+                except Exception as exc:
+                    self._record_operation_error(
+                        result,
+                        operation="record_learning_outcomes",
+                        component="policies.get_user_policies",
+                        exc=exc,
+                    )
+                    user_policies = []
+
                 for belief in relevant_beliefs:
                     if belief.confidence < 0.3:
                         claim_words = set(belief.claim.lower().split()[:5])
-                        for policy in self.policies.get_user_policies(user_id):
+                        for policy in user_policies:
                             approach_words = set(policy.action.approach.lower().split())
                             if len(claim_words & approach_words) >= 2:
-                                self.policies.decay_utility(policy.id, factor=0.8)
-                                result["beliefs_policy_decays"] += 1
-            except Exception:
-                pass
+                                try:
+                                    self.policies.decay_utility(policy.id, factor=0.8)
+                                    result["beliefs_policy_decays"] += 1
+                                except Exception as exc:
+                                    self._record_operation_error(
+                                        result,
+                                        operation="record_learning_outcomes",
+                                        component="policies.decay_utility",
+                                        exc=exc,
+                                        target=policy.id,
+                                    )
 
         # 4. Intention outcome recording
         try:
             triggered = self.intentions.get_triggered_pending_feedback(user_id)
+        except Exception as exc:
+            self._record_operation_error(
+                result,
+                operation="record_learning_outcomes",
+                component="intentions.get_triggered_pending_feedback",
+                exc=exc,
+            )
+        else:
             for intention in triggered:
-                self.intentions.record_outcome(
-                    intention.id,
-                    useful=success,
-                    outcome_score=actual_score,
-                )
-                result["intentions_updated"] += 1
-        except Exception:
-            pass
+                try:
+                    self.intentions.record_outcome(
+                        intention.id,
+                        useful=success,
+                        outcome_score=actual_score,
+                    )
+                    result["intentions_updated"] += 1
+                except Exception as exc:
+                    self._record_operation_error(
+                        result,
+                        operation="record_learning_outcomes",
+                        component="intentions.record_outcome",
+                        exc=exc,
+                        target=intention.id,
+                    )
 
         # 5. Episode connection wiring
+        connections = 0
         try:
             active_task = self.tasks.get_active_task(user_id)
-            connections = 0
             if active_task:
                 connections += 1
+        except Exception as exc:
+            self._record_operation_error(
+                result,
+                operation="record_learning_outcomes",
+                component="tasks.get_active_task",
+                exc=exc,
+            )
+        try:
             matched_policies = self.policies.match_policies(
                 user_id, task_type, task_desc, limit=3,
             )
             connections += len(matched_policies)
-            if connections > 0:
+        except Exception as exc:
+            self._record_operation_error(
+                result,
+                operation="record_learning_outcomes",
+                component="policies.match_policies",
+                exc=exc,
+            )
+        if connections > 0:
+            try:
                 self.episodes.increment_connections(user_id, connections)
-        except Exception:
-            pass
+            except Exception as exc:
+                self._record_operation_error(
+                    result,
+                    operation="record_learning_outcomes",
+                    component="episodes.increment_connections",
+                    exc=exc,
+                )
 
         # 6. Temporal failure pattern detection (decision stumps)
         try:
             from dhee.core.pattern_detector import (
                 FailurePatternDetector, extract_features,
             )
-            recent = self.tasks.get_recent_tasks(
-                user_id, limit=100, include_terminal=True,
+        except Exception as exc:
+            self._record_operation_error(
+                result,
+                operation="record_learning_outcomes",
+                component="pattern_detector.import",
+                exc=exc,
             )
-            terminal = [t for t in recent if t.is_terminal]
-            if len(terminal) >= FailurePatternDetector.MIN_SAMPLES:
-                # Build episode lookup via public API
-                episode_map = {}
-                for t in terminal:
-                    if t.episode_id:
-                        ep = self.episodes.get_episode(t.episode_id)
-                        if ep:
-                            episode_map[ep.id] = ep
+        else:
+            try:
+                recent = self.tasks.get_recent_tasks(
+                    user_id, limit=100, include_terminal=True,
+                )
+            except Exception as exc:
+                self._record_operation_error(
+                    result,
+                    operation="record_learning_outcomes",
+                    component="tasks.get_recent_tasks",
+                    exc=exc,
+                )
+            else:
+                terminal = [t for t in recent if t.is_terminal]
+                if len(terminal) >= FailurePatternDetector.MIN_SAMPLES:
+                    episode_map = {}
+                    for task in terminal:
+                        if not task.episode_id:
+                            continue
+                        try:
+                            episode = self.episodes.get_episode(task.episode_id)
+                            if episode:
+                                episode_map[episode.id] = episode
+                        except Exception as exc:
+                            self._record_operation_error(
+                                result,
+                                operation="record_learning_outcomes",
+                                component="episodes.get_episode",
+                                exc=exc,
+                                target=task.episode_id,
+                            )
 
-                features = extract_features(terminal, episode_map)
-                detector = FailurePatternDetector()
-                patterns = detector.detect_and_describe(features)
-
-                for pattern in patterns[:3]:
-                    stored = self._store_pattern_as_policy(
-                        user_id, task_type, pattern,
-                    )
-                    if stored:
-                        result["patterns_detected"] += 1
-        except Exception:
-            pass
+                    try:
+                        features = extract_features(terminal, episode_map)
+                        detector = FailurePatternDetector()
+                        patterns = detector.detect_and_describe(features)
+                    except Exception as exc:
+                        self._record_operation_error(
+                            result,
+                            operation="record_learning_outcomes",
+                            component="pattern_detector.detect_and_describe",
+                            exc=exc,
+                        )
+                    else:
+                        for pattern in patterns[:3]:
+                            try:
+                                stored = self._store_pattern_as_policy(
+                                    user_id, task_type, pattern,
+                                )
+                                if stored:
+                                    result["patterns_detected"] += 1
+                            except Exception as exc:
+                                self._record_operation_error(
+                                    result,
+                                    operation="record_learning_outcomes",
+                                    component="policies.store_temporal_pattern",
+                                    exc=exc,
+                                )
 
         return result
 
@@ -476,12 +808,22 @@ class CognitionKernel:
             )
             if archived > 0:
                 result["episodes_archived"] = archived
-        except Exception:
-            pass
+        except Exception as exc:
+            self._record_operation_error(
+                result,
+                operation="selective_forget",
+                component="episodes.selective_forget",
+                exc=exc,
+            )
         try:
             self.beliefs.prune_retracted(user_id)
-        except Exception:
-            pass
+        except Exception as exc:
+            self._record_operation_error(
+                result,
+                operation="selective_forget",
+                component="beliefs.prune_retracted",
+                exc=exc,
+            )
         return result
 
     # ------------------------------------------------------------------
@@ -537,19 +879,39 @@ class CognitionKernel:
 
     def flush(self) -> None:
         """Persist all store state to disk."""
+        errors: List[Dict[str, str]] = []
         for store in [
-            self.episodes, self.tasks, self.beliefs,
-            self.policies, self.intentions,
+            ("episodes", self.episodes),
+            ("tasks", self.tasks),
+            ("beliefs", self.beliefs),
+            ("policies", self.policies),
+            ("intentions", self.intentions),
         ]:
-            if hasattr(store, "flush"):
+            name, store_instance = store
+            if hasattr(store_instance, "flush"):
                 try:
-                    store.flush()
-                except Exception:
-                    pass
+                    store_instance.flush()
+                except Exception as exc:
+                    logger.exception(
+                        "CognitionKernel flush failed for %s", name
+                    )
+                    errors.append(
+                        self._operation_error(
+                            "flush",
+                            f"{name}.flush",
+                            exc,
+                        )
+                    )
+        if errors:
+            detail = "; ".join(
+                f"{entry['component']}: {entry['error']}" for entry in errors
+            )
+            raise RuntimeError(f"Failed to flush cognition stores: {detail}")
 
     def get_stats(self) -> Dict[str, Any]:
         """Aggregated stats from all stores."""
         stats: Dict[str, Any] = {}
+        errors: List[Dict[str, str]] = []
         for name, store in [
             ("episodes", self.episodes),
             ("tasks", self.tasks),
@@ -559,8 +921,18 @@ class CognitionKernel:
         ]:
             try:
                 stats[name] = store.get_stats()
-            except Exception:
-                stats[name] = {}
+            except Exception as exc:
+                logger.exception("CognitionKernel get_stats failed for %s", name)
+                errors.append(
+                    self._operation_error(
+                        "get_stats",
+                        f"{name}.get_stats",
+                        exc,
+                    )
+                )
+                stats[name] = {"error": f"{type(exc).__name__}: {exc}"}
+        if errors:
+            stats["errors"] = errors
         return stats
 
     def __repr__(self) -> str:

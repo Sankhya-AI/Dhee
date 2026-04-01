@@ -307,15 +307,25 @@ class Bus:
         self,
         session_id: Optional[str] = None,
         agent_id: Optional[str] = None,
+        repo: Optional[str] = None,
     ) -> Optional[Dict]:
-        return self._ensure_store().get_session(session_id=session_id, agent_id=agent_id)
+        return self._ensure_store().get_session(
+            session_id=session_id,
+            agent_id=agent_id,
+            repo=repo,
+        )
 
     def list_sessions(
         self,
         agent_id: Optional[str] = None,
         status: Optional[str] = None,
+        repo: Optional[str] = None,
     ) -> List[Dict]:
-        return self._ensure_store().list_sessions(agent_id=agent_id, status=status)
+        return self._ensure_store().list_sessions(
+            agent_id=agent_id,
+            status=status,
+            repo=repo,
+        )
 
     def update_session(self, session_id: str, **kwargs: Any) -> None:
         self._ensure_store().update_session(session_id, **kwargs)

@@ -3,7 +3,7 @@
 Each memory has three traces (fast, mid, slow) that decay at different rates
 and cascade information from fast -> mid -> slow during sleep cycles.
 
-Requires dhee-accel (Rust) for batch decay operations.
+Uses dhee-accel (Rust) when available, pure-Python fallback otherwise.
 """
 
 from __future__ import annotations
@@ -15,7 +15,11 @@ from typing import TYPE_CHECKING, List, Tuple
 if TYPE_CHECKING:
     from dhee.configs.base import DistillationConfig
 
-from dhee_accel import decay_traces_batch as _rs_decay_traces_batch
+try:
+    from dhee_accel import decay_traces_batch as _rs_decay_traces_batch
+    _ACCEL = True
+except ImportError:
+    _ACCEL = False
 
 
 def initialize_traces(
@@ -72,14 +76,44 @@ def decay_traces(
     )
 
 
+def _py_decay_traces_batch(
+    traces: List[Tuple[float, float, float]],
+    elapsed_days: List[float],
+    access_counts: List[int],
+    fast_rate: float,
+    mid_rate: float,
+    slow_rate: float,
+) -> List[Tuple[float, float, float]]:
+    """Pure-Python batch trace decay."""
+    results = []
+    for i, (s_fast, s_mid, s_slow) in enumerate(traces):
+        days = elapsed_days[i] if i < len(elapsed_days) else 0.0
+        access = access_counts[i] if i < len(access_counts) else 0
+        dampening = 1.0 + 0.5 * math.log(1.0 + access)
+        new_fast = max(0.0, min(1.0, s_fast * math.exp(-fast_rate * days / dampening)))
+        new_mid = max(0.0, min(1.0, s_mid * math.exp(-mid_rate * days / dampening)))
+        new_slow = max(0.0, min(1.0, s_slow * math.exp(-slow_rate * days / dampening)))
+        results.append((new_fast, new_mid, new_slow))
+    return results
+
+
 def decay_traces_batch(
     traces: List[Tuple[float, float, float]],
     elapsed_days: List[float],
     access_counts: List[int],
     config: "DistillationConfig",
 ) -> List[Tuple[float, float, float]]:
-    """Batch version of decay_traces (Rust-accelerated)."""
-    return _rs_decay_traces_batch(
+    """Batch version of decay_traces."""
+    if _ACCEL:
+        return _rs_decay_traces_batch(
+            traces,
+            elapsed_days,
+            [int(a) for a in access_counts],
+            config.s_fast_decay_rate,
+            config.s_mid_decay_rate,
+            config.s_slow_decay_rate,
+        )
+    return _py_decay_traces_batch(
         traces,
         elapsed_days,
         [int(a) for a in access_counts],

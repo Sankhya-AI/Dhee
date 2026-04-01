@@ -36,6 +36,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
+from dhee.checkpoint_runtime import run_checkpoint_common
+
 logger = logging.getLogger(__name__)
 
 
@@ -118,6 +120,11 @@ class DheePlugin:
         """Access the CognitionKernel for direct state manipulation."""
         return self._kernel
 
+    @property
+    def memory(self):
+        """Expose the configured runtime memory engine for advanced integrations."""
+        return self._engram.memory
+
     # ------------------------------------------------------------------
     # Hook registry
     # ------------------------------------------------------------------
@@ -152,6 +159,13 @@ class DheePlugin:
                 callback(data)
             except Exception:
                 logger.debug("Hook %s failed", event)
+
+    @staticmethod
+    def _health_error(component: str, exc: Exception) -> Dict[str, str]:
+        return {
+            "component": component,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
 
     # ------------------------------------------------------------------
     # Tool 1: remember
@@ -257,7 +271,7 @@ class DheePlugin:
         hyper_ctx = self._buddhi.get_hyper_context(
             user_id=uid,
             task_description=task_description,
-            memory=self._engram._memory,
+            memory=self.memory,
         )
         if operational:
             result = hyper_ctx.to_operational_dict()
@@ -325,62 +339,29 @@ class DheePlugin:
             if not what_worked:
                 what_worked = outcome.get("what_worked")
 
-        result: Dict[str, Any] = {}
-        score = max(0.0, min(1.0, float(outcome_score))) if outcome_score is not None else None
-
-        # 1. Session digest
-        try:
-            from dhee.core.kernel import save_session_digest
-            digest = save_session_digest(
-                task_summary=summary, agent_id=agent_id, repo=repo,
-                status=status, decisions_made=decisions,
-                files_touched=files_touched, todos_remaining=todos,
-            )
-            result["session_saved"] = True
-            if isinstance(digest, dict):
-                result["session_id"] = digest.get("session_id")
-        except Exception:
-            result["session_saved"] = False
-
-        # 2. Batch enrichment
-        memory = self._engram._memory
-        if hasattr(memory, "enrich_pending"):
-            try:
-                enrich_result = memory.enrich_pending(
-                    user_id=uid, batch_size=10, max_batches=5,
-                )
-                enriched = enrich_result.get("enriched_count", 0)
-                if enriched > 0:
-                    result["memories_enriched"] = enriched
-            except Exception:
-                pass
-
-        # 3. Outcome recording
-        if task_type and score is not None:
-            insight = self._buddhi.record_outcome(
-                user_id=uid, task_type=task_type, score=score,
-            )
-            result["outcome_recorded"] = True
-            if insight:
-                result["auto_insight"] = insight.to_dict()
-
-        # 4. Insight synthesis
-        if any([what_worked, what_failed, key_decision]):
-            insights = self._buddhi.reflect(
-                user_id=uid, task_type=task_type or "general",
-                what_worked=what_worked, what_failed=what_failed,
-                key_decision=key_decision,
-                outcome_score=score if score is not None else None,
-            )
-            result["insights_created"] = len(insights)
-
-        # 5. Intention storage
-        if remember_to:
-            intention = self._buddhi.store_intention(
-                user_id=uid, description=remember_to,
-                trigger_keywords=trigger_keywords,
-            )
-            result["intention_stored"] = intention.to_dict()
+        result = run_checkpoint_common(
+            logger=logger,
+            log_prefix="Plugin checkpoint",
+            user_id=uid,
+            summary=summary,
+            status=status,
+            agent_id=agent_id,
+            repo=repo,
+            decisions=decisions,
+            files_touched=files_touched,
+            todos=todos,
+            task_type=task_type,
+            outcome_score=outcome_score,
+            what_worked=what_worked,
+            what_failed=what_failed,
+            key_decision=key_decision,
+            remember_to=remember_to,
+            trigger_keywords=trigger_keywords,
+            enrich_pending_fn=self._engram.enrich_pending,
+            record_outcome_fn=self._buddhi.record_outcome,
+            reflect_fn=self._buddhi.reflect,
+            store_intention_fn=self._buddhi.store_intention,
+        )
 
         # 6. Episode closure (via kernel)
         ep_result = self._kernel.record_checkpoint_event(
@@ -441,8 +422,8 @@ class DheePlugin:
                 task_description=task_description or "session",
                 task_type=task_type or "general",
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Session start episode initialization failed: %s", exc, exc_info=True)
 
         ctx = self.context(task_description=task_description, user_id=uid)
         return self._render_system_prompt(ctx, task_description)
@@ -479,17 +460,19 @@ class DheePlugin:
         if signals.get("needs_auto_checkpoint"):
             args = signals.get("auto_checkpoint_args", {})
             try:
-                self.checkpoint(user_id=user_id, **args)
-            except Exception:
-                pass
+                checkpoint_result = self.checkpoint(user_id=user_id, **args)
+                for warning in checkpoint_result.get("warnings", []):
+                    logger.warning("Plugin auto-checkpoint warning: %s", warning)
+            except Exception as exc:
+                logger.warning("Plugin auto-checkpoint failed: %s", exc, exc_info=True)
 
         # Auto-context for new session
         if signals.get("needs_auto_context"):
             task = signals.get("inferred_task")
             try:
                 self.context(task_description=task, user_id=user_id)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Plugin auto-context failed: %s", exc, exc_info=True)
 
     # ------------------------------------------------------------------
     # Cognition health (harness monitoring)
@@ -503,6 +486,7 @@ class DheePlugin:
         """
         uid = user_id or self._user_id
         health: Dict[str, Any] = {}
+        errors: List[Dict[str, str]] = []
 
         health["kernel"] = self._kernel.get_stats()
         health["buddhi"] = self._buddhi.get_stats()
@@ -513,16 +497,45 @@ class DheePlugin:
             low_util = [p for p in policies if p.utility < -0.2 and p.apply_count >= 3]
             if low_util:
                 warnings.append(f"{len(low_util)} policies with negative utility")
+        except Exception as exc:
+            logger.warning(
+                "Cognition health derivation failed for policies: %s",
+                exc,
+                exc_info=True,
+            )
+            errors.append(self._health_error("policies.get_user_policies", exc))
+
+        try:
             active_intentions = self._kernel.intentions.get_active(uid)
             if len(active_intentions) > 20:
-                warnings.append(f"{len(active_intentions)} active intentions (consider cleanup)")
+                warnings.append(
+                    f"{len(active_intentions)} active intentions (consider cleanup)"
+                )
+        except Exception as exc:
+            logger.warning(
+                "Cognition health derivation failed for intentions: %s",
+                exc,
+                exc_info=True,
+            )
+            errors.append(self._health_error("intentions.get_active", exc))
+
+        try:
             contradictions = self._kernel.beliefs.get_contradictions(uid)
             if len(contradictions) > 5:
-                warnings.append(f"{len(contradictions)} unresolved belief contradictions")
-        except Exception:
-            pass
+                warnings.append(
+                    f"{len(contradictions)} unresolved belief contradictions"
+                )
+        except Exception as exc:
+            logger.warning(
+                "Cognition health derivation failed for contradictions: %s",
+                exc,
+                exc_info=True,
+            )
+            errors.append(self._health_error("beliefs.get_contradictions", exc))
 
         health["warnings"] = warnings
+        if errors:
+            health["errors"] = errors
         return health
 
     # ------------------------------------------------------------------
@@ -640,13 +653,36 @@ class DheePlugin:
         # Store trajectory as memory for skill mining
         try:
             from dhee.skills.trajectory import TrajectoryStore
-            store = TrajectoryStore(memory=self._engram._memory)
+            store = TrajectoryStore(memory=self.memory)
             store.save(trajectory)
             result["stored"] = True
-        except Exception:
+        except Exception as exc:
+            logger.warning("Trajectory persistence failed: %s", exc, exc_info=True)
             result["stored"] = False
+            result["storage_error"] = str(exc)
 
         return result
+
+    def close(self) -> None:
+        """Flush cognition state and release runtime resources."""
+        errors: List[str] = []
+
+        try:
+            self._buddhi.flush()
+        except Exception as exc:
+            logger.exception("DheePlugin close failed for buddhi.flush")
+            errors.append(f"buddhi.flush: {type(exc).__name__}: {exc}")
+
+        try:
+            self._engram.close()
+        except Exception as exc:
+            logger.exception("DheePlugin close failed for engram.close")
+            errors.append(f"engram.close: {type(exc).__name__}: {exc}")
+
+        if errors:
+            raise RuntimeError(
+                "Failed to close DheePlugin resources: " + "; ".join(errors)
+            )
 
     # ------------------------------------------------------------------
     # Framework export: OpenAI function calling

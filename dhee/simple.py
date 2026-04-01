@@ -18,11 +18,13 @@ Environment Variables:
 
 from __future__ import annotations
 
+import logging
 import os
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+from dhee.checkpoint_runtime import run_checkpoint_common
 from dhee.configs.base import (
     CategoryMemConfig,
     EchoMemConfig,
@@ -33,6 +35,8 @@ from dhee.configs.base import (
     VectorStoreConfig,
 )
 from dhee.memory.main import FullMemory
+
+logger = logging.getLogger(__name__)
 
 
 def _detect_provider() -> str:
@@ -367,9 +371,31 @@ class Engram:
         return self._provider
 
     @property
+    def memory(self) -> FullMemory:
+        """Expose the configured runtime memory engine for advanced integrations."""
+        return self._memory
+
+    @property
     def data_dir(self) -> Path:
         """Data storage directory."""
         return self._data_dir
+
+    def enrich_pending(
+        self,
+        user_id: str = "default",
+        batch_size: int = 10,
+        max_batches: int = 5,
+    ) -> Dict[str, Any]:
+        """Run deferred enrichment using the configured runtime memory engine."""
+        return self.memory.enrich_pending(
+            user_id=user_id,
+            batch_size=batch_size,
+            max_batches=max_batches,
+        )
+
+    def close(self) -> None:
+        """Release runtime resources held by the underlying memory engine."""
+        self._memory.close()
 
 
 class Dhee:
@@ -550,7 +576,7 @@ class Dhee:
         hyper_ctx = self._buddhi.get_hyper_context(
             user_id=uid,
             task_description=task_description,
-            memory=self._engram._memory,
+            memory=self._engram.memory,
         )
         if operational:
             return hyper_ctx.to_operational_dict()
@@ -623,73 +649,29 @@ class Dhee:
             if not what_worked:
                 what_worked = outcome.get("what_worked")
 
-        result: Dict[str, Any] = {}
-
-        # 1. Session digest
-        try:
-            from dhee.core.kernel import save_session_digest
-            digest = save_session_digest(
-                task_summary=summary,
-                agent_id=agent_id,
-                repo=repo,
-                status=status,
-                decisions_made=decisions,
-                files_touched=files_touched,
-                todos_remaining=todos,
-            )
-            result["session_saved"] = True
-            if isinstance(digest, dict):
-                result["session_id"] = digest.get("session_id")
-        except Exception:
-            result["session_saved"] = False
-
-        # 2. Batch enrichment of deferred memories
-        memory = self._engram._memory
-        if hasattr(memory, "enrich_pending"):
-            try:
-                enrich_result = memory.enrich_pending(
-                    user_id=uid, batch_size=10, max_batches=5,
-                )
-                enriched = enrich_result.get("enriched_count", 0)
-                if enriched > 0:
-                    result["memories_enriched"] = enriched
-            except Exception:
-                pass
-
-        # 3. Outcome recording
-        clamped_score = None
-        if outcome_score is not None:
-            clamped_score = max(0.0, min(1.0, float(outcome_score)))
-        if task_type and clamped_score is not None:
-            insight = self._buddhi.record_outcome(
-                user_id=uid, task_type=task_type, score=clamped_score,
-            )
-            result["outcome_recorded"] = True
-            if insight:
-                result["auto_insight"] = insight.to_dict()
-
-        # 4. Insight synthesis
-        if any([what_worked, what_failed, key_decision]):
-            insights = self._buddhi.reflect(
-                user_id=uid,
-                task_type=task_type or "general",
-                what_worked=what_worked,
-                what_failed=what_failed,
-                key_decision=key_decision,
-                outcome_score=clamped_score,
-            )
-            result["insights_created"] = len(insights)
-
-        # 5. Intention storage
-        if remember_to:
-            intention = self._buddhi.store_intention(
-                user_id=uid,
-                description=remember_to,
-                trigger_keywords=trigger_keywords,
-            )
-            result["intention_stored"] = intention.to_dict()
-
-        return result
+        return run_checkpoint_common(
+            logger=logger,
+            log_prefix="Checkpoint",
+            user_id=uid,
+            summary=summary,
+            status=status,
+            agent_id=agent_id,
+            repo=repo,
+            decisions=decisions,
+            files_touched=files_touched,
+            todos=todos,
+            task_type=task_type,
+            outcome_score=outcome_score,
+            what_worked=what_worked,
+            what_failed=what_failed,
+            key_decision=key_decision,
+            remember_to=remember_to,
+            trigger_keywords=trigger_keywords,
+            enrich_pending_fn=self._engram.enrich_pending,
+            record_outcome_fn=self._buddhi.record_outcome,
+            reflect_fn=self._buddhi.reflect,
+            store_intention_fn=self._buddhi.store_intention,
+        )
 
     # ------------------------------------------------------------------
     # Auto-lifecycle (driven by SessionTracker)
@@ -704,14 +686,37 @@ class Dhee:
         if signals.get("needs_auto_checkpoint"):
             args = signals.get("auto_checkpoint_args", {})
             try:
-                self.checkpoint(user_id=user_id, **args)
-            except Exception:
-                pass
+                checkpoint_result = self.checkpoint(user_id=user_id, **args)
+                for warning in checkpoint_result.get("warnings", []):
+                    logger.warning("Auto-checkpoint warning: %s", warning)
+            except Exception as exc:
+                logger.warning("Auto-checkpoint failed: %s", exc, exc_info=True)
 
         # Auto-context for new session
         if signals.get("needs_auto_context"):
             task = signals.get("inferred_task")
             try:
                 self.context(task_description=task, user_id=user_id)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Auto-context failed: %s", exc, exc_info=True)
+
+    def close(self) -> None:
+        """Flush cognition state and release runtime resources."""
+        errors: List[str] = []
+
+        try:
+            self._buddhi.flush()
+        except Exception as exc:
+            logger.exception("Dhee close failed for buddhi.flush")
+            errors.append(f"buddhi.flush: {type(exc).__name__}: {exc}")
+
+        try:
+            self._engram.close()
+        except Exception as exc:
+            logger.exception("Dhee close failed for engram.close")
+            errors.append(f"engram.close: {type(exc).__name__}: {exc}")
+
+        if errors:
+            raise RuntimeError(
+                "Failed to close Dhee resources: " + "; ".join(errors)
+            )

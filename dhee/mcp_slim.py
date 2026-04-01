@@ -41,7 +41,7 @@ def _get_plugin():
         from dhee.adapters.base import DheePlugin
         _plugin = DheePlugin()
         # Enable deferred enrichment on the underlying memory
-        memory = _plugin._engram._memory
+        memory = _plugin.memory
         if hasattr(memory, "config") and hasattr(memory.config, "enrichment"):
             memory.config.enrichment.defer_enrichment = True
             memory.config.enrichment.enable_unified = True
@@ -52,9 +52,11 @@ def _get_plugin():
             try:
                 args = _plugin._tracker.finalize()
                 if args:
-                    _plugin.checkpoint(**args)
-            except Exception:
-                pass
+                    result = _plugin.checkpoint(**args)
+                    for warning in result.get("warnings", []):
+                        logger.warning("MCP auto-checkpoint warning: %s", warning)
+            except Exception as exc:
+                logger.warning("MCP auto-checkpoint on exit failed: %s", exc, exc_info=True)
         atexit.register(_auto_checkpoint_on_exit)
 
     return _plugin

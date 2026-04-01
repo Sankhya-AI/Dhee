@@ -3,7 +3,7 @@
 import os
 import tempfile
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -69,12 +69,12 @@ class TestLocationDetection:
 
 class TestBoundaryDetection:
     def test_no_current_scene(self, processor):
-        result = processor.detect_boundary("hello", datetime.utcnow().isoformat(), None)
+        result = processor.detect_boundary("hello", datetime.now(timezone.utc).isoformat(), None)
         assert result.is_new_scene is True
         assert result.reason == "no_scene"
 
     def test_time_gap(self, processor):
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         old_time = (now - timedelta(minutes=60)).isoformat()
         scene = {"start_time": old_time, "end_time": old_time, "memory_ids": ["a"]}
         result = processor.detect_boundary("hi", now.isoformat(), scene)
@@ -82,7 +82,7 @@ class TestBoundaryDetection:
         assert result.reason == "time_gap"
 
     def test_no_gap(self, processor):
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         recent = (now - timedelta(minutes=5)).isoformat()
         scene = {
             "start_time": recent,
@@ -95,7 +95,7 @@ class TestBoundaryDetection:
         assert result.is_new_scene is False
 
     def test_max_memories(self, processor):
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         recent = (now - timedelta(minutes=1)).isoformat()
         scene = {
             "start_time": recent,
@@ -109,7 +109,7 @@ class TestBoundaryDetection:
         assert result.reason == "max_memories"
 
     def test_topic_shift(self, processor):
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         recent = (now - timedelta(minutes=1)).isoformat()
         # Orthogonal embeddings = similarity 0
         scene_emb = [1.0, 0.0, 0.0]
@@ -126,7 +126,7 @@ class TestBoundaryDetection:
         assert result.reason == "topic_shift"
 
     def test_location_change(self, processor):
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         recent = (now - timedelta(minutes=1)).isoformat()
         scene = {
             "start_time": recent,
@@ -143,7 +143,7 @@ class TestBoundaryDetection:
 class TestSceneLifecycle:
     def test_create_scene(self, processor, db):
         mem_id = str(uuid.uuid4())
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         # Add a memory first
         db.add_memory({"id": mem_id, "memory": "test", "user_id": "u1"})
 
@@ -166,7 +166,7 @@ class TestSceneLifecycle:
     def test_add_memory_to_scene(self, processor, db):
         mem1 = str(uuid.uuid4())
         mem2 = str(uuid.uuid4())
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         db.add_memory({"id": mem1, "memory": "first", "user_id": "u1"})
         db.add_memory({"id": mem2, "memory": "second", "user_id": "u1"})
 
@@ -178,7 +178,7 @@ class TestSceneLifecycle:
 
     def test_close_scene(self, processor, db):
         mem_id = str(uuid.uuid4())
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         db.add_memory({"id": mem_id, "memory": "test", "user_id": "u1"})
 
         scene = processor.create_scene(mem_id, "u1", now, topic="topic")
@@ -190,7 +190,7 @@ class TestSceneLifecycle:
 
     def test_get_open_scene(self, processor, db):
         mem_id = str(uuid.uuid4())
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         db.add_memory({"id": mem_id, "memory": "test", "user_id": "u1"})
 
         processor.create_scene(mem_id, "u1", now, topic="t1")
@@ -201,7 +201,7 @@ class TestSceneLifecycle:
 class TestSceneSearch:
     def test_keyword_search(self, processor, db):
         mem_id = str(uuid.uuid4())
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         db.add_memory({"id": mem_id, "memory": "test", "user_id": "u1"})
 
         processor.create_scene(mem_id, "u1", now, topic="python debugging session")

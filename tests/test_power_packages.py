@@ -10,26 +10,11 @@ import pytest
 
 from dhee.configs.base import MemoryConfig, LLMConfig, EmbedderConfig, VectorStoreConfig
 from dhee.memory.main import FullMemory as Memory
+from tests._live import require_live_nvidia_tests
 
-# Load keys from .env file in project root
-_ENV_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
-if os.path.exists(_ENV_PATH):
-    with open(_ENV_PATH) as f:
-        for line in f:
-            line = line.strip()
-            if line and "=" in line and not line.startswith("#"):
-                key, _, value = line.partition("=")
-                value = value.strip().strip('"').strip("'")
-                os.environ.setdefault(key.strip(), value)
+pytestmark = pytest.mark.integration
 
-_NVIDIA_KEYS = (
-    "NVIDIA_API_KEY",
-    "NVIDIA_EMBEDDING_API_KEY",
-    "NVIDIA_QWEN_API_KEY",
-    "LLAMA_API_KEY",
-)
-if not any(os.environ.get(key) for key in _NVIDIA_KEYS):
-    pytest.skip("requires NVIDIA API credentials", allow_module_level=True)
+require_live_nvidia_tests("openai")
 
 # Power packages are separate installable packages (engram_router, engram_heartbeat, etc.)
 try:

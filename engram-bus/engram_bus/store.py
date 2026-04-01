@@ -110,6 +110,7 @@ class HandoffStore:
         self,
         session_id: Optional[str] = None,
         agent_id: Optional[str] = None,
+        repo: Optional[str] = None,
     ) -> Optional[Dict]:
         with self._lock:
             if session_id:
@@ -117,9 +118,32 @@ class HandoffStore:
                     "SELECT * FROM handoff_sessions WHERE id = ?", (session_id,)
                 ).fetchone()
             elif agent_id:
+                if repo is not None:
+                    row = self._conn.execute(
+                        """
+                        SELECT * FROM handoff_sessions
+                        WHERE agent_id = ? AND repo = ?
+                        ORDER BY updated DESC LIMIT 1
+                        """,
+                        (agent_id, repo),
+                    ).fetchone()
+                else:
+                    row = self._conn.execute(
+                        """
+                        SELECT * FROM handoff_sessions
+                        WHERE agent_id = ?
+                        ORDER BY updated DESC LIMIT 1
+                        """,
+                        (agent_id,),
+                    ).fetchone()
+            elif repo is not None:
                 row = self._conn.execute(
-                    "SELECT * FROM handoff_sessions WHERE agent_id = ? ORDER BY updated DESC LIMIT 1",
-                    (agent_id,),
+                    """
+                    SELECT * FROM handoff_sessions
+                    WHERE repo = ?
+                    ORDER BY updated DESC LIMIT 1
+                    """,
+                    (repo,),
                 ).fetchone()
             else:
                 return None
@@ -131,6 +155,7 @@ class HandoffStore:
         self,
         agent_id: Optional[str] = None,
         status: Optional[str] = None,
+        repo: Optional[str] = None,
     ) -> List[Dict]:
         clauses: List[str] = []
         params: List[Any] = []
@@ -140,6 +165,9 @@ class HandoffStore:
         if status:
             clauses.append("status = ?")
             params.append(status)
+        if repo is not None:
+            clauses.append("repo = ?")
+            params.append(repo)
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         with self._lock:
             rows = self._conn.execute(

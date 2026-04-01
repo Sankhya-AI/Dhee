@@ -25,6 +25,7 @@ from dhee.memory.retrieval_helpers import (
     normalize_bitemporal_value,
 )
 from dhee.memory.utils import (
+    build_filters_and_metadata,
     normalize_categories,
     parse_messages,
     strip_code_fences,
@@ -70,6 +71,7 @@ class MemoryWritePipeline:
         assign_to_scene_fn: Optional[Callable] = None,
         update_profiles_fn: Optional[Callable] = None,
         store_prospective_scenes_fn: Optional[Callable] = None,
+        persist_categories_fn: Optional[Callable] = None,
     ):
         self._db = db
         self._embedder = embedder
@@ -100,6 +102,7 @@ class MemoryWritePipeline:
         self._assign_to_scene_fn = assign_to_scene_fn
         self._update_profiles_fn = update_profiles_fn
         self._store_prospective_scenes_fn = store_prospective_scenes_fn
+        self._persist_categories_fn = persist_categories_fn
 
     # ------------------------------------------------------------------
     # Convenience accessors for lazy processors
@@ -189,6 +192,118 @@ class MemoryWritePipeline:
 
     def _infer_scope(self, **kwargs):
         return self._scope_resolver.infer_scope(**kwargs) if self._scope_resolver else "agent"
+
+    def _persist_categories(self) -> None:
+        if self._persist_categories_fn:
+            self._persist_categories_fn()
+
+    def _render_existing_categories(self, limit: int = 30) -> Optional[str]:
+        cat_proc = self._category_processor
+        if not cat_proc:
+            return None
+        cats = cat_proc.get_all_categories()
+        if not cats:
+            return None
+        return "\n".join(
+            f"- {c['id']}: {c['name']} — {c.get('description', '')}"
+            for c in cats[:limit]
+        )
+
+    def _insert_fact_vectors(
+        self,
+        *,
+        fact_entries: List[Dict[str, Any]],
+        warning_prefix: str,
+    ) -> float:
+        if not fact_entries or not self._vector_store:
+            return 0.0
+
+        embed_calls = 0.0
+        fact_embeddings: List[List[float]] = []
+        try:
+            fact_texts = [entry["fact_text"] for entry in fact_entries]
+            for start in range(0, len(fact_texts), 50):
+                sub = fact_texts[start:start + 50]
+                fact_embeddings.extend(
+                    self._embedder.embed_batch(sub, memory_action="add")
+                )
+                embed_calls += 1.0
+
+            fact_vectors: List[List[float]] = []
+            fact_payloads: List[Dict[str, Any]] = []
+            fact_ids: List[str] = []
+            for entry, fact_embedding in zip(fact_entries, fact_embeddings):
+                fact_vectors.append(fact_embedding)
+                fact_payloads.append(
+                    {
+                        "memory_id": entry["memory_id"],
+                        "is_fact": True,
+                        "fact_index": entry["fact_index"],
+                        "fact_text": entry["fact_text"],
+                        "user_id": entry.get("user_id"),
+                        "agent_id": entry.get("agent_id"),
+                    }
+                )
+                fact_ids.append(
+                    f"{entry['memory_id']}__fact_{entry['fact_index']}"
+                )
+            if fact_vectors:
+                self._vector_store.insert(
+                    vectors=fact_vectors,
+                    payloads=fact_payloads,
+                    ids=fact_ids,
+                )
+        except Exception as exc:
+            logger.warning("%s: %s", warning_prefix, exc)
+            return 0.0
+
+        return embed_calls
+
+    def _apply_entity_updates(
+        self,
+        *,
+        memory_id: str,
+        entities: Optional[List[Any]],
+        warning_prefix: str,
+        auto_link: bool = True,
+    ) -> None:
+        knowledge_graph = self._graph
+        if not knowledge_graph or not entities:
+            return
+        try:
+            for entity in entities:
+                existing_ent = knowledge_graph._get_or_create_entity(
+                    entity.name, entity.entity_type,
+                )
+                existing_ent.memory_ids.add(memory_id)
+            knowledge_graph.memory_entities[memory_id] = {
+                entity.name for entity in entities
+            }
+            if auto_link and self._graph_config.auto_link_entities:
+                knowledge_graph.link_by_shared_entities(memory_id)
+        except Exception as exc:
+            logger.warning("%s for %s: %s", warning_prefix, memory_id, exc)
+
+    def _apply_profile_updates_batch(
+        self,
+        *,
+        memory_id: str,
+        user_id: str,
+        profile_updates: Optional[List[Any]],
+        warning_prefix: str,
+    ) -> None:
+        profile_proc = self._profile_processor
+        if not profile_proc or not profile_updates:
+            return
+        try:
+            for profile_update in profile_updates:
+                profile_proc.apply_update(
+                    profile_update=profile_update,
+                    memory_id=memory_id,
+                    user_id=user_id,
+                )
+        except Exception as exc:
+            logger.warning("%s for %s: %s", warning_prefix, memory_id, exc)
 
     # ------------------------------------------------------------------
     # Extracted public methods
@@ -1175,6 +1290,644 @@ class MemoryWritePipeline:
             "vector_nodes": 1,
             "memory_type": memory_type,
             "enrichment_status": "pending",
+        }
+
+    def process_memory_batch(
+        self,
+        items: List[Dict[str, Any]],
+        *,
+        user_id: Optional[str],
+        agent_id: Optional[str],
+        run_id: Optional[str],
+        app_id: Optional[str],
+        metadata: Optional[Dict[str, Any]],
+        filters: Optional[Dict[str, Any]],
+        initial_strength: float,
+        echo_depth: Optional[str],
+        batch_config,
+        **common_kwargs: Any,
+    ) -> List[Dict[str, Any]]:
+        """Process a batch of memory items with batched echo/embed/DB."""
+        contents: List[str] = []
+        item_metadata_list: List[Dict[str, Any]] = []
+        for item in items:
+            content = item.get("content") or item.get("messages", "")
+            if isinstance(content, list):
+                content = " ".join(
+                    m.get("content", "") for m in content if isinstance(m, dict)
+                )
+            contents.append(str(content).strip())
+            item_meta = dict(metadata or {})
+            item_meta.update(item.get("metadata") or {})
+            item_metadata_list.append(item_meta)
+
+        batch_llm_calls_total = 0.0
+        batch_embed_calls_total = 0.0
+        batch_input_tokens_total = 0.0
+        batch_output_tokens_total = 0.0
+
+        echo_results = [None] * len(contents)
+        category_results = [None] * len(contents)
+        enrichment_results = [None] * len(contents)
+
+        enrichment_config = getattr(self._config, "enrichment", None)
+        echo_proc = self._echo_processor
+        cat_proc = self._category_processor
+        unified = self._unified_enrichment
+        use_unified = (
+            unified is not None
+            and self._echo_config.enable_echo
+            and batch_config.batch_echo
+        )
+
+        if use_unified:
+            try:
+                depth_override = (
+                    EchoDepth(echo_depth)
+                    if echo_depth
+                    else EchoDepth(self._echo_config.default_depth)
+                )
+                existing_cats = self._render_existing_categories()
+                enrich_batch_size = (
+                    enrichment_config.max_batch_size if enrichment_config else 10
+                )
+                for start in range(0, len(contents), enrich_batch_size):
+                    end = min(start + enrich_batch_size, len(contents))
+                    sub_contents = contents[start:end]
+                    sub_results = unified.enrich_batch(
+                        sub_contents,
+                        depth=depth_override,
+                        existing_categories=existing_cats,
+                        include_entities=(
+                            enrichment_config.include_entities
+                            if enrichment_config
+                            else True
+                        ),
+                        include_profiles=(
+                            enrichment_config.include_profiles
+                            if enrichment_config
+                            else True
+                        ),
+                    )
+                    sub_input_tokens = sum(
+                        estimate_token_count(c) for c in sub_contents
+                    )
+                    sub_input_tokens += estimate_token_count(existing_cats)
+                    batch_llm_calls_total += 1.0
+                    batch_input_tokens_total += sub_input_tokens
+                    batch_output_tokens_total += estimate_output_tokens(
+                        sub_input_tokens
+                    )
+                    for offset, enrichment in enumerate(sub_results):
+                        idx = start + offset
+                        if enrichment.echo_result:
+                            echo_results[idx] = enrichment.echo_result
+                        if enrichment.category_match:
+                            category_results[idx] = enrichment.category_match
+                        enrichment_results[idx] = enrichment
+                logger.info(
+                    "Unified batch enrichment completed for %d memories",
+                    len(contents),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Unified batch enrichment failed, falling back to separate: %s",
+                    exc,
+                )
+                echo_results = [None] * len(contents)
+                category_results = [None] * len(contents)
+                enrichment_results = [None] * len(contents)
+                use_unified = False
+
+        if not use_unified:
+            if echo_proc and self._echo_config.enable_echo and batch_config.batch_echo:
+                depth_override = (
+                    EchoDepth(echo_depth)
+                    if echo_depth
+                    else EchoDepth(self._echo_config.default_depth)
+                )
+                if depth_override != EchoDepth.SHALLOW:
+                    echo_input_tokens = sum(
+                        estimate_token_count(c) for c in contents if c
+                    )
+                    non_empty_count = sum(1 for c in contents if c)
+                    batch_llm_calls_total += float(non_empty_count)
+                    batch_input_tokens_total += echo_input_tokens
+                    batch_output_tokens_total += estimate_output_tokens(
+                        echo_input_tokens
+                    )
+                try:
+                    echo_results = echo_proc.process_batch(
+                        contents, depth=depth_override
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Batch echo failed, processing individually: %s",
+                        exc,
+                    )
+                    for idx, content in enumerate(contents):
+                        if not content:
+                            continue
+                        try:
+                            depth_override = (
+                                EchoDepth(echo_depth) if echo_depth else None
+                            )
+                            echo_results[idx] = echo_proc.process(
+                                content, depth=depth_override
+                            )
+                        except Exception as fallback_exc:
+                            logger.debug(
+                                "Individual echo fallback failed for batch item %d: %s",
+                                idx,
+                                fallback_exc,
+                            )
+
+            if (
+                cat_proc
+                and self._category_config.auto_categorize
+                and batch_config.batch_category
+            ):
+                if self._category_config.use_llm_categorization:
+                    cat_input_tokens = sum(
+                        estimate_token_count(c) for c in contents if c
+                    )
+                    non_empty_count = sum(1 for c in contents if c)
+                    batch_llm_calls_total += float(non_empty_count)
+                    batch_input_tokens_total += cat_input_tokens
+                    batch_output_tokens_total += estimate_output_tokens(
+                        cat_input_tokens
+                    )
+                try:
+                    category_results = cat_proc.detect_categories_batch(
+                        contents,
+                        use_llm=self._category_config.use_llm_categorization,
+                    )
+                except Exception as exc:
+                    logger.warning("Batch category failed: %s", exc)
+
+        primary_texts: List[str] = []
+        for idx, content in enumerate(contents):
+            primary_texts.append(
+                self.select_primary_text(content, echo_results[idx])
+            )
+
+        if batch_config.batch_embed:
+            try:
+                embeddings: List[List[float]] = []
+                for start in range(0, len(primary_texts), 50):
+                    sub = primary_texts[start:start + 50]
+                    embeddings.extend(
+                        self._embedder.embed_batch(sub, memory_action="add")
+                    )
+                    batch_embed_calls_total += 1.0
+            except Exception as exc:
+                logger.warning(
+                    "Batch embed failed, falling back to sequential: %s",
+                    exc,
+                )
+                embeddings = [
+                    self._embedder.embed(text, memory_action="add")
+                    for text in primary_texts
+                ]
+                batch_embed_calls_total += float(len(primary_texts))
+        else:
+            embeddings = [
+                self._embedder.embed(text, memory_action="add")
+                for text in primary_texts
+            ]
+            batch_embed_calls_total += float(len(primary_texts))
+
+        echo_node_texts: List[str] = []
+        for idx, content in enumerate(contents):
+            echo_result = echo_results[idx]
+            primary_text = primary_texts[idx]
+            if primary_text != content:
+                cleaned = content.strip()
+                if cleaned:
+                    echo_node_texts.append(cleaned)
+            if echo_result:
+                for paraphrase in echo_result.paraphrases:
+                    cleaned = str(paraphrase).strip()
+                    if cleaned:
+                        echo_node_texts.append(cleaned)
+                for question in echo_result.questions:
+                    cleaned = str(question).strip()
+                    if cleaned:
+                        echo_node_texts.append(cleaned)
+
+        embedding_cache: Dict[str, List[float]] = {}
+        if echo_node_texts:
+            unique_texts = list(dict.fromkeys(echo_node_texts))
+            try:
+                all_echo_embeddings: List[List[float]] = []
+                for start in range(0, len(unique_texts), 50):
+                    sub = unique_texts[start:start + 50]
+                    all_echo_embeddings.extend(
+                        self._embedder.embed_batch(sub, memory_action="add")
+                    )
+                    batch_embed_calls_total += 1.0
+                for text, emb in zip(unique_texts, all_echo_embeddings):
+                    embedding_cache[text] = emb
+                logger.info(
+                    "Batch-embedded %d echo node texts in %d API calls",
+                    len(unique_texts),
+                    (len(unique_texts) + 49) // 50,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Batch echo node embedding failed, will embed individually: %s",
+                    exc,
+                )
+
+        processed_metadata_base, effective_filters = build_filters_and_metadata(
+            user_id=user_id,
+            agent_id=agent_id,
+            run_id=run_id,
+            input_metadata=metadata,
+            input_filters=filters,
+        )
+        if app_id:
+            processed_metadata_base["app_id"] = app_id
+
+        now = datetime.now(timezone.utc).isoformat()
+        memory_records: List[Dict[str, Any]] = []
+        record_entries: List[Dict[str, Any]] = []
+        episodic_rows: List[Tuple[str, Optional[str], str, Dict[str, Any]]] = []
+        vector_batch: List[Tuple[List[List[float]], List[Dict[str, Any]], List[str]]] = []
+        results: List[Dict[str, Any]] = []
+
+        for idx, content in enumerate(contents):
+            if not content:
+                continue
+
+            owner_user_id = items[idx].get("user_id") or user_id
+            memory_id = str(uuid.uuid4())
+            mem_metadata = dict(processed_metadata_base)
+            mem_metadata.update(item_metadata_list[idx])
+            mem_metadata = attach_bitemporal_metadata(
+                mem_metadata, observed_time=now
+            )
+
+            echo_result = echo_results[idx]
+            effective_strength = initial_strength
+            mem_categories = list(items[idx].get("categories") or [])
+
+            if echo_result:
+                effective_strength = (
+                    initial_strength * echo_result.strength_multiplier
+                )
+                mem_metadata.update(echo_result.to_metadata())
+                if not mem_categories and echo_result.category:
+                    mem_categories = [echo_result.category]
+
+            cat_match = category_results[idx]
+            if cat_match and not mem_categories:
+                mem_categories = [cat_match.category_id]
+                mem_metadata["category_confidence"] = cat_match.confidence
+                mem_metadata["category_auto"] = True
+
+            embedding = embeddings[idx]
+            namespace_value = str(
+                mem_metadata.get("namespace", "default") or "default"
+            ).strip() or "default"
+            memory_type = self.classify_memory_type(
+                mem_metadata, mem_metadata.get("role", "user")
+            )
+
+            s_fast_val = s_mid_val = s_slow_val = None
+            distillation_config = self._distillation_config
+            if distillation_config and distillation_config.enable_multi_trace:
+                s_fast_val, s_mid_val, s_slow_val = initialize_traces(
+                    effective_strength, is_new=True
+                )
+
+            memory_data = {
+                "id": memory_id,
+                "memory": content,
+                "user_id": owner_user_id,
+                "agent_id": items[idx].get("agent_id") or agent_id,
+                "run_id": items[idx].get("run_id") or run_id,
+                "app_id": items[idx].get("app_id") or app_id,
+                "metadata": mem_metadata,
+                "categories": mem_categories,
+                "immutable": items[idx].get("immutable", False),
+                "expiration_date": items[idx].get("expiration_date"),
+                "created_at": now,
+                "updated_at": now,
+                "layer": "sml",
+                "strength": effective_strength,
+                "access_count": 0,
+                "last_accessed": now,
+                "embedding": embedding,
+                "confidentiality_scope": "work",
+                "source_type": "mcp",
+                "source_app": items[idx].get("source_app"),
+                "source_event_id": mem_metadata.get("source_event_id"),
+                "decay_lambda": self._fade_config.sml_decay_rate,
+                "status": "active",
+                "importance": mem_metadata.get("importance", 0.5),
+                "sensitivity": mem_metadata.get("sensitivity", "normal"),
+                "namespace": namespace_value,
+                "memory_type": memory_type,
+                "s_fast": s_fast_val,
+                "s_mid": s_mid_val,
+                "s_slow": s_slow_val,
+            }
+            memory_records.append(memory_data)
+            record_entries.append(
+                {
+                    "source_index": idx,
+                    "record": memory_data,
+                    "user_id": owner_user_id,
+                    "content": content,
+                }
+            )
+            episodic_rows.append((memory_id, owner_user_id, content, mem_metadata))
+
+            vectors, payloads, vector_ids = build_index_vectors(
+                memory_id=memory_id,
+                content=content,
+                primary_text=primary_texts[idx],
+                embedding=embedding,
+                echo_result=echo_result,
+                metadata=mem_metadata,
+                categories=mem_categories,
+                user_id=owner_user_id,
+                agent_id=items[idx].get("agent_id") or agent_id,
+                run_id=items[idx].get("run_id") or run_id,
+                app_id=items[idx].get("app_id") or app_id,
+                embedder=self._embedder,
+                embedding_cache=embedding_cache if embedding_cache else None,
+            )
+            if vectors:
+                vector_batch.append((vectors, payloads, vector_ids))
+
+            results.append(
+                {
+                    "id": memory_id,
+                    "memory": content,
+                    "event": "ADD",
+                    "layer": "sml",
+                    "strength": effective_strength,
+                    "echo_depth": (
+                        echo_result.echo_depth.value if echo_result else None
+                    ),
+                    "categories": mem_categories,
+                    "namespace": namespace_value,
+                    "memory_type": memory_type,
+                }
+            )
+
+        if memory_records:
+            try:
+                self._db.add_memories_batch(memory_records)
+            except Exception as exc:
+                logger.error(
+                    "Batch DB insert failed, falling back to sequential: %s",
+                    exc,
+                )
+                for record in memory_records:
+                    self._db.add_memory(record)
+
+        for vectors, payloads, vector_ids in vector_batch:
+            try:
+                self._vector_store.insert(
+                    vectors=vectors,
+                    payloads=payloads,
+                    ids=vector_ids,
+                )
+            except Exception as exc:
+                logger.error("Vector insert failed in batch: %s", exc)
+
+        for memory_id, owner_user_id, content, mem_metadata in episodic_rows:
+            _index_episodic(
+                db=self._db,
+                config=self._config,
+                memory_id=memory_id,
+                user_id=owner_user_id,
+                content=content,
+                metadata=mem_metadata,
+            )
+
+        if cat_proc:
+            for entry in record_entries:
+                record = entry["record"]
+                if record.get("categories"):
+                    for cat_id in record["categories"]:
+                        cat_proc.update_category_stats(
+                            cat_id,
+                            record["strength"],
+                            is_addition=True,
+                        )
+
+        fact_entries: List[Dict[str, Any]] = []
+        for entry in record_entries:
+            idx = entry["source_index"]
+            enrichment = enrichment_results[idx]
+            if not enrichment or not enrichment.facts:
+                continue
+            for fact_index, fact_text in enumerate(enrichment.facts[:8]):
+                cleaned = fact_text.strip()
+                if cleaned and len(cleaned) >= 10:
+                    fact_entries.append(
+                        {
+                            "memory_id": entry["record"]["id"],
+                            "fact_index": fact_index,
+                            "fact_text": cleaned,
+                            "user_id": entry["user_id"],
+                            "agent_id": entry["record"].get("agent_id"),
+                        }
+                    )
+        batch_embed_calls_total += self._insert_fact_vectors(
+            fact_entries=fact_entries,
+            warning_prefix="Batch fact embedding/insert failed",
+        )
+
+        engram_extractor = self._engram_extractor
+        context_resolver = self._context_resolver
+        for entry in record_entries:
+            idx = entry["source_index"]
+            record = entry["record"]
+            enrichment = enrichment_results[idx]
+            if enrichment:
+                self._apply_entity_updates(
+                    memory_id=record["id"],
+                    entities=enrichment.entities,
+                    warning_prefix="Entity linking failed",
+                )
+                self._apply_profile_updates_batch(
+                    memory_id=record["id"],
+                    user_id=record.get("user_id") or user_id or "default",
+                    profile_updates=enrichment.profile_updates,
+                    warning_prefix="Profile update failed",
+                )
+
+            if engram_extractor:
+                try:
+                    engram = engram_extractor.extract(
+                        content=record.get("memory", ""),
+                        session_context=None,
+                        existing_metadata=record.get("metadata"),
+                        user_id=record.get("user_id") or user_id or "default",
+                    )
+                    if context_resolver and engram:
+                        context_resolver.store_engram(engram, record["id"])
+                except Exception as exc:
+                    logger.warning(
+                        "Engram extraction failed for %s: %s",
+                        record["id"],
+                        exc,
+                    )
+
+        if episodic_rows:
+            sample_count = float(len(episodic_rows))
+            llm_calls_per_memory = batch_llm_calls_total / sample_count
+            input_tokens_per_memory = batch_input_tokens_total / sample_count
+            output_tokens_per_memory = batch_output_tokens_total / sample_count
+            embed_calls_per_memory = batch_embed_calls_total / sample_count
+            for _, owner_user_id, _, _ in episodic_rows:
+                self._record_cost(
+                    phase="write",
+                    user_id=owner_user_id,
+                    llm_calls=llm_calls_per_memory,
+                    input_tokens=input_tokens_per_memory,
+                    output_tokens=output_tokens_per_memory,
+                    embed_calls=embed_calls_per_memory,
+                )
+
+        return results
+
+    def enrich_pending(
+        self,
+        *,
+        user_id: str = "default",
+        batch_size: int = 10,
+        max_batches: int = 5,
+    ) -> Dict[str, Any]:
+        """Batch-enrich memories that were stored with deferred enrichment."""
+        limit = batch_size * max_batches
+        pending = self._db.get_pending_enrichment(user_id=user_id, limit=limit)
+        if not pending:
+            return {"enriched_count": 0, "batches": 0, "remaining": 0}
+
+        enriched_count = 0
+        batches_processed = 0
+        unified = self._unified_enrichment
+
+        for start in range(0, len(pending), batch_size):
+            batch = pending[start:start + batch_size]
+            contents = [memory.get("memory", "") for memory in batch]
+
+            enrichment_results = None
+            if unified is not None:
+                try:
+                    enrichment_results = unified.enrich_batch(
+                        contents,
+                        depth=EchoDepth.MEDIUM,
+                        existing_categories=self._render_existing_categories(),
+                        include_entities=True,
+                        include_profiles=True,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Unified batch enrichment failed in enrich_pending: %s",
+                        exc,
+                    )
+                    enrichment_results = None
+
+            if enrichment_results is None:
+                enrichment_results = []
+                for content in contents:
+                    if unified is not None:
+                        try:
+                            enrichment_results.append(
+                                unified.enrich(content, depth=EchoDepth.MEDIUM)
+                            )
+                        except Exception as exc:
+                            logger.debug(
+                                "Single-memory enrichment fallback failed: %s",
+                                exc,
+                            )
+                            enrichment_results.append(None)
+                    else:
+                        enrichment_results.append(None)
+
+            db_updates: List[Dict[str, Any]] = []
+            fact_entries: List[Dict[str, Any]] = []
+
+            for memory, enrichment in zip(batch, enrichment_results):
+                mem_id = memory["id"]
+                mem_meta = memory.get("metadata", {}) or {}
+                mem_cats = memory.get("categories", []) or []
+
+                if enrichment:
+                    if enrichment.echo_result:
+                        mem_meta.update(enrichment.echo_result.to_metadata())
+                        if not mem_cats and enrichment.echo_result.category:
+                            mem_cats = [enrichment.echo_result.category]
+
+                    if enrichment.category_match and not mem_cats:
+                        mem_cats = [enrichment.category_match.category_id]
+                        mem_meta["category_confidence"] = (
+                            enrichment.category_match.confidence
+                        )
+                        mem_meta["category_auto"] = True
+
+                    if enrichment.facts:
+                        mem_meta["enrichment_facts"] = enrichment.facts[:8]
+
+                    self._apply_entity_updates(
+                        memory_id=mem_id,
+                        entities=enrichment.entities,
+                        warning_prefix="Entity linking failed during enrichment",
+                    )
+                    self._apply_profile_updates_batch(
+                        memory_id=mem_id,
+                        user_id=user_id,
+                        profile_updates=enrichment.profile_updates,
+                        warning_prefix="Profile update failed during enrichment",
+                    )
+
+                    if enrichment.facts:
+                        for fact_index, fact_text in enumerate(enrichment.facts[:8]):
+                            cleaned = fact_text.strip()
+                            if cleaned and len(cleaned) >= 10:
+                                fact_entries.append(
+                                    {
+                                        "memory_id": mem_id,
+                                        "fact_index": fact_index,
+                                        "fact_text": cleaned,
+                                        "user_id": user_id,
+                                        "agent_id": memory.get("agent_id"),
+                                    }
+                                )
+
+                mem_meta["enrichment_status"] = "complete"
+                db_updates.append(
+                    {
+                        "id": mem_id,
+                        "metadata": mem_meta,
+                        "categories": mem_cats,
+                        "enrichment_status": "complete",
+                    }
+                )
+                enriched_count += 1
+
+            self._insert_fact_vectors(
+                fact_entries=fact_entries,
+                warning_prefix="Fact embedding failed during enrichment",
+            )
+            self._db.update_enrichment_bulk(db_updates)
+            batches_processed += 1
+
+        remaining_count = len(
+            self._db.get_pending_enrichment(user_id=user_id, limit=1)
+        )
+
+        return {
+            "enriched_count": enriched_count,
+            "batches": batches_processed,
+            "remaining": remaining_count,
         }
 
     def extract_memories(

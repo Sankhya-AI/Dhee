@@ -36,10 +36,13 @@ def get_last_session(
     repo: Optional[str] = None,
     fallback_log_recovery: bool = True,
     db_path: Optional[str] = None,
+    user_id: Optional[str] = None,
+    requester_agent_id: Optional[str] = None,
 ) -> Optional[Dict]:
     """Get the last session for *agent_id*, falling back to JSONL logs.
 
-    1. Try ``bus.get_session(agent_id=agent_id)``
+    1. Try ``bus.get_session(agent_id=agent_id, repo=repo)`` when a repo is
+       provided, otherwise fall back to agent-only lookup.
     2. If found, attach latest checkpoint journal entries.
     3. If not found **and** *fallback_log_recovery* is ``True`` **and** *repo*
        is provided, parse the most recent Claude Code conversation log for
@@ -50,11 +53,18 @@ def get_last_session(
     agent_id:
         The source agent whose session to load (default ``"mcp-server"``).
     repo:
-        Absolute path to the repository root, used for log-based fallback.
+        Absolute path to the repository root. When provided, bus lookup is
+        repo-scoped before log fallback is attempted.
     fallback_log_recovery:
         Whether to fall back to JSONL log parsing if no bus session exists.
     db_path:
         Override path for the handoff SQLite database.
+    user_id:
+        Reserved compatibility parameter for higher-level continuity callers.
+        Currently unused because handoff records are agent/repo scoped.
+    requester_agent_id:
+        Reserved compatibility parameter for higher-level continuity callers.
+        Currently unused because handoff lookup is driven by *agent_id*.
 
     Returns
     -------
@@ -63,7 +73,7 @@ def get_last_session(
     bus = None
     try:
         bus = _get_bus(db_path)
-        session = bus.get_session(agent_id=agent_id)
+        session = bus.get_session(agent_id=agent_id, repo=repo)
 
         if session is not None:
             # Attach latest checkpoints
@@ -113,6 +123,8 @@ def save_session_digest(
     key_commands: Optional[List[str]] = None,
     test_results: Optional[str] = None,
     db_path: Optional[str] = None,
+    user_id: Optional[str] = None,
+    requester_agent_id: Optional[str] = None,
 ) -> Dict:
     """Save a session digest to the dhee-bus handoff store.
 

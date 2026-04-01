@@ -194,6 +194,7 @@ class HyperContext:
     critical_blockers: List[str] = field(default_factory=list)
     contradictions: List[Dict[str, Any]] = field(default_factory=list)
     action_items: List[str] = field(default_factory=list)
+    state_errors: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -221,6 +222,7 @@ class HyperContext:
             "critical_blockers": self.critical_blockers[:5],
             "contradictions": self.contradictions[:5],
             "action_items": self.action_items[:10],
+            "state_errors": self.state_errors[:10],
             "meta": {
                 "n_insights": len(self.insights),
                 "n_active_intentions": len(self.intentions),
@@ -235,6 +237,7 @@ class HyperContext:
                 "n_action_items": len(self.action_items),
                 "n_critical_blockers": len(self.critical_blockers),
                 "performance_tracked": len(self.performance) > 0,
+                "n_state_errors": len(self.state_errors),
             },
         }
 
@@ -257,6 +260,8 @@ class HyperContext:
             result["warnings"] = self.warnings[:3]
         if self.contradictions:
             result["contradictions"] = self.contradictions[:3]
+        if self.state_errors:
+            result["state_errors"] = self.state_errors[:3]
         return result
 
 
@@ -330,6 +335,32 @@ class Buddhi:
             )
         return self._meta_buddhi
 
+    @staticmethod
+    def _degradation_message(component: str, exc: Exception) -> str:
+        return f"{component}: {type(exc).__name__}: {exc}"
+
+    def _record_context_degradation(
+        self,
+        state_errors: List[str],
+        warnings: List[str],
+        *,
+        component: str,
+        exc: Exception,
+        warning_prefix: str = "Context assembly degraded",
+        include_traceback: bool = True,
+    ) -> None:
+        message = self._degradation_message(component, exc)
+        logger.warning("%s", message, exc_info=include_traceback)
+        state_errors.append(message)
+        warnings.append(f"{warning_prefix}: {message}")
+
+    @staticmethod
+    def _stats_error(component: str, exc: Exception) -> Dict[str, str]:
+        return {
+            "component": component,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
     # Deprecated forwarders — use self._kernel.* directly.
     # Kept for backward compat with test_cognition_v3.py.
 
@@ -360,13 +391,20 @@ class Buddhi:
         Called at session start or when context is needed. Returns
         everything: performance, insights, skills, intentions, warnings.
         """
+        context_errors: List[str] = []
+
         # 1. Last session (via kernel handoff, not memory object)
         last_session = None
         try:
             from dhee.core.kernel import get_last_session
             last_session = get_last_session()
-        except Exception:
-            pass
+        except Exception as exc:
+            self._record_context_degradation(
+                context_errors,
+                [],
+                component="handoff.get_last_session",
+                exc=exc,
+            )
 
         # 2. Performance snapshots for relevant task types
         performance = self._get_performance_snapshots(user_id, task_description)
@@ -390,14 +428,19 @@ class Buddhi:
                         }
                         for r in (results if isinstance(results, list) else [])
                     ]
-            except Exception:
-                pass
+            except Exception as exc:
+                self._record_context_degradation(
+                    context_errors,
+                    [],
+                    component="skills.search",
+                    exc=exc,
+                )
 
-        # 5. Check pending intentions (via kernel)
-        triggered = self._kernel.intentions.check_triggers(user_id, task_description)
-
-        # 6. Generate proactive warnings
+        # 5. Generate proactive warnings
         warnings = self._generate_warnings(performance, insights)
+        warnings.extend(
+            [f"Context assembly degraded: {message}" for message in context_errors]
+        )
 
         # 7. Top memories
         memories = []
@@ -411,8 +454,13 @@ class Buddhi:
                 else:
                     result = memory.get_all(user_id=user_id, limit=10)
                     memories = result.get("results", [])
-            except Exception:
-                pass
+            except Exception as exc:
+                self._record_context_degradation(
+                    context_errors,
+                    warnings,
+                    component="memory.search",
+                    exc=exc,
+                )
 
         # 8. Track query sequence (for future pattern prediction)
         if task_description:
@@ -429,8 +477,13 @@ class Buddhi:
                 task_description or "", user_id=user_id, limit=5,
             )
             contrasts = [p.to_compact() for p in pairs]
-        except Exception:
-            pass
+        except Exception as exc:
+            self._record_context_degradation(
+                context_errors,
+                warnings,
+                component="contrastive.retrieve_contrasts",
+                exc=exc,
+            )
 
         # 10. Heuristics (Phase 2: ERL pattern)
         heuristics = []
@@ -440,18 +493,51 @@ class Buddhi:
                 task_description or "", user_id=user_id, limit=5,
             )
             heuristics = [h.to_compact() for h in relevant]
-        except Exception:
-            pass
+        except Exception as exc:
+            self._record_context_degradation(
+                context_errors,
+                warnings,
+                component="heuristics.retrieve_relevant",
+                exc=exc,
+            )
 
-        # 11-14. Cognitive state from kernel (episodes, tasks, policies, beliefs)
-        cog_state = self._kernel.get_cognitive_state(user_id, task_description)
+        # 6-10. Cognitive state from kernel (episodes, tasks, policies, beliefs)
+        try:
+            cog_state = self._kernel.get_cognitive_state(user_id, task_description)
+        except Exception as exc:
+            self._record_context_degradation(
+                context_errors,
+                warnings,
+                component="kernel.get_cognitive_state",
+                exc=exc,
+            )
+            cog_state = {
+                "episodes": [],
+                "task_states": [],
+                "policies": [],
+                "beliefs": [],
+                "triggered_intentions": [],
+                "belief_warnings": [],
+                "step_policies": [],
+                "state_errors": [],
+                "active_step": None,
+            }
         episodes = cog_state.get("episodes", [])
         task_states = cog_state.get("task_states", [])
         policies = cog_state.get("policies", [])
         beliefs = cog_state.get("beliefs", [])
+        triggered = cog_state.get("triggered_intentions", [])
         warnings.extend(cog_state.get("belief_warnings", []))
+        state_error_messages = [
+            f"{entry.get('component', 'unknown')}: {entry.get('error', 'unknown error')}"
+            for entry in cog_state.get("state_errors", [])
+            if isinstance(entry, dict)
+        ]
+        for message in state_error_messages:
+            warnings.append(f"Cognitive state degraded: {message}")
+        state_error_messages = context_errors + state_error_messages
 
-        # 15. Operational cognition packet (Phase 4)
+        # 11. Operational cognition packet (Phase 4)
         active_step_desc = cog_state.get("active_step")
         active_step = {"description": active_step_desc} if active_step_desc else None
         step_policies_list = cog_state.get("step_policies", [])
@@ -475,8 +561,18 @@ class Buddhi:
                     "confidence_b": round(b2.confidence, 2),
                     "severity": round(1.0 - severity, 2),
                 })
-        except Exception:
-            pass
+        except Exception as exc:
+            self._record_context_degradation(
+                context_errors,
+                warnings,
+                component="beliefs.get_contradictions",
+                exc=exc,
+            )
+            state_error_messages = context_errors + [
+                message
+                for message in state_error_messages
+                if message not in context_errors
+            ]
 
         # Build prioritized action items
         action_items = []
@@ -515,6 +611,7 @@ class Buddhi:
             critical_blockers=critical_blockers,
             contradictions=contradictions_list,
             action_items=action_items,
+            state_errors=state_error_messages,
         )
 
     # ------------------------------------------------------------------
@@ -831,14 +928,22 @@ class Buddhi:
                 content=content[:500],
                 memory_id=memory_id,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "Buddhi on_memory_stored episode event failed: %s",
+                exc,
+                exc_info=True,
+            )
 
         # 3. Belief creation for factual statements (via kernel)
         try:
             self._maybe_create_belief(content, user_id, memory_id)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "Buddhi on_memory_stored belief creation failed: %s",
+                exc,
+                exc_info=True,
+            )
 
         return intention
 
@@ -988,8 +1093,12 @@ class Buddhi:
                     task_type=task_type,
                     user_id=user_id,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "Buddhi reflect contrastive update failed: %s",
+                    exc,
+                    exc_info=True,
+                )
 
         # Compute baseline from moving average for utility scoring (D2Skill)
         # Moved before heuristic/policy blocks so all can use it
@@ -1001,8 +1110,12 @@ class Buddhi:
                 if len(records) >= 2:
                     recent = records[-min(10, len(records)):]
                     baseline_score = sum(r["score"] for r in recent) / len(recent)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "Buddhi reflect baseline computation failed: %s",
+                    exc,
+                    exc_info=True,
+                )
 
         # Phase 2: Distill heuristic from what_worked
         if what_worked:
@@ -1021,8 +1134,12 @@ class Buddhi:
                     baseline_score=baseline_score,
                     actual_score=outcome_score,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "Buddhi reflect heuristic distillation failed: %s",
+                    exc,
+                    exc_info=True,
+                )
 
         # Delegate cross-structure learning to kernel
         # Kernel handles: policy outcomes, step extraction, belief-policy decay,
@@ -1049,8 +1166,12 @@ class Buddhi:
                     self._kernel.beliefs.reinforce_belief(
                         belief.id, what_worked, source="outcome",
                     )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "Buddhi reflect belief reinforcement failed: %s",
+                    exc,
+                    exc_info=True,
+                )
 
         if what_failed:
             try:
@@ -1061,8 +1182,12 @@ class Buddhi:
                     self._kernel.beliefs.challenge_belief(
                         belief.id, what_failed, source="outcome",
                     )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "Buddhi reflect belief challenge failed: %s",
+                    exc,
+                    exc_info=True,
+                )
 
         # Buddhi-owned: insight utility tracking (buddhi owns insights)
         try:
@@ -1076,8 +1201,12 @@ class Buddhi:
                     actual_score=outcome_score,
                 )
             self._save_insights()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "Buddhi reflect insight utility tracking failed: %s",
+                exc,
+                exc_info=True,
+            )
 
         # Buddhi-owned: contrastive pair utility (buddhi owns contrastive store)
         try:
@@ -1092,8 +1221,12 @@ class Buddhi:
                     actual_score=outcome_score,
                 )
             store._save_all()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "Buddhi reflect contrastive utility tracking failed: %s",
+                exc,
+                exc_info=True,
+            )
 
         # Buddhi-owned: heuristic reinforcement from positive policy deltas
         if what_worked:
@@ -1114,8 +1247,12 @@ class Buddhi:
                                 actual_score=outcome_score,
                             )
                         distiller._save_all()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "Buddhi reflect heuristic reinforcement failed: %s",
+                    exc,
+                    exc_info=True,
+                )
 
         return new_insights
 
@@ -1143,14 +1280,18 @@ class Buddhi:
                     actual_score=actual_score,
                 )
             distiller._save_all()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "Buddhi heuristic validation failed: %s",
+                exc,
+                exc_info=True,
+            )
 
     # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
 
-    def _save_insights(self) -> None:
+    def _save_insights(self, *, strict: bool = False) -> None:
         path = os.path.join(self._data_dir, "insights.jsonl")
         try:
             with open(path, "w", encoding="utf-8") as f:
@@ -1172,18 +1313,22 @@ class Buddhi:
                     }
                     f.write(json.dumps(row, ensure_ascii=False) + "\n")
         except OSError as e:
+            if strict:
+                raise
             logger.debug("Failed to save insights: %s", e)
 
     def _save_intentions(self) -> None:
         """Deprecated: intentions now managed by kernel IntentionStore."""
         self._kernel.intentions.flush()
 
-    def _save_performance(self) -> None:
+    def _save_performance(self, *, strict: bool = False) -> None:
         path = os.path.join(self._data_dir, "performance.json")
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(self._performance, f, ensure_ascii=False)
         except OSError as e:
+            if strict:
+                raise
             logger.debug("Failed to save performance: %s", e)
 
     def _load_state(self) -> None:
@@ -1230,50 +1375,81 @@ class Buddhi:
 
     def flush(self) -> None:
         """Persist all state. Call on shutdown."""
-        self._save_insights()
-        self._save_performance()
+        errors: List[Dict[str, str]] = []
 
-        # Flush kernel (all state stores)
-        self._kernel.flush()
+        try:
+            self._save_insights(strict=True)
+        except Exception as exc:
+            logger.exception("Buddhi flush failed for insights")
+            errors.append(self._stats_error("insights.save", exc))
 
-        # Flush Phase 2 subsystems if initialized
-        for store in [
-            self._contrastive, self._heuristic_distiller,
+        try:
+            self._save_performance(strict=True)
+        except Exception as exc:
+            logger.exception("Buddhi flush failed for performance")
+            errors.append(self._stats_error("performance.save", exc))
+
+        try:
+            self._kernel.flush()
+        except Exception as exc:
+            logger.exception("Buddhi flush failed for kernel")
+            errors.append(self._stats_error("kernel.flush", exc))
+
+        for name, store in [
+            ("contrastive.flush", self._contrastive),
+            ("heuristics.flush", self._heuristic_distiller),
         ]:
             if store and hasattr(store, "flush"):
                 try:
                     store.flush()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.exception("Buddhi flush failed for %s", name)
+                    errors.append(self._stats_error(name, exc))
+
+        if errors:
+            detail = "; ".join(
+                f"{entry['component']}: {entry['error']}" for entry in errors
+            )
+            raise RuntimeError(f"Failed to flush Buddhi state: {detail}")
 
     def get_stats(self) -> Dict[str, Any]:
         """Get buddhi status for health checks."""
-        intention_stats = self._kernel.intentions.get_stats()
-        stats = {
+        stats: Dict[str, Any] = {
             "insights": len(self._insights),
-            "active_intentions": intention_stats.get("active", 0),
-            "triggered_intentions": intention_stats.get("triggered", 0),
+            "active_intentions": 0,
+            "triggered_intentions": 0,
             "task_types_tracked": len(self._performance),
             "total_performance_records": sum(
                 len(v) for v in self._performance.values()
             ),
         }
+        errors: List[Dict[str, str]] = []
 
         # Kernel state store stats
         kernel_stats = self._kernel.get_stats()
+        intention_stats = kernel_stats.get("intentions", {})
+        if isinstance(intention_stats, dict) and "error" not in intention_stats:
+            stats["active_intentions"] = intention_stats.get("active", 0)
+            stats["triggered_intentions"] = intention_stats.get("triggered", 0)
+        for entry in kernel_stats.get("errors", []):
+            if isinstance(entry, dict):
+                errors.append(entry)
         stats.update(kernel_stats)
 
         # Phase 2 stats (only if initialized)
         for name, store in [
             ("contrastive", self._contrastive),
             ("heuristics", self._heuristic_distiller),
-            ("contrastive", self._contrastive),
-            ("heuristics", self._heuristic_distiller),
         ]:
             if store and hasattr(store, "get_stats"):
                 try:
                     stats[name] = store.get_stats()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.exception("Buddhi get_stats failed for %s", name)
+                    errors.append(self._stats_error(f"{name}.get_stats", exc))
+                    stats[name] = {"error": f"{type(exc).__name__}: {exc}"}
+
+        if errors:
+            stats["errors"] = errors
 
         return stats
