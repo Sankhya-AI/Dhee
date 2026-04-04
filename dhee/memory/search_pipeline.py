@@ -453,7 +453,7 @@ class SearchPipeline:
         else:
             for mid in reecho_ids:
                 self._reecho_memory(mid)
-        if agent_id:
+        if agent_id and hasattr(self._db, "add_memory_subscriber"):
             for mid in subscriber_ids:
                 self._db.add_memory_subscriber(mid, f"agent:{agent_id}", ref_type="weak")
 

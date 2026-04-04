@@ -1,24 +1,17 @@
-"""Orchestration engine: map-reduce, episodic anchoring, hierarchical retrieval.
+"""Orchestration engine: episodic anchoring, hierarchical retrieval, context assembly.
 
-Extracted from memory/main.py — centralizes the orchestrated-search path so that
-FullMemory.search_orchestrated() becomes a thin delegation wrapper.
+Dhee's job: retrieve well, assemble context, return it. No answer synthesis.
 """
 
 from __future__ import annotations
 
 import logging
 import re
-import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from dhee.memory.cost import stable_hash_text
 from dhee.core.episodic_index import normalize_actor_id
 from dhee.core.answer_orchestration import (
-    build_map_candidates,
     build_query_plan,
-    deterministic_inconsistency_check,
-    is_low_confidence_answer,
-    render_fact_context,
 )
 
 logger = logging.getLogger(__name__)
@@ -45,8 +38,6 @@ class OrchestrationEngine:
         profile_processor_fn: Callable,
         evolution_layer_fn: Callable,
         llm_fn: Callable,
-        extract_atomic_facts_fn: Callable,
-        reduce_atomic_facts_fn: Callable,
     ):
         self._config = config
         self._db = db
@@ -59,70 +50,8 @@ class OrchestrationEngine:
         self._profile_processor_fn = profile_processor_fn
         self._evolution_layer_fn = evolution_layer_fn
         self._llm_fn = llm_fn
-        self._extract_atomic_facts_fn = extract_atomic_facts_fn
-        self._reduce_atomic_facts_fn = reduce_atomic_facts_fn
         # Internal state
-        self._reducer_cache: Dict[str, Dict[str, Any]] = {}
         self._guardrail_auto_disabled: bool = False
-
-    # -- Reducer cache helpers ------------------------------------------------
-
-    def _build_reducer_cache_key(
-        self,
-        *,
-        user_id: str,
-        intent_value: str,
-        query: str,
-        results: List[Dict[str, Any]],
-    ) -> str:
-        evidence_fingerprint_parts: List[str] = []
-        for row in results[:30]:
-            mem_id = str(row.get("id") or "").strip()
-            score = float(row.get("composite_score", row.get("score", 0.0)) or 0.0)
-            evidence_fingerprint_parts.append(f"{mem_id}:{score:.4f}")
-        evidence_fingerprint = "|".join(evidence_fingerprint_parts)
-        base = "|".join(
-            [
-                str(user_id or ""),
-                str(intent_value or ""),
-                stable_hash_text(query),
-                stable_hash_text(evidence_fingerprint),
-            ]
-        )
-        return stable_hash_text(base)
-
-    def _get_reducer_cache(self, cache_key: str) -> Optional[Dict[str, Any]]:
-        orch_cfg = getattr(self._config, "orchestration", None)
-        ttl_seconds = int(getattr(orch_cfg, "reducer_cache_ttl_seconds", 900) or 900)
-        record = self._reducer_cache.get(cache_key)
-        if not record:
-            return None
-        ts = float(record.get("ts", 0.0) or 0.0)
-        if ts <= 0.0:
-            return None
-        if (time.time() - ts) > max(1, ttl_seconds):
-            self._reducer_cache.pop(cache_key, None)
-            return None
-        return record
-
-    def _put_reducer_cache(
-        self,
-        *,
-        cache_key: str,
-        reduced_answer: Optional[str],
-        facts: List[Dict[str, Any]],
-    ) -> None:
-        orch_cfg = getattr(self._config, "orchestration", None)
-        max_entries = int(getattr(orch_cfg, "reducer_cache_max_entries", 2048) or 2048)
-        self._reducer_cache[cache_key] = {
-            "ts": time.time(),
-            "reduced_answer": reduced_answer,
-            "facts": list(facts or []),
-        }
-        # Keep insertion-order bounded cache.
-        while len(self._reducer_cache) > max(1, max_entries):
-            oldest_key = next(iter(self._reducer_cache))
-            self._reducer_cache.pop(oldest_key, None)
 
     # -- Cost guardrail -------------------------------------------------------
 
@@ -507,49 +436,15 @@ class OrchestrationEngine:
                 limit=3,
             )
 
-        (
-            reduced_answer,
-            facts,
-            map_reduce_used,
-            reflection_hops,
-            llm_calls_used,
-            cache_hit,
-            orchestration_reasons,
-            results,
-        ) = self._execute_map_reduce(
-            query_plan=query_plan,
-            orchestrator_llm=orchestrator_llm,
-            results=results,
-            event_hits=event_hits,
-            coverage=coverage,
-            query=query,
-            question_type=question_type,
-            question_date=question_date,
-            mode=mode,
-            search_cap_value=search_cap_value,
-            map_max_candidates_value=map_max_candidates_value,
-            map_max_chars_value=map_max_chars_value,
-            reflection_max_hops=reflection_max_hops,
-            search_query=search_query,
-            search_limit=search_limit,
-            rerank=rerank,
-            keyword_search=keyword_search,
-            hybrid_alpha=hybrid_alpha,
-            include_evidence=include_evidence,
-            evidence_strategy=evidence_strategy,
-            evidence_max_chars=evidence_max_chars,
-            evidence_context_lines=evidence_context_lines,
-            user_id=user_id,
-            filters=filters,
-            categories=categories,
-            agent_id=agent_id,
-            run_id=run_id,
-            app_id=app_id,
-        )
-        reason_codes.extend(orchestration_reasons)
+        # Dhee's job: retrieve and assemble context. Agent answers.
+        # No map-reduce, no triple extraction, no LLM calls at query time.
+        reduced_answer: Optional[str] = None
+        facts: List[Dict[str, Any]] = []
+        map_reduce_used = False
+        reflection_hops = 0
+        llm_calls_used = 0.0
+        cache_hit = False
 
-        # Always use full retrieval context — proposition context (Phase 3)
-        # is deferred until episodic event coverage is proven reliable.
         context = self._build_orchestrated_context(
             results=results,
             event_hits=event_hits,
@@ -558,13 +453,6 @@ class OrchestrationEngine:
             max_chars=max_context_chars,
             per_result_max_chars=evidence_max_chars,
         )
-        if facts:
-            fact_context = render_fact_context(facts, max_facts=20)
-            if fact_context:
-                if mode == "strict":
-                    context = "Canonical Facts:\n" + fact_context
-                else:
-                    context = "Canonical Facts:\n" + fact_context + "\n\nRetrieved Context:\n" + context
 
         self._record_cost_fn(
             phase="query",
@@ -576,22 +464,6 @@ class OrchestrationEngine:
         )
 
         intent_coverage = float(coverage.get("intent_coverage", coverage.get("coverage_ratio", 0.0)) or 0.0)
-
-        # Dhee: Self-evolution — record answer generation signal
-        evolution_layer = self._evolution_layer_fn()
-        if evolution_layer and reduced_answer:
-            try:
-                source_ids = [r.get("id", "") for r in results[:context_limit] if r.get("id")]
-                source_texts = [r.get("memory", "") for r in results[:context_limit] if r.get("memory")]
-                evolution_layer.on_answer_generated(
-                    query=query,
-                    answer=str(reduced_answer),
-                    source_memory_ids=source_ids,
-                    source_texts=source_texts,
-                    user_id=user_id or "default",
-                )
-            except Exception as e:
-                logger.debug("Evolution answer hook skipped: %s", e)
 
         return {
             "results": results[: max(1, int(limit))],
@@ -618,247 +490,3 @@ class OrchestrationEngine:
             "facts": facts,
         }
 
-    # -- Map-reduce execution -------------------------------------------------
-
-    def _execute_map_reduce(
-        self,
-        *,
-        query_plan: Any,
-        orchestrator_llm: Optional[Any],
-        results: List[Dict[str, Any]],
-        event_hits: Optional[List[Dict[str, Any]]] = None,
-        coverage: Optional[Dict[str, Any]],
-        query: str,
-        question_type: str,
-        question_date: str,
-        mode: str,
-        search_cap_value: int,
-        map_max_candidates_value: int,
-        map_max_chars_value: int,
-        reflection_max_hops: Optional[int],
-        search_query: str,
-        search_limit: int,
-        rerank: bool,
-        keyword_search: bool,
-        hybrid_alpha: float,
-        include_evidence: bool,
-        evidence_strategy: str,
-        evidence_max_chars: int,
-        evidence_context_lines: int,
-        user_id: str,
-        filters: Optional[Dict[str, Any]],
-        categories: Optional[List[str]],
-        agent_id: Optional[str],
-        run_id: Optional[str],
-        app_id: Optional[str],
-    ) -> Tuple[Optional[str], List[Dict[str, Any]], bool, int, float, bool, List[str], List[Dict[str, Any]]]:
-        """Execute map-reduce orchestration with optional reflection.
-
-        Tries event-first reduction (zero LLM cost) before falling back
-        to LLM-based atomic fact extraction.
-
-        Returns:
-            (
-                reduced_answer,
-                facts,
-                map_reduce_used,
-                reflection_hops,
-                llm_calls_used,
-                cache_hit,
-                reason_codes,
-                updated_results,
-            )
-        """
-        reduced_answer: Optional[str] = None
-        facts: List[Dict[str, Any]] = []
-        map_reduce_used = False
-        reflection_hops = 0
-        llm_calls_used = 0.0
-        cache_hit = False
-        reason_codes: List[str] = []
-        active_orchestrator_llm = orchestrator_llm or self._llm_fn()
-        orch_cfg = getattr(self._config, "orchestration", None)
-        raw_max_query_llm_calls = getattr(orch_cfg, "max_query_llm_calls", 2)
-        try:
-            max_query_llm_calls = int(raw_max_query_llm_calls if raw_max_query_llm_calls is not None else 2)
-        except (TypeError, ValueError):
-            max_query_llm_calls = 2
-
-        coverage_sufficient = bool((coverage or {}).get("sufficient"))
-        if coverage_sufficient:
-            reason_codes.append("coverage_sufficient")
-        else:
-            reason_codes.append("coverage_insufficient")
-
-        inconsistency = deterministic_inconsistency_check(
-            question=query,
-            intent=query_plan.intent,
-            results=results,
-            coverage=coverage,
-        )
-        inconsistency_detected = bool(inconsistency.get("inconsistent"))
-        if inconsistency_detected:
-            reason_codes.extend(list(inconsistency.get("reasons") or []))
-
-        # NOTE: Event-first reduction (Phase 2) disabled — episodic events
-        # alone lack sufficient coverage for accurate multi-session counting.
-        # The LLM-based map-reduce path below is more reliable.
-        if mode == "strict":
-            mode_requires_map_reduce = True
-        else:
-            mode_requires_map_reduce = (not coverage_sufficient) or inconsistency_detected
-
-        should_run_map_reduce = bool(
-            query_plan.should_map_reduce
-            and active_orchestrator_llm is not None
-            and results
-            and mode_requires_map_reduce
-        )
-        if query_plan.should_map_reduce and active_orchestrator_llm is None:
-            reason_codes.append("no_orchestrator_llm")
-        if should_run_map_reduce and max_query_llm_calls <= 0:
-            reason_codes.append("query_llm_budget_exhausted")
-            should_run_map_reduce = False
-
-        if should_run_map_reduce:
-            cache_key = self._build_reducer_cache_key(
-                user_id=user_id,
-                intent_value=query_plan.intent.value,
-                query=query,
-                results=results,
-            )
-            cached = self._get_reducer_cache(cache_key)
-            if cached and str(cached.get("reduced_answer") or "").strip():
-                cached_answer = str(cached.get("reduced_answer") or "").strip()
-                if not is_low_confidence_answer(cached_answer):
-                    reduced_answer = cached_answer
-                    facts = list(cached.get("facts") or [])
-                    cache_hit = True
-                    reason_codes.append("reducer_cache_hit")
-
-            if not cache_hit:
-                map_candidates = build_map_candidates(
-                    results,
-                    max_candidates=map_max_candidates_value,
-                    per_candidate_max_chars=map_max_chars_value,
-                )
-                if llm_calls_used < float(max_query_llm_calls):
-                    facts = self._extract_atomic_facts_fn(
-                        llm=active_orchestrator_llm,
-                        question=query,
-                        question_type=question_type,
-                        question_date=question_date,
-                        candidates=map_candidates,
-                    )
-                    reduced_answer, _ = self._reduce_atomic_facts_fn(
-                        question=query,
-                        intent=query_plan.intent,
-                        facts=facts,
-                    )
-                    llm_calls_used += 1.0
-                    map_reduce_used = True
-                    reason_codes.append("map_reduce_executed")
-                    if reduced_answer or facts:
-                        self._put_reducer_cache(
-                            cache_key=cache_key,
-                            reduced_answer=reduced_answer,
-                            facts=facts,
-                        )
-                else:
-                    reason_codes.append("query_llm_budget_exhausted")
-
-            max_hops = int(
-                reflection_max_hops
-                if reflection_max_hops is not None
-                else getattr(self._config.orchestration, "reflection_max_hops", 1)
-            )
-            if (
-                max_hops > 0
-                and (not reduced_answer or is_low_confidence_answer(reduced_answer))
-                and search_limit < search_cap_value
-                and llm_calls_used < float(max_query_llm_calls)
-            ):
-                reflection_hops = 1
-                reason_codes.append("reflection_executed")
-                expanded_limit = min(search_cap_value, max(search_limit + 8, search_limit * 2))
-                reflection_payload = self._search_fn(
-                    query=search_query,
-                    user_id=user_id,
-                    agent_id=agent_id,
-                    run_id=run_id,
-                    app_id=app_id,
-                    filters=filters,
-                    categories=categories,
-                    limit=expanded_limit,
-                    rerank=rerank,
-                    keyword_search=keyword_search,
-                    hybrid_alpha=hybrid_alpha,
-                    include_evidence=include_evidence,
-                    evidence_strategy=evidence_strategy,
-                    evidence_max_chars=evidence_max_chars,
-                    evidence_context_lines=evidence_context_lines,
-                )
-                reflected_results = list(reflection_payload.get("results", []))
-                merged: Dict[str, Dict[str, Any]] = {}
-                for row in results + reflected_results:
-                    memory_id = str(row.get("id") or "")
-                    existing = merged.get(memory_id)
-                    if not existing or float(row.get("composite_score", row.get("score", 0.0))) > float(
-                        existing.get("composite_score", existing.get("score", 0.0))
-                    ):
-                        merged[memory_id] = row
-                results = sorted(
-                    merged.values(),
-                    key=lambda row: float(row.get("composite_score", row.get("score", 0.0))),
-                    reverse=True,
-                )
-                map_candidates = build_map_candidates(
-                    results,
-                    max_candidates=map_max_candidates_value,
-                    per_candidate_max_chars=map_max_chars_value,
-                )
-                if llm_calls_used < float(max_query_llm_calls):
-                    facts = self._extract_atomic_facts_fn(
-                        llm=active_orchestrator_llm,
-                        question=query,
-                        question_type=question_type,
-                        question_date=question_date,
-                        candidates=map_candidates,
-                    )
-                    reduced_answer, _ = self._reduce_atomic_facts_fn(
-                        question=query,
-                        intent=query_plan.intent,
-                        facts=facts,
-                    )
-                    llm_calls_used += 1.0
-                    map_reduce_used = True
-                    if reduced_answer or facts:
-                        self._put_reducer_cache(
-                            cache_key=self._build_reducer_cache_key(
-                                user_id=user_id,
-                                intent_value=query_plan.intent.value,
-                                query=query,
-                                results=results,
-                            ),
-                            reduced_answer=reduced_answer,
-                            facts=facts,
-                        )
-                else:
-                    reason_codes.append("query_llm_budget_exhausted")
-            elif (
-                max_hops > 0
-                and (not reduced_answer or is_low_confidence_answer(reduced_answer))
-                and search_limit < search_cap_value
-            ):
-                reason_codes.append("reflection_skipped_budget")
-
-        return (
-            reduced_answer,
-            facts,
-            map_reduce_used,
-            reflection_hops,
-            llm_calls_used,
-            cache_hit,
-            list(dict.fromkeys(reason_codes)),
-            results,
-        )

@@ -38,7 +38,6 @@ from dhee.configs.base import (
 from dhee.core.answer_orchestration import (
     is_low_confidence_answer,
 )
-from dhee.core.code_exec_counter import refine_count_with_code_exec
 
 logger = logging.getLogger(__name__)
 
@@ -1771,25 +1770,7 @@ def run_longmemeval(args: argparse.Namespace) -> Dict[str, Any]:
                         except Exception as reg_exc:
                             logger.debug("Entity registry lookup failed for %s: %s", question_id, reg_exc)
 
-                        # 2) Code-exec counting (1 LLM call + deterministic exec)
                         code_exec_answer = None
-                        try:
-                            ce_llm = _code_exec_llm or _answer_llm or memory.llm
-                            code_exec_answer = refine_count_with_code_exec(
-                                llm=ce_llm,
-                                question=query,
-                                question_type=question_type,
-                                retrieved_context=context,
-                                draft_answer=hypothesis,
-                                question_date=question_date,
-                            )
-                            if code_exec_answer:
-                                logger.info(
-                                    "Code-exec answer for %s: %r",
-                                    question_id, code_exec_answer,
-                                )
-                        except Exception as ce_exc:
-                            logger.debug("Code-exec counting failed for %s: %s", question_id, ce_exc)
 
                         # 3) Pick best: code_exec > registry > existing refinement
                         if code_exec_answer and not _is_refusal(code_exec_answer):

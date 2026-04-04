@@ -24,7 +24,7 @@ from dhee.memory.core import CoreMemory
 from dhee.memory.smart import SmartMemory
 from dhee.memory.main import FullMemory
 from dhee.simple import Dhee, Engram
-from dhee.adapters.base import DheePlugin
+from dhee.plugin import DheePlugin
 from dhee.core.category import CategoryProcessor, Category, CategoryType, CategoryMatch
 from dhee.core.echo import EchoProcessor, EchoDepth, EchoResult
 from dhee.configs.base import MemoryConfig, FadeMemConfig, EchoMemConfig, CategoryMemConfig, ScopeConfig
@@ -32,7 +32,7 @@ from dhee.configs.base import MemoryConfig, FadeMemConfig, EchoMemConfig, Catego
 # Default: CoreMemory (lightest, zero-config)
 Memory = CoreMemory
 
-__version__ = "3.0.1"
+__version__ = "3.1.0"
 __all__ = [
     # Memory classes
     "Engram",

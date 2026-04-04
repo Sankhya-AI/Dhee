@@ -7,6 +7,22 @@ from typing import Any, Dict, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 
+def _normalize_sqlite_vec_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Coerce directory-style vector paths into sqlite-vec DB files."""
+    normalized = dict(config or {})
+    path = normalized.get("path")
+    if not path:
+        return normalized
+
+    path = str(path)
+    root, ext = os.path.splitext(path)
+    if ext:
+        return normalized
+
+    normalized["path"] = os.path.join(path, "sqlite_vec.db")
+    return normalized
+
+
 def _dhee_model_available() -> bool:
     """Check if local DheeModel GGUF is available."""
     try:
@@ -152,7 +168,7 @@ class VectorStoreFactory:
         if provider == "sqlite_vec":
             from dhee.vector_stores.sqlite_vec import SqliteVecStore
 
-            return SqliteVecStore(config)
+            return SqliteVecStore(_normalize_sqlite_vec_config(config))
         if provider == "zvec":
             try:
                 from dhee.vector_stores.zvec_store import ZvecStore
@@ -161,7 +177,9 @@ class VectorStoreFactory:
                 logger.warning("zvec not installed, falling back to sqlite_vec")
                 try:
                     from dhee.vector_stores.sqlite_vec import SqliteVecStore
-                    return SqliteVecStore(config)
+                    return SqliteVecStore(
+                        _normalize_sqlite_vec_config(config)
+                    )
                 except ImportError:
                     logger.warning("sqlite_vec not installed, falling back to in-memory")
                     from dhee.vector_stores.memory import InMemoryVectorStore

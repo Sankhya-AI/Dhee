@@ -591,12 +591,6 @@ class FadeMemConfig(BaseModel):
         return max(1, int(v))
 
 
-def _get_teaching_config():
-    """Lazy import to avoid circular dependency."""
-    from dhee.teaching.config import TeachingConfig
-    return TeachingConfig()
-
-
 class MemoryConfig(BaseModel):
     vector_store: VectorStoreConfig = Field(default_factory=VectorStoreConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
@@ -631,7 +625,6 @@ class MemoryConfig(BaseModel):
     cost_guardrail: CostGuardrailConfig = Field(default_factory=CostGuardrailConfig)
     skill: SkillConfig = Field(default_factory=SkillConfig)
     task: TaskConfig = Field(default_factory=TaskConfig)
-    teaching: "TeachingConfig" = Field(default_factory=lambda: _get_teaching_config())
     metamemory: MetamemoryInlineConfig = Field(default_factory=MetamemoryInlineConfig)
     prospective: ProspectiveInlineConfig = Field(default_factory=ProspectiveInlineConfig)
     procedural: ProceduralInlineConfig = Field(default_factory=ProceduralInlineConfig)
@@ -675,12 +668,3 @@ class MemoryConfig(BaseModel):
         return full_config()
 
 
-# Resolve forward reference for TeachingConfig
-def _rebuild_memory_config():
-    try:
-        from dhee.teaching.config import TeachingConfig
-        MemoryConfig.model_rebuild()
-    except ImportError:
-        pass
-
-_rebuild_memory_config()

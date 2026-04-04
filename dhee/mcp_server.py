@@ -48,6 +48,30 @@ from dhee.configs.base import (
 logger = logging.getLogger(__name__)
 
 
+def _default_user_id(args: Dict[str, Any]) -> str:
+    return str(args.get("user_id") or os.environ.get("DHEE_USER_ID") or "default")
+
+
+def _default_agent_id(args: Dict[str, Any]) -> str:
+    return str(args.get("agent_id") or os.environ.get("DHEE_AGENT_ID") or "mcp-server")
+
+
+def _default_requester_agent_id(args: Dict[str, Any]) -> str:
+    return str(
+        args.get("requester_agent_id")
+        or os.environ.get("DHEE_REQUESTER_AGENT_ID")
+        or _default_agent_id(args)
+    )
+
+
+def _default_source_app(args: Dict[str, Any]) -> str:
+    return str(
+        args.get("source_app")
+        or os.environ.get("DHEE_SOURCE_APP")
+        or _default_agent_id(args)
+    )
+
+
 def _get_embedding_dims_for_model(model: str, provider: str) -> int:
     EMBEDDING_DIMS = {
         "models/text-embedding-005": 768,
@@ -77,6 +101,8 @@ def get_memory_instance() -> FullMemory:
         os.environ.get("NVIDIA_API_KEY")
         or os.environ.get("NVIDIA_QWEN_API_KEY")
         or os.environ.get("NVIDIA_EMBEDDING_API_KEY")
+        or os.environ.get("NVIDIA_EMBED_API_KEY")
+        or os.environ.get("NVIDIA_LLAMA_4_MAV_API_KEY")
     )
 
     def _env(key: str, default: str = "") -> str:
@@ -172,6 +198,9 @@ def get_memory_instance() -> FullMemory:
         embedding_model_dims=embedding_dims,
         fade=fade_config,
     )
+    if hasattr(config, "enrichment"):
+        config.enrichment.defer_enrichment = True
+        config.enrichment.enable_unified = True
 
     return FullMemory(config)
 
@@ -192,8 +221,9 @@ def get_buddhi():
     """Lazy singleton for the Buddhi cognition layer."""
     global _buddhi
     if _buddhi is None:
+        from dhee.configs.base import _dhee_data_dir
         from dhee.core.buddhi import Buddhi
-        _buddhi = Buddhi()
+        _buddhi = Buddhi(data_dir=os.path.join(_dhee_data_dir(), "buddhi"))
     return _buddhi
 
 
@@ -205,11 +235,14 @@ server = Server("dhee")
 TOOLS = [
     Tool(
         name="remember",
-        description="Quick-save a fact or preference to memory. Creates a staging proposal commit with source_app='claude-code' and infer=False by default.",
+        description="Quick-save a fact or preference to memory. Stores immediately with infer=False by default and uses the configured MCP agent/source identity when not provided.",
         inputSchema={
             "type": "object",
             "properties": {
                 "content": {"type": "string", "description": "The fact or preference to remember"},
+                "user_id": {"type": "string", "description": "User identifier (defaults to DHEE_USER_ID or 'default')."},
+                "agent_id": {"type": "string", "description": "Agent identifier (defaults to DHEE_AGENT_ID or 'mcp-server')."},
+                "source_app": {"type": "string", "description": "Source application label (defaults to DHEE_SOURCE_APP or agent_id)."},
                 "categories": {"type": "array", "items": {"type": "string"}, "description": "Optional categories to tag this memory with (e.g., ['preferences', 'coding'])"},
                 "context": {
                     "type": "array",
@@ -574,10 +607,10 @@ TOOLS = [
 def _handle_remember(memory, args):
     return memory.add(
         messages=args.get("content", ""),
-        user_id="default",
-        agent_id="claude-code",
+        user_id=_default_user_id(args),
+        agent_id=_default_agent_id(args),
         categories=args.get("categories"),
-        source_app="claude-code",
+        source_app=_default_source_app(args),
         infer=False,
         context_messages=args.get("context"),
     )
@@ -596,7 +629,7 @@ def _handle_search_memory(memory, args):
             context_top_k = 10
         result = memory.search_orchestrated(
             query=args.get("query", ""),
-            user_id=args.get("user_id", "default"),
+            user_id=_default_user_id(args),
             agent_id=args.get("agent_id"),
             categories=args.get("categories"),
             limit=limit,
@@ -612,7 +645,7 @@ def _handle_search_memory(memory, args):
     else:
         result = memory.search(
             query=args.get("query", ""),
-            user_id=args.get("user_id", "default"),
+            user_id=_default_user_id(args),
             agent_id=args.get("agent_id"),
             limit=limit,
             categories=args.get("categories"),
@@ -652,7 +685,7 @@ def _handle_get_all_memories(memory, args):
     except (ValueError, TypeError):
         limit = 50
     result = memory.get_all(
-        user_id=args.get("user_id", "default"),
+        user_id=_default_user_id(args),
         agent_id=args.get("agent_id"),
         limit=limit,
         layer=args.get("layer"),
@@ -691,8 +724,10 @@ def _handle_dhee_context(memory, args):
 def _handle_get_last_session(_memory, args):
     from dhee.core.kernel import get_last_session
     session = get_last_session(
-        agent_id=args.get("agent_id", "mcp-server"),
+        agent_id=args.get("agent_id"),
         repo=args.get("repo"),
+        user_id=_default_user_id(args),
+        requester_agent_id=_default_requester_agent_id(args),
         fallback_log_recovery=args.get("fallback_log_recovery", True),
     )
     if session is None:
@@ -704,7 +739,8 @@ def _handle_save_session_digest(_memory, args):
     from dhee.core.kernel import save_session_digest
     return save_session_digest(
         task_summary=args.get("task_summary", ""),
-        agent_id=args.get("agent_id", "claude-code"),
+        agent_id=_default_agent_id(args),
+        requester_agent_id=_default_requester_agent_id(args),
         repo=args.get("repo"),
         status=args.get("status", "active"),
         decisions_made=args.get("decisions_made"),
@@ -718,7 +754,7 @@ def _handle_save_session_digest(_memory, args):
 
 def _handle_get_memory_stats(memory, args):
     return memory.get_stats(
-        user_id=args.get("user_id"),
+        user_id=args.get("user_id") or os.environ.get("DHEE_USER_ID"),
         agent_id=args.get("agent_id"),
     )
 
@@ -847,7 +883,7 @@ def _handle_think(memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
     if hasattr(memory, "think"):
         result = memory.think(
             question=question,
-            user_id=user_id,
+            user_id=_default_user_id(arguments) if not arguments.get("user_id") else user_id,
             max_depth=max_depth,
         )
         if hasattr(result, "to_dict"):
@@ -858,7 +894,7 @@ def _handle_think(memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
 
 def _handle_anticipate(memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
     """Proactive intelligence — Buddhi checks intentions, insights, and scenes."""
-    user_id = arguments.get("user_id", "default")
+    user_id = _default_user_id(arguments)
     context = arguments.get("context")
 
     buddhi = get_buddhi()
@@ -894,7 +930,7 @@ def _handle_record_outcome(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]
     """Record task outcome for performance tracking."""
     task_type = arguments.get("task_type", "")
     score = float(arguments.get("score", 0.0))
-    user_id = arguments.get("user_id", "default")
+    user_id = _default_user_id(arguments)
     metadata = arguments.get("metadata")
 
     if not task_type:
@@ -916,7 +952,7 @@ def _handle_record_outcome(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]
 def _handle_reflect(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
     """Agent-triggered reflection — synthesize insights from experience."""
     task_type = arguments.get("task_type", "")
-    user_id = arguments.get("user_id", "default")
+    user_id = _default_user_id(arguments)
 
     if not task_type:
         return {"error": "task_type is required"}
@@ -938,7 +974,7 @@ def _handle_reflect(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
 def _handle_store_intention(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
     """Store a future trigger — prospective memory."""
     description = arguments.get("description", "")
-    user_id = arguments.get("user_id", "default")
+    user_id = _default_user_id(arguments)
 
     if not description:
         return {"error": "description is required"}

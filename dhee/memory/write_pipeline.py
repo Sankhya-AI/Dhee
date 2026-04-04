@@ -467,7 +467,14 @@ class MemoryWritePipeline:
             content = explicit_intent.content
 
         blocked = detect_sensitive_categories(content)
-        allow_sensitive = bool(mem_metadata.get("allow_sensitive"))
+        # allow_sensitive: explicit caller opt-in, or caller explicitly provided
+        # the content (infer=False / user_provided=True).  PII detection is a
+        # guardrail for agent-inferred memories from raw conversation, not for
+        # bulk corpus ingestion where the caller owns the content decision.
+        allow_sensitive = (
+            bool(mem_metadata.get("allow_sensitive"))
+            or bool(mem_metadata.get("user_provided"))
+        )
         if blocked and not allow_sensitive:
             return {
                 "event": "BLOCKED",
@@ -477,7 +484,8 @@ class MemoryWritePipeline:
             }
 
         is_task_or_note = (mem_metadata or {}).get("memory_type") in ("task", "note")
-        if not explicit_remember and not is_task_or_note and is_ephemeral(content):
+        is_user_provided = bool(mem_metadata.get("user_provided"))
+        if not explicit_remember and not is_task_or_note and not is_user_provided and is_ephemeral(content):
             return {
                 "event": "SKIP",
                 "reason": "ephemeral",

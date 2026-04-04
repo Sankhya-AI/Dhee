@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dhee"
-version = "3.0.1"
+version = "3.1.0"
 description = "Cognition layer for AI agents — persistent memory, performance tracking, and insight synthesis"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -44,6 +44,7 @@ local = ["llama-cpp-python>=0.3", "sentence-transformers>=3.0"]
 mcp = ["mcp>=1.0.0"]
 api = ["fastapi>=0.100.0", "uvicorn>=0.20.0"]
 bus = ["engram-bus>=0.1.0"]
+benchmarks = ["huggingface_hub>=0.24.0"]
 # Edge/hardware deployment (offline, ONNX embedder)
 edge = ["onnxruntime>=1.16"]
 # Training (QLoRA fine-tuning)
@@ -56,6 +57,7 @@ all = [
     "fastapi>=0.100.0",
     "uvicorn>=0.20.0",
     "engram-bus>=0.1.0",
+    "huggingface_hub>=0.24.0",
     "llama-cpp-python>=0.3",
     "sentence-transformers>=3.0",
 ]
@@ -63,6 +65,7 @@ dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.23.0",
     "openai>=1.0.0",
+    "huggingface_hub>=0.24.0",
     "build>=1.0.0",
     "twine>=5.0.0",
 ]
