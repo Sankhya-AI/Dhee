@@ -8,7 +8,7 @@ import time
 import pytest
 
 from dhee.memory.main import FullMemory
-from dhee.adapters.base import DheePlugin
+from dhee.plugin import DheePlugin
 from dhee.simple import Dhee, Engram
 
 

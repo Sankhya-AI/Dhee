@@ -41,17 +41,31 @@ logger = logging.getLogger(__name__)
 
 def _detect_provider() -> str:
     """Detect which LLM/embedder provider to use based on environment."""
-    if os.environ.get("GEMINI_API_KEY"):
-        return "gemini"
     if os.environ.get("OPENAI_API_KEY"):
         return "openai"
-    # Default to gemini if no key found (will fail later with clear error)
-    return "gemini"
+    if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
+        return "gemini"
+    if (
+        os.environ.get("NVIDIA_API_KEY")
+        or os.environ.get("NVIDIA_QWEN_API_KEY")
+        or os.environ.get("NVIDIA_EMBEDDING_API_KEY")
+        or os.environ.get("NVIDIA_EMBED_API_KEY")
+        or os.environ.get("NVIDIA_LLAMA_4_MAV_API_KEY")
+    ):
+        return "nvidia"
+    # Zero-config fallback: local simple embedder + mock LLM.
+    return "mock"
 
 
 def _get_embedding_dims(provider: str) -> int:
     """Get embedding dimensions for provider."""
-    return 3072 if provider == "gemini" else 1536
+    if provider == "gemini":
+        return 3072
+    if provider == "openai":
+        return 1536
+    if provider == "nvidia":
+        return 2048
+    return 384
 
 
 def _has_api_key() -> bool:

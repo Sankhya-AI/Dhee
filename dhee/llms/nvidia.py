@@ -21,13 +21,14 @@ class NvidiaLLM(BaseLLM):
         api_key = (
             self.config.get("api_key")
             or os.getenv("NVIDIA_QWEN_API_KEY")
+            or os.getenv("NVIDIA_LLAMA_4_MAV_API_KEY")
             or os.getenv("LLAMA_API_KEY")
             or os.getenv("NVIDIA_API_KEY")
         )
         if not api_key:
             raise ValueError(
                 "NVIDIA API key required. Set config['api_key'], "
-                "NVIDIA_QWEN_API_KEY, LLAMA_API_KEY, or NVIDIA_API_KEY env var."
+                "NVIDIA_QWEN_API_KEY, NVIDIA_LLAMA_4_MAV_API_KEY, LLAMA_API_KEY, or NVIDIA_API_KEY env var."
             )
 
         base_url = self.config.get("base_url", "https://integrate.api.nvidia.com/v1")
@@ -58,7 +59,11 @@ class NvidiaLLM(BaseLLM):
                 extra_kwargs = {}
                 if self.enable_thinking:
                     extra_kwargs["extra_body"] = {
-                        "chat_template_kwargs": {"thinking": True}
+                        "chat_template_kwargs": {"enable_thinking": True}
+                    }
+                elif "gemma" in self.model.lower():
+                    extra_kwargs["extra_body"] = {
+                        "chat_template_kwargs": {"enable_thinking": False}
                     }
 
                 use_stream = self.enable_thinking or self.config.get("stream", False)

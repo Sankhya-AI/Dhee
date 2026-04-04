@@ -33,7 +33,6 @@ from dhee.core.category import CategoryProcessor, CategoryMatch
 from dhee.core.graph import KnowledgeGraph
 from dhee.core.scene import SceneProcessor
 from dhee.core.profile import ProfileProcessor
-from dhee.core.answer_orchestration import extract_atomic_facts, reduce_atomic_facts
 from dhee.db.sqlite import SQLiteManager
 from dhee.exceptions import FadeMemValidationError
 from dhee.memory.base import MemoryBase
@@ -430,8 +429,6 @@ class FullMemory(SmartMemory, SceneProfileMixin):
                 profile_processor_fn=lambda: self.profile_processor,
                 evolution_layer_fn=lambda: self.evolution_layer,
                 llm_fn=lambda: self.llm,
-                extract_atomic_facts_fn=extract_atomic_facts,
-                reduce_atomic_facts_fn=reduce_atomic_facts,
             )
         return self.__orchestration_engine
 
@@ -577,7 +574,7 @@ class FullMemory(SmartMemory, SceneProfileMixin):
         """Lazy-initialized neural reranker (only if enabled in config)."""
         rerank_cfg = getattr(self.config, "rerank", None)
         if self._reranker is None and rerank_cfg and rerank_cfg.enable_rerank:
-            from dhee.retrieval.reranker import create_reranker
+            from dhee.memory.reranker import create_reranker
             self._reranker = create_reranker({
                 "provider": rerank_cfg.provider,
                 "model": rerank_cfg.model,

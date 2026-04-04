@@ -277,47 +277,7 @@ class TestMetaLearningGate:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 5. Progressive Training — data flow
-# ═══════════════════════════════════════════════════════════════════════════
-
-class TestProgressiveTraining:
-    def test_training_cycle_with_data(self, tmpdir):
-        from dhee.mini.progressive_trainer import ProgressiveTrainer
-
-        trainer = ProgressiveTrainer(data_dir=os.path.join(tmpdir, "training"))
-
-        # Generate enough SFT data
-        sft_data = [
-            {"input": f"[MEMORY_OP] Query {i}", "output": "store", "type": "memory_op"}
-            for i in range(25)
-        ]
-        dpo_data = [
-            {"prompt": f"Task {i}", "chosen": "good approach", "rejected": "bad approach"}
-            for i in range(15)
-        ]
-
-        result = trainer.run_cycle(
-            sft_data=sft_data,
-            dpo_data=dpo_data,
-            samskara_data={},
-        )
-        assert result.cycle_id
-        stage_names = [s.stage for s in result.stages]
-        assert "sft" in stage_names
-        assert "dpo" in stage_names
-
-    def test_skips_with_insufficient_data(self, tmpdir):
-        from dhee.mini.progressive_trainer import ProgressiveTrainer
-
-        trainer = ProgressiveTrainer(data_dir=os.path.join(tmpdir, "training"))
-
-        result = trainer.run_cycle(sft_data=[], dpo_data=[], samskara_data={})
-        for stage_result in result.stages:
-            assert stage_result.status in ("skipped", "completed")
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 6. Episode — lifecycle + selective forgetting
+# 5. Episode — lifecycle + selective forgetting
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestEpisode:

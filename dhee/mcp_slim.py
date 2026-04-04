@@ -38,7 +38,7 @@ def _get_plugin():
     """Create the DheePlugin singleton. Wraps Engram + Buddhi."""
     global _plugin
     if _plugin is None:
-        from dhee.adapters.base import DheePlugin
+        from dhee.plugin import DheePlugin
         _plugin = DheePlugin()
         # Enable deferred enrichment on the underlying memory
         memory = _plugin.memory

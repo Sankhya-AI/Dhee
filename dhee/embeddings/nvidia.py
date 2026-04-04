@@ -20,12 +20,13 @@ class NvidiaEmbedder(BaseEmbedder):
         api_key = (
             self.config.get("api_key")
             or os.getenv("NVIDIA_EMBEDDING_API_KEY")
+            or os.getenv("NVIDIA_EMBED_API_KEY")
             or os.getenv("NVIDIA_API_KEY")
         )
         if not api_key:
             raise ValueError(
                 "NVIDIA API key required. Set config['api_key'], "
-                "NVIDIA_EMBEDDING_API_KEY, or NVIDIA_API_KEY env var."
+                "NVIDIA_EMBEDDING_API_KEY, NVIDIA_EMBED_API_KEY, or NVIDIA_API_KEY env var."
             )
 
         base_url = self.config.get("base_url", "https://integrate.api.nvidia.com/v1")
@@ -54,10 +55,15 @@ class NvidiaEmbedder(BaseEmbedder):
     def _truncate_if_needed(self, text: str) -> str:
         """Truncate text to stay within model token limits.
 
-        nv-embed-v1 has a 4096 token limit. Using ~3.5 chars/token as
-        a conservative estimate, cap at 14000 characters.
+        Model-aware defaults (conservative ~3.5 chars/token):
+        - nv-embed-v1: 4096 tokens → 14000 chars
+        - nemotron-embed: 8192 tokens → 26000 chars (use 24000 for safety)
         """
-        max_chars = int(self.config.get("max_input_chars", 14000))
+        if "nemotron-embed" in self.model:
+            default_max = 24000
+        else:
+            default_max = 14000
+        max_chars = int(self.config.get("max_input_chars", default_max))
         if len(text) > max_chars:
             logger.debug("Truncating input from %d to %d chars for embedding", len(text), max_chars)
             return text[:max_chars]
