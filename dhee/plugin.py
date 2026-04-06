@@ -555,6 +555,16 @@ class DheePlugin:
             user_id=uid, claim=claim, domain=domain,
             confidence=confidence, source="user",
         )
+        try:
+            self._kernel.beliefs.record_influence(
+                belief.id,
+                user_id=uid,
+                influence_type="activated",
+                query=claim,
+                metadata={"action": "add_belief"},
+            )
+        except Exception:
+            logger.debug("Failed to record explicit belief activation", exc_info=True)
         result = {"belief_id": belief.id, "confidence": belief.confidence}
         if contradictions:
             result["contradictions"] = [
@@ -572,6 +582,16 @@ class DheePlugin:
         """Present contradicting evidence to a belief."""
         belief = self._kernel.beliefs.challenge_belief(belief_id, evidence)
         if belief:
+            try:
+                self._kernel.beliefs.record_influence(
+                    belief.id,
+                    user_id=user_id or self._user_id,
+                    influence_type="activated",
+                    query=evidence,
+                    metadata={"action": "challenge_belief"},
+                )
+            except Exception:
+                logger.debug("Failed to record explicit belief challenge", exc_info=True)
             return belief.to_compact()
         return None
 

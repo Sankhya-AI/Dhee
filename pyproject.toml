@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dhee"
-version = "3.1.0"
+version = "3.2.0"
 description = "Cognition layer for AI agents — persistent memory, performance tracking, and insight synthesis"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -74,6 +74,7 @@ dev = [
 dhee = "dhee.cli:main"
 dhee-mcp = "dhee.mcp_slim:run"
 dhee-mcp-full = "dhee.mcp_server:run"
+dhee-debugger-api = "dhee.debugger_api:run"
 
 [project.urls]
 Homepage = "https://github.com/Sankhya-AI/Dhee"
