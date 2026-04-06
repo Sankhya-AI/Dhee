@@ -4,6 +4,72 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [3.2.0] - 2026-04-06 — Event-Sourced Belief Ledger
+
+Dhee's belief system moves from per-file JSON to a fully event-sourced SQLite model with influence tracing.
+
+### Architecture
+
+- **Append-only belief events** — Every mutation (proposed, reinforced, challenged, corrected, marked_stale, tombstoned, merged, split, pinned, unpinned, archived, revived) is recorded as an immutable event with before/after state snapshots.
+- **Materialized belief_nodes** — Current belief state maintained as a projection, updated atomically in the same transaction as the event INSERT.
+- **Persistent connection** — Single SQLite connection with WAL mode, opened once. Replaces per-call connection creation.
+- **Cache loaded once** — In-memory cache hydrated on init, maintained by mutations. No reload-on-every-read overhead.
+
+### New Tables
+
+- `belief_nodes` — Materialized current state with 4 independent status axes
+- `belief_events` — Immutable append-only event log (source of truth) with CHECK constraint on event types
+- `belief_evidence` — Evidence edges linking beliefs to memories and episodes
+- `belief_relations` — Inter-belief edges (contradicts, supersedes, merged_into, split_from)
+- `belief_influence_events` — Tracks which beliefs were considered, included, or grounded during context/search/answer assembly
+
+### Status Axes (replaces single status enum)
+
+- `truth_status` — proposed / held / challenged / revised / retracted
+- `freshness_status` — current / stale / superseded
+- `lifecycle_status` — active / archived / tombstoned
+- `protection_level` — normal / pinned
+
+### Correction Chains
+
+- `correct_belief()` creates a successor belief, marks the old one as superseded
+- Superseded beliefs are hidden from `get_beliefs()` and `get_relevant_beliefs()` by default
+- Full successor chain tracked via `belief_relations` with type `supersedes`
+
+### Belief Influence Tracing (Cut 2)
+
+Six instrumentation points record which beliefs were considered/used:
+- `included` — belief returned in HyperContext during `context()`
+- `contradiction_surfaced` — contradiction pair shown as warning
+- `considered` — belief retrieved during learning outcome recording
+- `grounded` — belief influenced policy decay or was reinforced/challenged from outcomes
+- `activated` — user explicitly added or challenged a belief
+
+### New Operations
+
+- `correct_belief(id, new_claim, reason)` — correction with successor chain
+- `mark_stale(id, reason)` — mark belief as stale
+- `tombstone_belief(id, reason)` — soft-delete
+- `pin_belief(id)` / `unpin_belief(id)` — protection level management
+- `merge_beliefs(survivor_id, loser_id)` — merge with evidence copying
+- `get_belief_history(id)` — full event log for a belief
+- `get_belief_evidence(id)` — evidence chain
+- `record_influence()` / `get_influence_history()` / `get_influence_stats()` — influence tracking
+- `query_beliefs()` — paginated, multi-axis filtered search
+- `list_activity()` — combined belief + influence event timeline
+
+### Migration
+
+- Automatic JSON-to-SQLite migration on first run with receipt tracking
+- Legacy JSON files backed up to `legacy_json_backup/` directory
+- Idempotent — safe to run multiple times
+
+### Bug Fixes
+
+- Superseded beliefs no longer leak through `get_beliefs()` and `get_relevant_beliefs()`
+- `correct_belief()` runs in a single transaction (was 3 connections, 8+ queries)
+- `status` field unified as property alias for `truth_status` (eliminates dual-field divergence)
+
 ## [3.0.0] - 2026-04-01 — Event-Sourced Cognition Substrate
 
 Dhee v3 is a ground-up architectural overhaul that transforms the memory layer into an immutable-event, versioned cognition substrate. Raw memory is now immutable truth; derived cognition (beliefs, policies, insights, heuristics) is provisional, rebuildable, and auditable.

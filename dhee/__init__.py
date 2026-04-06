@@ -32,7 +32,7 @@ from dhee.configs.base import MemoryConfig, FadeMemConfig, EchoMemConfig, Catego
 # Default: CoreMemory (lightest, zero-config)
 Memory = CoreMemory
 
-__version__ = "3.1.0"
+__version__ = "3.2.0"
 __all__ = [
     # Memory classes
     "Engram",

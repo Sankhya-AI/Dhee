@@ -220,11 +220,38 @@ class CognitionKernel:
                 query=task_description or "",
                 limit=5,
             )
+            for belief in relevant_beliefs:
+                try:
+                    self.beliefs.record_influence(
+                        belief.id,
+                        user_id=user_id,
+                        influence_type="included",
+                        query=task_description,
+                    )
+                except Exception:
+                    logger.debug("Failed to record belief inclusion influence", exc_info=True)
             result["beliefs"] = [b.to_compact() for b in relevant_beliefs]
 
             # Surface contradictions as warnings
             contradictions = self.beliefs.get_contradictions(user_id)
             for b1, b2 in contradictions[:3]:
+                try:
+                    self.beliefs.record_influence(
+                        b1.id,
+                        user_id=user_id,
+                        influence_type="contradiction_surfaced",
+                        query=task_description,
+                        metadata={"other_belief_id": b2.id},
+                    )
+                    self.beliefs.record_influence(
+                        b2.id,
+                        user_id=user_id,
+                        influence_type="contradiction_surfaced",
+                        query=task_description,
+                        metadata={"other_belief_id": b1.id},
+                    )
+                except Exception:
+                    logger.debug("Failed to record contradiction influence", exc_info=True)
                 belief_warnings.append(
                     f"Contradicting beliefs: '{b1.claim[:80]}' vs '{b2.claim[:80]}' "
                     f"(confidence: {b1.confidence:.2f} vs {b2.confidence:.2f})"
@@ -621,6 +648,17 @@ class CognitionKernel:
                 relevant_beliefs = self.beliefs.get_relevant_beliefs(
                     user_id, task_desc, limit=3,
                 )
+                for belief in relevant_beliefs:
+                    try:
+                        self.beliefs.record_influence(
+                            belief.id,
+                            user_id=user_id,
+                            influence_type="considered",
+                            query=task_desc,
+                            metadata={"operation": "record_learning_outcomes"},
+                        )
+                    except Exception:
+                        logger.debug("Failed to record considered influence", exc_info=True)
             except Exception as exc:
                 self._record_operation_error(
                     result,
@@ -649,6 +687,19 @@ class CognitionKernel:
                                 try:
                                     self.policies.decay_utility(policy.id, factor=0.8)
                                     result["beliefs_policy_decays"] += 1
+                                    try:
+                                        self.beliefs.record_influence(
+                                            belief.id,
+                                            user_id=user_id,
+                                            influence_type="grounded",
+                                            query=task_desc,
+                                            metadata={
+                                                "policy_id": policy.id,
+                                                "effect": "policy_decay",
+                                            },
+                                        )
+                                    except Exception:
+                                        logger.debug("Failed to record grounded influence", exc_info=True)
                                 except Exception as exc:
                                     self._record_operation_error(
                                         result,

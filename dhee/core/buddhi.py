@@ -1166,6 +1166,14 @@ class Buddhi:
                     self._kernel.beliefs.reinforce_belief(
                         belief.id, what_worked, source="outcome",
                     )
+                    self._kernel.beliefs.record_influence(
+                        belief.id,
+                        user_id=user_id,
+                        influence_type="grounded",
+                        query=task_type,
+                        answer_fragment=what_worked[:240],
+                        metadata={"effect": "reinforced_from_outcome"},
+                    )
             except Exception as exc:
                 logger.warning(
                     "Buddhi reflect belief reinforcement failed: %s",
@@ -1181,6 +1189,14 @@ class Buddhi:
                 for belief in relevant:
                     self._kernel.beliefs.challenge_belief(
                         belief.id, what_failed, source="outcome",
+                    )
+                    self._kernel.beliefs.record_influence(
+                        belief.id,
+                        user_id=user_id,
+                        influence_type="grounded",
+                        query=task_type,
+                        answer_fragment=what_failed[:240],
+                        metadata={"effect": "challenged_from_outcome"},
                     )
             except Exception as exc:
                 logger.warning(
