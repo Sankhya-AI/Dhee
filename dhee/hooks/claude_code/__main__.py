@@ -8,12 +8,20 @@ Reads the Claude Code hook payload from stdin (JSON).
 Writes JSON response to stdout.
 On any error, outputs ``{}`` — never fails the host agent.
 
-Events handled:
-    SessionStart      — inject full Dhee context (session + memories + insights)
-    UserPromptSubmit  — inject relevant memories for the current prompt
-    PostToolUse       — capture tool outcomes into Dhee memory
-    PreCompact        — checkpoint state, re-inject context to survive compaction
-    Stop / SessionEnd — checkpoint session with outcomes
+v3.3.1 architecture: Dhee owns the information flow into the LLM.
+
+    SessionStart  — auto-ingest stale docs + assemble full context
+                    (relevant doc chunks + typed cognition). Inject only
+                    when there's real signal.
+    UserPromptSubmit — search doc chunks for THIS specific prompt.
+                    Inject only high-confidence matches. No raw memory
+                    recall (that was the v3.3.0 noise source).
+    PostToolUse   — store genuine signal only: bash failures, file edits.
+    PreCompact    — checkpoint + re-inject context to survive compaction.
+    Stop/End      — checkpoint with typed outcomes.
+
+The assembler (not the renderer, not the hooks) decides what enters each
+LLM call. The renderer just formats the assembler's decisions as XML.
 """
 
 from __future__ import annotations
@@ -24,7 +32,6 @@ import sys
 from typing import Any
 
 _MAX_REMEMBER_CHARS = 2000
-_MAX_QUERY_CHARS = 200
 
 
 def _get_dhee():
@@ -44,43 +51,61 @@ def _render(ctx: dict[str, Any], **kwargs: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Handlers — each returns a dict for stdout JSON
+# Handlers
 # ---------------------------------------------------------------------------
 
 
 def handle_session_start(payload: dict[str, Any]) -> dict[str, Any]:
+    from dhee.hooks.claude_code.assembler import assemble
+    from dhee.hooks.claude_code.ingest import auto_ingest_project
+
     dhee = _get_dhee()
 
-    task_desc = (
-        payload.get("task_description")
-        or payload.get("initial_prompt")
-        or payload.get("prompt")
-        or ""
-    )
+    task_desc = ""
+    if isinstance(payload, dict):
+        task_desc = (
+            payload.get("task_description")
+            or payload.get("initial_prompt")
+            or payload.get("prompt")
+            or ""
+        )
 
-    ctx = dhee.context(
+    # Auto-ingest any stale project docs (CLAUDE.md, AGENTS.md, etc.).
+    # SHA check makes this a no-op if files haven't changed.
+    try:
+        auto_ingest_project(dhee)
+    except Exception:
+        pass
+
+    # Assemble: doc chunks + typed cognition, budgeted.
+    assembled = assemble(dhee, query=task_desc, include_cognition=True)
+    if assembled.is_empty:
+        return {}
+
+    xml = _render(
+        assembled.typed_cognition,
         task_description=task_desc or None,
-        user_id=os.environ.get("DHEE_USER_ID", "default"),
+        doc_matches=assembled.doc_matches,
     )
-
-    if not ctx:
+    if not xml:
         return {}
-
-    has_content = (
-        ctx.get("memories")
-        or ctx.get("last_session")
-        or ctx.get("insights")
-        or ctx.get("intentions")
-        or ctx.get("performance")
-    )
-    if not has_content:
-        return {}
-
-    xml = _render(ctx, task_description=task_desc or None)
     return {"systemMessage": xml}
 
 
 def handle_user_prompt(payload: dict[str, Any]) -> dict[str, Any]:
+    """Per-turn doc-chunk injection.
+
+    Searches ingested docs for chunks relevant to THIS specific prompt.
+    Only injects when there's a high-confidence match (score ≥ 0.60).
+    No raw memory recall — that was the v3.3.0 noise source.
+
+    This is where Dhee saves the most tokens: instead of the host
+    carrying 2000 tokens of CLAUDE.md context every turn, Dhee injects
+    ~200 tokens of the specific instructions that apply to what the
+    user just asked.
+    """
+    from dhee.hooks.claude_code.assembler import assemble_docs_only
+
     if isinstance(payload, dict):
         prompt = str(payload.get("prompt", payload.get("content", "")))
     elif isinstance(payload, str):
@@ -92,58 +117,39 @@ def handle_user_prompt(payload: dict[str, Any]) -> dict[str, Any]:
         return {}
 
     dhee = _get_dhee()
-    results = dhee.recall(query=prompt[:_MAX_QUERY_CHARS], limit=5)
-    if not results:
+    matches = assemble_docs_only(dhee, query=prompt)
+    if not matches:
         return {}
 
-    xml = _render({"memories": results}, max_tokens=500)
+    xml = _render({}, doc_matches=matches)
+    if not xml:
+        return {}
     return {"systemMessage": xml}
 
 
 def handle_post_tool(payload: dict[str, Any]) -> dict[str, Any]:
+    from dhee.hooks.claude_code.signal import extract_signal
+
     if not isinstance(payload, dict):
         return {}
 
-    tool_name = payload.get("tool_name", "")
-    tool_input = payload.get("tool_input", {})
-    tool_result = payload.get("tool_result", "")
-    success = payload.get("success", True)
-
-    if not tool_name:
+    signal = extract_signal(
+        tool_name=payload.get("tool_name", ""),
+        tool_input=payload.get("tool_input", {}),
+        tool_result=payload.get("tool_result", ""),
+        success=payload.get("success", True),
+    )
+    if signal is None:
         return {}
 
-    write_tools = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
-    shell_tools = {"Bash", "BashOutput"}
-    if tool_name not in write_tools and tool_name not in shell_tools:
-        return {}
-
-    if tool_name in write_tools:
-        path = ""
-        if isinstance(tool_input, dict):
-            path = tool_input.get("file_path", tool_input.get("path", ""))
-        content = f"edited {path}" if path else f"used {tool_name}"
-        if not success:
-            content = f"failed to edit {path}: {str(tool_result)[:100]}"
-    else:
-        cmd = ""
-        if isinstance(tool_input, dict):
-            cmd = tool_input.get("command", "")[:150]
-        content = f"ran: {cmd}" if cmd else f"used {tool_name}"
-        if not success:
-            stderr = str(tool_result)[:200] if tool_result else "unknown error"
-            content = f"command failed: {cmd[:80]} — {stderr}"
-
-    from dhee.hooks.claude_code.privacy import filter_secrets
-
-    content = filter_secrets(content)
-    if len(content) < 10:
-        return {}
+    content, metadata = signal
+    metadata = {"source": "claude_code_hook", **metadata}
 
     try:
         dhee = _get_dhee()
         dhee.remember(
             content=content[:_MAX_REMEMBER_CHARS],
-            metadata={"source": "claude_code_hook", "tool": tool_name, "success": success},
+            metadata=metadata,
         )
     except Exception:
         pass
@@ -152,6 +158,8 @@ def handle_post_tool(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def handle_pre_compact(payload: dict[str, Any]) -> dict[str, Any]:
+    from dhee.hooks.claude_code.assembler import assemble
+
     dhee = _get_dhee()
 
     summary = "session compacted"
@@ -163,10 +171,16 @@ def handle_pre_compact(payload: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         pass
 
-    ctx = dhee.context(user_id=os.environ.get("DHEE_USER_ID", "default"))
-    if not ctx:
+    # Re-inject context to survive compaction.
+    assembled = assemble(dhee, query=summary, include_cognition=True)
+    if assembled.is_empty:
         return {}
-    xml = _render(ctx)
+    xml = _render(
+        assembled.typed_cognition,
+        doc_matches=assembled.doc_matches,
+    )
+    if not xml:
+        return {}
     return {"systemMessage": xml}
 
 

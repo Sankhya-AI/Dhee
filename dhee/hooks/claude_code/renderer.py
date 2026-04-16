@@ -1,14 +1,13 @@
-"""Render Dhee HyperContext as token-budgeted XML for Claude Code.
+"""Render Dhee context as token-budgeted XML for Claude Code.
 
-Takes the raw dict from ``Dhee.context()`` and produces a compact XML block
-that fits inside a token budget. No Pydantic models, no sankhya-os dependency.
+Priority: docs > session > performance > insights > intentions >
+beliefs > policies > memories > episodes > warnings.
 
-Priority order (highest first):
-  session > performance > insights > intentions > memories >
-  beliefs > policies > episodes > warnings
+Empty input → empty string (no tags).
 
-Sections that would overflow the budget are dropped silently, lowest priority
-first. Empty sections never emit tags.
+Token philosophy (Caveman-inspired): drop structural fluff, keep
+technical substance exact. No indentation, short tags, no wrapper
+nesting, no redundant metadata. Every byte earns its place.
 """
 
 from __future__ import annotations
@@ -19,12 +18,6 @@ from xml.sax.saxutils import escape as _xml_escape
 DEFAULT_TOKEN_BUDGET = 1500
 CHARS_PER_TOKEN = 3.5
 
-HEADER = (
-    "Dhee cognition active. The context block below contains your memory and "
-    "learned patterns from prior sessions. Treat as ground truth for this turn — "
-    "do not re-derive what is already here. Honor warnings literally."
-)
-
 
 def render_context(
     ctx: dict[str, Any],
@@ -34,19 +27,28 @@ def render_context(
     max_memories: int = 8,
     max_insights: int = 5,
     max_intentions: int = 3,
+    doc_matches: list | None = None,
 ) -> str:
-    """Render a Dhee context dict as XML for Claude Code system-prompt injection."""
+    """Render Dhee context dict as flat XML for Claude Code injection.
+
+    Returns empty string when nothing to inject.
+    """
     sections: list[tuple[int, list[str]]] = [
+        (110, _docs_block(doc_matches)),
         (100, _session_block(ctx.get("last_session"))),
         (90, _performance_block(ctx.get("performance", []))),
         (80, _insights_block(ctx.get("insights", []), max_insights)),
         (75, _intentions_block(ctx.get("intentions", []), max_intentions)),
-        (70, _memories_block(ctx.get("memories", []), max_memories)),
-        (60, _beliefs_block(ctx.get("beliefs", []))),
-        (50, _policies_block(ctx.get("policies", []))),
+        (65, _beliefs_block(ctx.get("beliefs", []))),
+        (55, _policies_block(ctx.get("policies", []))),
+        (45, _memories_block(ctx.get("memories", []), max_memories)),
         (40, _episodes_block(ctx.get("episodes", []))),
         (30, _warnings_block(ctx.get("warnings", []))),
     ]
+
+    non_empty = [(p, lines) for p, lines in sections if lines]
+    if not non_empty:
+        return ""
 
     budget_chars = int(max_tokens * CHARS_PER_TOKEN)
 
@@ -54,20 +56,23 @@ def render_context(
     if task_description:
         attrs = f' task="{_esc_attr(task_description[:120])}"'
 
-    open_tag = f"<dhee-context{attrs}>"
-    close_tag = "</dhee-context>"
-    body: list[str] = [HEADER, open_tag]
-    used = len(HEADER) + len(open_tag) + len(close_tag) + 2  # newlines
+    open_tag = f"<dhee{attrs}>"
+    close_tag = "</dhee>"
+    body: list[str] = [open_tag]
+    used = len(open_tag) + len(close_tag) + 1
 
-    for _priority, lines in sections:
-        if not lines:
-            continue
-        block = "\n".join(f"  {line}" for line in lines)
+    included_any = False
+    for _priority, lines in non_empty:
+        block = "\n".join(lines)
         cost = len(block) + 1
         if used + cost > budget_chars:
             continue
         body.append(block)
         used += cost
+        included_any = True
+
+    if not included_any:
+        return ""
 
     body.append(close_tag)
     return "\n".join(body) + "\n"
@@ -79,8 +84,24 @@ def estimate_tokens(text: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Section builders — each returns list[str] of XML lines, [] if nothing to emit
+# Section builders — each returns list[str], [] if nothing
 # ---------------------------------------------------------------------------
+
+
+def _docs_block(doc_matches: list | None) -> list[str]:
+    if not doc_matches:
+        return []
+    items: list[str] = []
+    for m in doc_matches:
+        path = getattr(m, "heading_breadcrumb", "") or ""
+        score = getattr(m, "score", 0.0)
+        text = getattr(m, "text", "")
+        if not text:
+            continue
+        if path and text.startswith(path):
+            text = text[len(path):].lstrip("\n")
+        items.append(_tag("r", _score_attr(score), text))
+    return items
 
 
 def _session_block(session: dict[str, Any] | None) -> list[str]:
@@ -93,39 +114,36 @@ def _session_block(session: dict[str, Any] | None) -> list[str]:
     status = session.get("status", "")
     if not (decisions or files or todos or summary):
         return []
-    attrs = _attrs(status=status) if status else ""
-    inner: list[str] = []
+    parts: list[str] = []
     if summary:
-        inner.append(f"<summary>{_esc(summary[:200])}</summary>")
+        parts.append(_esc(summary[:200]))
     if decisions:
-        inner.append(_flat_list("decisions", "d", decisions))
+        parts.append("decisions:" + ",".join(_esc(str(d)) for d in decisions))
     if files:
-        inner.append(_flat_list("files", "f", files))
+        parts.append("files:" + ",".join(_esc(str(f)) for f in files))
     if todos:
-        inner.append(_flat_list("todos", "t", todos))
-    return _container("session", attrs, inner)
+        parts.append("todo:" + ",".join(_esc(str(t)) for t in todos))
+    a = f' st="{_esc_attr(status)}"' if status else ""
+    return [f"<session{a}>{' | '.join(parts)}</session>"]
 
 
 def _performance_block(perf: list[Any]) -> list[str]:
     if not perf:
         return []
-    out: list[str] = ["<performance>"]
+    items: list[str] = []
     for row in perf[:5]:
         if not isinstance(row, dict):
             continue
         attrs = _attrs(
             type=str(row.get("task_type", "")),
-            attempts=str(row.get("total_attempts", 0)),
+            n=str(row.get("total_attempts", 0)),
             best=_fmt(row.get("best_score")),
             avg=_fmt(row.get("avg_score")),
             trend=_fmt(row.get("trend")),
         )
         if attrs:
-            out.append(f"  <row {attrs}/>")
-    if len(out) == 1:
-        return []
-    out.append("</performance>")
-    return out
+            items.append(f"<perf {attrs}/>")
+    return items
 
 
 def _insights_block(insights: list[Any], limit: int) -> list[str]:
@@ -138,13 +156,11 @@ def _insights_block(insights: list[Any], limit: int) -> list[str]:
             tag = str(row.get("task_type", row.get("tag", "")))
             if not content:
                 continue
-            a = _attrs(tag=tag) if tag else ""
-            items.append(_tag("i", a, content))
+            a = f' tag="{_esc_attr(tag)}"' if tag else ""
+            items.append(f"<i{a}>{_esc(content)}</i>")
         elif isinstance(row, str) and row:
-            items.append(_tag("i", "", row))
-    if not items:
-        return []
-    return ["<insights>"] + [f"  {i}" for i in items] + ["</insights>"]
+            items.append(f"<i>{_esc(row)}</i>")
+    return items
 
 
 def _intentions_block(intentions: list[Any], limit: int) -> list[str]:
@@ -163,13 +179,11 @@ def _intentions_block(intentions: list[Any], limit: int) -> list[str]:
             if not content:
                 continue
             trig = ",".join(str(t) for t in triggers[:5]) if isinstance(triggers, list) else str(triggers)
-            a = _attrs(triggers=trig) if trig else ""
-            items.append(_tag("i", a, content))
+            a = f' triggers="{_esc_attr(trig)}"' if trig else ""
+            items.append(f"<intent{a}>{_esc(content)}</intent>")
         elif isinstance(row, str) and row:
-            items.append(_tag("i", "", row))
-    if not items:
-        return []
-    return ["<intentions>"] + [f"  {i}" for i in items] + ["</intentions>"]
+            items.append(f"<intent>{_esc(row)}</intent>")
+    return items
 
 
 def _memories_block(memories: list[Any], limit: int) -> list[str]:
@@ -189,12 +203,10 @@ def _memories_block(memories: list[Any], limit: int) -> list[str]:
             score = _score(m)
             if not text:
                 continue
-            items.append(f'<m s="{score:.2f}">{_esc(text)}</m>')
+            items.append(f"<m {_score_attr(score)}>{_esc(text)}</m>")
         elif isinstance(m, str) and m:
             items.append(f"<m>{_esc(m)}</m>")
-    if not items:
-        return []
-    return ["<memories>"] + [f"  {i}" for i in items] + ["</memories>"]
+    return items
 
 
 def _beliefs_block(beliefs: list[Any]) -> list[str]:
@@ -209,10 +221,9 @@ def _beliefs_block(beliefs: list[Any]) -> list[str]:
         conf = _fmt(b.get("confidence"))
         if not claim:
             continue
-        items.append(_tag("b", _attrs(type=btype, conf=conf), claim))
-    if not items:
-        return []
-    return ["<beliefs>"] + [f"  {i}" for i in items] + ["</beliefs>"]
+        a = _attrs(type=btype, conf=conf)
+        items.append(_tag("b", a, claim))
+    return items
 
 
 def _policies_block(policies: list[Any]) -> list[str]:
@@ -228,9 +239,7 @@ def _policies_block(policies: list[Any]) -> list[str]:
         if not (name or desc):
             continue
         items.append(_tag("p", _attrs(name=name, conf=conf), desc))
-    if not items:
-        return []
-    return ["<policies>"] + [f"  {i}" for i in items] + ["</policies>"]
+    return items
 
 
 def _episodes_block(episodes: list[Any]) -> list[str]:
@@ -244,19 +253,15 @@ def _episodes_block(episodes: list[Any]) -> list[str]:
         etype = str(e.get("episode_type", e.get("type", "")))
         if not summary:
             continue
-        items.append(_tag("e", _attrs(type=etype), summary))
-    if not items:
-        return []
-    return ["<episodes>"] + [f"  {i}" for i in items] + ["</episodes>"]
+        a = f' type="{_esc_attr(etype)}"' if etype else ""
+        items.append(f"<e{a}>{_esc(summary)}</e>")
+    return items
 
 
 def _warnings_block(warnings: list[str]) -> list[str]:
     if not warnings:
         return []
-    inner = [f"<w>{_esc(str(w))}</w>" for w in warnings if w]
-    if not inner:
-        return []
-    return _container("warnings", "", inner)
+    return [f"<w>{_esc(str(w))}</w>" for w in warnings if w]
 
 
 # ---------------------------------------------------------------------------
@@ -288,23 +293,12 @@ def _fmt(value: Any) -> str:
         return ""
 
 
+def _score_attr(score: float) -> str:
+    return f's="{score:.2f}"'
+
+
 def _tag(name: str, attrs: str, text: str) -> str:
     safe = _esc(text)
     if attrs:
         return f"<{name} {attrs}>{safe}</{name}>"
     return f"<{name}>{safe}</{name}>"
-
-
-def _flat_list(wrapper: str, item: str, items: list) -> str:
-    if not items:
-        return ""
-    inner = " ".join(f"<{item}>{_esc(str(x))}</{item}>" for x in items if x)
-    return f"<{wrapper}>{inner}</{wrapper}>"
-
-
-def _container(tag: str, attrs: str, inner: list[str]) -> list[str]:
-    inner = [line for line in inner if line]
-    if not inner:
-        return []
-    open_tag = f"<{tag} {attrs}>" if attrs else f"<{tag}>"
-    return [open_tag, *[f"  {line}" for line in inner], f"</{tag}>"]

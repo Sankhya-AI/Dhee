@@ -1,47 +1,42 @@
 #!/bin/sh
-# engram installer — run with: curl -fsSL https://raw.githubusercontent.com/Ashish-dwi99/Engram/main/install.sh | sh
+# Dhee installer — one command to add cognition to Claude Code.
+#
+#   curl -fsSL https://raw.githubusercontent.com/Sankhya-AI/dhee/main/install.sh | sh
+#
+# What it does:
+#   1. Creates ~/.dhee with a hidden Python venv
+#   2. Installs the dhee package
+#   3. Configures Claude Code hooks (automatic cognition every session)
+#
+# Requires: Python 3.9+, Claude Code CLI
 set -e
 
-ENGRAM_HOME="$HOME/.dhee"
-VENV_DIR="$ENGRAM_HOME/venv"
+DHEE_HOME="$HOME/.dhee"
+VENV_DIR="$DHEE_HOME/.venv"
 BIN_DIR="$HOME/.local/bin"
 MIN_PYTHON="3.9"
 PACKAGE="dhee[all]"
 
-# --- Colors (if terminal supports them) ---
+# --- Colors ---
 if [ -t 1 ]; then
-    BOLD="\033[1m"
-    GREEN="\033[32m"
-    YELLOW="\033[33m"
-    RED="\033[31m"
-    RESET="\033[0m"
+    BOLD="\033[1m" GREEN="\033[32m" YELLOW="\033[33m" RED="\033[31m" RESET="\033[0m"
 else
     BOLD="" GREEN="" YELLOW="" RED="" RESET=""
 fi
 
-info()  { printf "${GREEN}=>${RESET} %s\n" "$1"; }
-warn()  { printf "${YELLOW}warning:${RESET} %s\n" "$1"; }
-error() { printf "${RED}error:${RESET} %s\n" "$1" >&2; exit 1; }
+info()  { printf "${GREEN}>${RESET} %s\n" "$1"; }
+warn()  { printf "${YELLOW}!${RESET} %s\n" "$1"; }
+error() { printf "${RED}x${RESET} %s\n" "$1" >&2; exit 1; }
+done_() { printf "${GREEN}✓${RESET} %s\n" "$1"; }
 
-# --- Detect OS ---
+# --- OS check ---
 OS="$(uname -s)"
 case "$OS" in
-    Darwin) OS_NAME="macOS" ;;
-    Linux)  OS_NAME="Linux" ;;
-    *)      error "Unsupported OS: $OS. engram supports macOS and Linux." ;;
-esac
-info "Detected $OS_NAME"
-
-# --- Detect shell ---
-SHELL_NAME="$(basename "$SHELL" 2>/dev/null || echo "sh")"
-case "$SHELL_NAME" in
-    zsh)  PROFILE="$HOME/.zshrc" ;;
-    bash) PROFILE="$HOME/.bashrc" ;;
-    fish) PROFILE="$HOME/.config/fish/config.fish" ;;
-    *)    PROFILE="$HOME/.profile" ;;
+    Darwin|Linux) ;;
+    *) error "Unsupported OS: $OS. Dhee supports macOS and Linux." ;;
 esac
 
-# --- Check Python ---
+# --- Find Python 3.9+ ---
 PYTHON=""
 for cmd in python3 python; do
     if command -v "$cmd" >/dev/null 2>&1; then
@@ -57,44 +52,39 @@ for cmd in python3 python; do
     fi
 done
 
-if [ -z "$PYTHON" ]; then
-    error "Python $MIN_PYTHON+ is required but not found.
+[ -z "$PYTHON" ] && error "Python $MIN_PYTHON+ required. Install: brew install python3 (macOS) or apt install python3 python3-venv (Linux)"
 
-  Install Python:
-    macOS:  brew install python3
-    Ubuntu: sudo apt install python3 python3-venv
-    Fedora: sudo dnf install python3"
-fi
-
-PYTHON_VER="$("$PYTHON" --version 2>&1)"
-info "Using $PYTHON_VER"
-
-# --- Create venv ---
+# --- Create/update venv ---
 if [ -d "$VENV_DIR" ]; then
-    info "Updating existing venv at $VENV_DIR"
+    info "Updating existing install"
 else
-    info "Creating venv at $VENV_DIR"
-    mkdir -p "$ENGRAM_HOME"
+    info "Installing Dhee"
+    mkdir -p "$DHEE_HOME"
     "$PYTHON" -m venv "$VENV_DIR"
 fi
 
 # --- Install package ---
-info "Installing $PACKAGE ..."
-"$VENV_DIR/bin/pip" install --upgrade pip >/dev/null 2>&1
-"$VENV_DIR/bin/pip" install "$PACKAGE"
+"$VENV_DIR/bin/pip" install --upgrade pip -q 2>/dev/null
+"$VENV_DIR/bin/pip" install --upgrade "$PACKAGE" -q
+done_ "Installed dhee"
 
 # --- Symlink binaries ---
 mkdir -p "$BIN_DIR"
 for bin_name in dhee dhee-mcp; do
     src="$VENV_DIR/bin/$bin_name"
     dst="$BIN_DIR/$bin_name"
-    if [ -f "$src" ]; then
-        ln -sf "$src" "$dst"
-        info "Linked $dst -> $src"
-    fi
+    [ -f "$src" ] && ln -sf "$src" "$dst"
 done
 
 # --- Add to PATH if needed ---
+SHELL_NAME="$(basename "$SHELL" 2>/dev/null || echo "sh")"
+case "$SHELL_NAME" in
+    zsh)  PROFILE="$HOME/.zshrc" ;;
+    bash) PROFILE="$HOME/.bashrc" ;;
+    fish) PROFILE="$HOME/.config/fish/config.fish" ;;
+    *)    PROFILE="$HOME/.profile" ;;
+esac
+
 case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
     *)
@@ -103,18 +93,23 @@ case ":$PATH:" in
         else
             PATH_LINE="export PATH=\"$BIN_DIR:\$PATH\""
         fi
-        if [ -f "$PROFILE" ] && grep -qF "$BIN_DIR" "$PROFILE" 2>/dev/null; then
-            : # already in profile
-        else
-            printf "\n# engram\n%s\n" "$PATH_LINE" >> "$PROFILE"
-            info "Added $BIN_DIR to PATH in $PROFILE"
-            warn "Restart your shell or run: source $PROFILE"
+        if ! grep -qF "$BIN_DIR" "$PROFILE" 2>/dev/null; then
+            printf "\n# dhee\n%s\n" "$PATH_LINE" >> "$PROFILE"
         fi
         export PATH="$BIN_DIR:$PATH"
         ;;
 esac
 
+# --- Install Claude Code hooks ---
+if command -v claude >/dev/null 2>&1 || [ -f "$HOME/.claude/settings.json" ]; then
+    "$VENV_DIR/bin/dhee" install >/dev/null 2>&1 && done_ "Claude Code hooks configured" || warn "Hook install failed — run 'dhee install' manually"
+else
+    warn "Claude Code not found — run 'dhee install' after installing Claude Code"
+fi
+
 # --- Done ---
-printf "\n${BOLD}${GREEN}dhee installed successfully!${RESET}\n\n"
-printf "  Run ${BOLD}dhee setup${RESET} to get started.\n"
-printf "  Uninstall: ${BOLD}dhee uninstall${RESET} or ${BOLD}rm -rf ~/.dhee${RESET}\n\n"
+printf "\n${BOLD}${GREEN}Dhee is ready.${RESET}\n"
+printf "  Open Claude Code in any project — cognition is automatic.\n\n"
+printf "  Commands:  dhee status | dhee install | dhee uninstall\n"
+printf "  Update:    re-run this script\n"
+printf "  Remove:    rm -rf ~/.dhee && dhee uninstall-hooks\n\n"

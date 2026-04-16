@@ -370,6 +370,92 @@ def cmd_uninstall_hooks(args: argparse.Namespace) -> None:
         print("  No Dhee hooks found.")
 
 
+def cmd_purge_legacy_noise(args: argparse.Namespace) -> None:
+    """Clean v3.3.0 hook noise from the Dhee vector store.
+
+    v3.3.0 stored every successful Bash invocation verbatim as a memory.
+    v3.3.1 no longer does. This command removes the legacy entries so
+    recall stops surfacing shell-echo noise as "ground truth".
+    """
+    from dhee.hooks.claude_code.migrate import purge_legacy_noise
+
+    result = purge_legacy_noise(dry_run=args.dry_run)
+    if args.json:
+        _json_out({
+            "scanned": result.scanned,
+            "removed": result.removed,
+            "db_path": str(result.db_path) if result.db_path else None,
+            "dry_run": args.dry_run,
+            "skipped_reason": result.skipped_reason,
+        })
+        return
+    if result.skipped_reason:
+        print(f"  Skipped: {result.skipped_reason}")
+        return
+    verb = "Would remove" if args.dry_run else "Removed"
+    print(f"  Scanned: {result.scanned} memories")
+    print(f"  {verb}: {result.removed} legacy-noise entries")
+    if result.db_path:
+        print(f"  DB: {result.db_path}")
+
+
+def cmd_ingest(args: argparse.Namespace) -> None:
+    """Ingest markdown files into Dhee's vector store for selective retrieval."""
+    from dhee import Dhee
+    from dhee.hooks.claude_code.ingest import auto_ingest_project, ingest_file
+
+    dhee = Dhee(auto_context=False, auto_checkpoint=False)
+
+    if args.paths:
+        for path in args.paths:
+            result = ingest_file(dhee, path, force=args.force)
+            if args.json:
+                _json_out({
+                    "path": result.source_path,
+                    "stored": result.chunks_stored,
+                    "deleted": result.chunks_deleted,
+                    "skipped": result.skipped,
+                    "reason": result.reason,
+                })
+            elif result.skipped:
+                print(f"  {path}: unchanged (skip)")
+            elif result.reason:
+                print(f"  {path}: {result.reason}")
+            else:
+                print(f"  {path}: {result.chunks_stored} chunks stored" +
+                      (f", {result.chunks_deleted} old removed" if result.chunks_deleted else ""))
+    else:
+        results = auto_ingest_project(dhee, args.root)
+        if not results:
+            print("  No standard docs found (CLAUDE.md, AGENTS.md, SKILL.md).")
+            return
+        for r in results:
+            name = r.source_path.rsplit("/", 1)[-1]
+            if r.skipped:
+                print(f"  {name}: unchanged")
+            elif r.reason:
+                print(f"  {name}: {r.reason}")
+            else:
+                print(f"  {name}: {r.chunks_stored} chunks")
+
+
+def cmd_docs(args: argparse.Namespace) -> None:
+    """Show what docs are ingested and available for selective retrieval."""
+    from dhee.hooks.claude_code.ingest import get_manifest_summary
+
+    summary = get_manifest_summary()
+    if args.json:
+        _json_out(summary)
+        return
+    if not summary["files"]:
+        print("  No docs ingested. Run: dhee ingest")
+        return
+    print(f"  {summary['files']} file(s), {summary['total_chunks']} total chunks\n")
+    for path, info in summary["entries"].items():
+        name = path.rsplit("/", 1)[-1]
+        print(f"  {name}: {info['chunks']} chunks (sha:{info['sha']})")
+
+
 def cmd_benchmark(args: argparse.Namespace) -> None:
     """Run performance benchmarks."""
     import time
@@ -523,6 +609,25 @@ def build_parser() -> argparse.ArgumentParser:
     # uninstall-hooks
     sub.add_parser("uninstall-hooks", help="Remove Dhee hooks from Claude Code")
 
+    # purge-legacy-noise
+    p_purge = sub.add_parser(
+        "purge-legacy-noise",
+        help="Remove v3.3.0 hook-noise entries from the vector store",
+    )
+    p_purge.add_argument("--dry-run", action="store_true", help="Report counts without deleting")
+    p_purge.add_argument("--json", action="store_true", help="JSON output")
+
+    # ingest
+    p_ingest = sub.add_parser("ingest", help="Ingest markdown docs for selective retrieval")
+    p_ingest.add_argument("paths", nargs="*", help="Specific files to ingest (omit for auto-scan)")
+    p_ingest.add_argument("--root", default=".", help="Project root for auto-scan")
+    p_ingest.add_argument("--force", action="store_true", help="Re-ingest even if unchanged")
+    p_ingest.add_argument("--json", action="store_true", help="JSON output")
+
+    # docs
+    p_docs = sub.add_parser("docs", help="Show ingested doc manifest")
+    p_docs.add_argument("--json", action="store_true", help="JSON output")
+
     # benchmark
     sub.add_parser("benchmark", help="Run performance benchmarks")
 
@@ -547,8 +652,11 @@ COMMAND_MAP = {
     "import": cmd_import,
     "status": cmd_status,
     "task": cmd_task,
+    "ingest": cmd_ingest,
+    "docs": cmd_docs,
     "install": cmd_install_hooks,
     "uninstall-hooks": cmd_uninstall_hooks,
+    "purge-legacy-noise": cmd_purge_legacy_noise,
     "benchmark": cmd_benchmark,
     "uninstall": cmd_uninstall,
 }

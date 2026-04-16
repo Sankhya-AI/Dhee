@@ -1,9 +1,15 @@
 """Install Dhee hooks into Claude Code settings.
 
 Writes hook entries into ``~/.claude/settings.json`` so that every Claude Code
-session automatically gets Dhee cognition: memory injection on start, learning
-on tool use, checkpoint on exit. No markdown files, no SKILL.md, no plugins
-directory — just Python hooks in the agent's native lifecycle.
+session automatically gets Dhee cognition: typed-signal storage on tool use,
+checkpoint on exit, and context injection at session start when typed
+cognition exists. No markdown files, no SKILL.md, no plugins directory —
+just Python hooks in the agent's native lifecycle.
+
+v3.3.1 removes UserPromptSubmit from the default event set. The prior
+per-turn injection created a pollution loop; see ``__main__.handle_user_prompt``
+for the history. Existing UserPromptSubmit Dhee entries are migrated away
+on next install/upgrade.
 """
 
 from __future__ import annotations
@@ -11,7 +17,7 @@ from __future__ import annotations
 import json
 import shutil
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -24,9 +30,16 @@ HOOK_EVENTS: tuple[str, ...] = (
     "SessionEnd",
 )
 
+# Events that Dhee owned in a prior version but no longer installs.
+# Currently empty — UserPromptSubmit is back (doing doc-chunk retrieval,
+# not raw-memory noise as in v3.3.0).
+LEGACY_EVENTS: tuple[str, ...] = ()
+
 TOOL_MATCHERS: dict[str, str] = {
     "PostToolUse": "Edit|Write|MultiEdit|Bash",
 }
+
+_DHEE_COMMAND_MARKER = "dhee.hooks.claude_code"
 
 
 @dataclass
@@ -37,6 +50,10 @@ class InstallResult:
     updated: bool = False
     already_installed: bool = False
     backed_up: Path | None = None
+    legacy_removed: tuple[str, ...] = ()
+    # v3.3.0 → v3.3.1 DB cleanup: noisy memory entries removed. ``None``
+    # when migration didn't run (fresh install or already-clean DB).
+    noise_purged: int | None = None
 
 
 def _settings_path() -> Path:
@@ -60,7 +77,7 @@ def _build_entry(event: str) -> dict[str, Any]:
 def _has_dhee_hook(entries: list[dict[str, Any]]) -> bool:
     for entry in entries:
         for hook in entry.get("hooks", []):
-            if "dhee.hooks.claude_code" in hook.get("command", ""):
+            if _DHEE_COMMAND_MARKER in hook.get("command", ""):
                 return True
     return False
 
@@ -73,12 +90,53 @@ def _all_installed(hooks: dict[str, Any], events: tuple[str, ...]) -> bool:
     return True
 
 
+def _strip_dhee_from_event(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return ``entries`` with Dhee-owned hook entries removed."""
+    return [
+        entry
+        for entry in entries
+        if not any(
+            _DHEE_COMMAND_MARKER in hook.get("command", "")
+            for hook in entry.get("hooks", [])
+        )
+    ]
+
+
+def _remove_legacy_entries(
+    hooks: dict[str, Any],
+    legacy: tuple[str, ...] = LEGACY_EVENTS,
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """Strip Dhee hooks from events we no longer install.
+
+    Returns (updated_hooks, tuple_of_events_we_cleaned). Non-Dhee entries
+    in those events are preserved.
+    """
+    cleaned: list[str] = []
+    for event in legacy:
+        entries = hooks.get(event)
+        if not isinstance(entries, list):
+            continue
+        if not _has_dhee_hook(entries):
+            continue
+        remaining = _strip_dhee_from_event(entries)
+        if remaining:
+            hooks[event] = remaining
+        else:
+            del hooks[event]
+        cleaned.append(event)
+    return hooks, tuple(cleaned)
+
+
 def install_hooks(
     *,
     force: bool = False,
     events: tuple[str, ...] = HOOK_EVENTS,
 ) -> InstallResult:
-    """Install Dhee hooks into ``~/.claude/settings.json``."""
+    """Install Dhee hooks into ``~/.claude/settings.json``.
+
+    Also migrates any legacy Dhee hooks (e.g., UserPromptSubmit from v3.3.0)
+    away so upgraders stop paying for no-op invocations.
+    """
     path = _settings_path()
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -89,9 +147,14 @@ def install_hooks(
         except (json.JSONDecodeError, Exception):
             settings = {}
 
-    existing_hooks = settings.get("hooks", {})
+    existing_hooks = settings.get("hooks", {}) or {}
 
-    if not force and _all_installed(existing_hooks, events):
+    # Detect legacy Dhee hooks that need cleanup even when no install change
+    # is otherwise required.
+    _, pending_legacy = _remove_legacy_entries(dict(existing_hooks))
+    fully_installed = _all_installed(existing_hooks, events)
+
+    if not force and fully_installed and not pending_legacy:
         return InstallResult(
             settings_path=path,
             events=events,
@@ -104,7 +167,8 @@ def install_hooks(
         shutil.copy2(path, backup)
         backed_up = backup
 
-    hooks = dict(existing_hooks)
+    hooks, legacy_removed = _remove_legacy_entries(dict(existing_hooks))
+
     for event in events:
         our_entry = _build_entry(event)
         if event in hooks and not force:
@@ -123,22 +187,37 @@ def install_hooks(
     created = not path.exists()
     path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
 
+    # Upgrade-time DB cleanup: purge v3.3.0 noise from the vector store.
+    # Only run when we're actually installing — a no-op install (everything
+    # already in place, no legacy events) shouldn't scan the DB every time.
+    noise_purged: int | None = None
+    try:
+        from dhee.hooks.claude_code.migrate import purge_legacy_noise
+
+        result = purge_legacy_noise()
+        noise_purged = result.removed
+    except Exception:
+        # Never let cleanup block an install.
+        noise_purged = None
+
     return InstallResult(
         settings_path=path,
         events=events,
         created=created,
         updated=not created,
         backed_up=backed_up,
+        legacy_removed=legacy_removed,
+        noise_purged=noise_purged,
     )
 
 
 def ensure_installed() -> InstallResult:
-    """Install hooks if not already present."""
+    """Install hooks if not already present. Also runs legacy cleanup."""
     return install_hooks()
 
 
 def uninstall_hooks() -> bool:
-    """Remove Dhee hooks from settings.json."""
+    """Remove all Dhee hooks from settings.json, including legacy entries."""
     path = _settings_path()
     if not path.exists():
         return False
@@ -155,10 +234,7 @@ def uninstall_hooks() -> bool:
         entries = hooks[event]
         if not isinstance(entries, list):
             continue
-        filtered = [
-            e for e in entries
-            if not any("dhee.hooks.claude_code" in h.get("command", "") for h in e.get("hooks", []))
-        ]
+        filtered = _strip_dhee_from_event(entries)
         if len(filtered) != len(entries):
             changed = True
         if filtered:

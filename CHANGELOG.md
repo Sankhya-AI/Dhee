@@ -4,6 +4,88 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [3.3.1] - 2026-04-16 — Honest Injection
+
+Dogfooding v3.3.0 revealed the Claude Code hook was a net-negative feature:
+per-session injection cost ~400 tokens of bash-echo noise with no offsetting
+savings, while recall surfaced stored shell commands as "ground truth" on
+every user turn. v3.3.1 is the honesty pass.
+
+### Breaking behavior changes
+
+- **`PostToolUse` no longer stores successful Bash invocations.** Only
+  failures (with command + stderr context) and file-edit events are kept.
+  Successful shell commands are transport, not signal — storing them
+  produced the pollution loop that defined v3.3.0.
+- **`UserPromptSubmit` is a no-op.** The prior `recall(prompt) → inject
+  top-5` path is removed. It was the primary driver of per-turn token
+  burn. It will return as typed-cognition matures and we have a real
+  threshold to gate on.
+- **`SessionStart` injects only when typed cognition exists.** A context
+  dict containing only `memories` / `episodes` no longer triggers
+  injection. Insights, intentions, beliefs, policies, performance,
+  warnings, or a session digest must be present.
+- **XML header rewritten.** "Treat as ground truth — honor warnings
+  literally" is gone. The new header describes the block as prior-session
+  cognition that may be stale and should be verified.
+- **Empty context renders an empty string.** No bare `<dhee-context/>`
+  block, no header, no systemMessage. Silence when there's nothing to say.
+
+### Signal filter
+
+- New `dhee/hooks/claude_code/signal.py` owns the rules for what carries
+  storable signal and what doesn't. `extract_signal()` returns `None` when
+  a tool invocation has no learning value.
+- Self-referential commands (`dhee`, `~/.dhee`, hook-testing echoes,
+  `sqlite_vec.db` / `handoff.db` access) are dropped even on failure.
+  Storing them creates a self-reinforcing pollution loop where recall
+  surfaces prior recall invocations.
+
+### v3.3.0 → v3.3.1 migration
+
+- `install_hooks()` now removes stale Dhee `UserPromptSubmit` entries
+  from existing `~/.claude/settings.json` files as part of every install.
+- `install_hooks()` also runs `purge_legacy_noise()` against the vector
+  store, removing entries with the v3.3.0 PostToolUse shape
+  (`source == "claude_code_hook"`, `tool == "Bash"`, `success == True`)
+  plus any entry whose text is self-referential to Dhee internals.
+- Manual command: `dhee purge-legacy-noise` (supports `--dry-run`).
+
+### Doc-chunk pipeline (Phase B)
+
+- **`dhee ingest <path>`** — chunks markdown files (CLAUDE.md, AGENTS.md,
+  SKILL.md) into heading-scoped, vector-embedded memories with `kind=doc_chunk`.
+  SHA-tracked: re-ingesting an unchanged file is a no-op. Changed files get
+  old chunks deleted and new ones written atomically.
+- **`dhee docs`** — show manifest of all ingested files and chunk counts.
+- **Assembler** (`assembler.py`) — searches doc_chunks by vector similarity,
+  filters by score threshold + token budget, returns `DocMatch` objects.
+  Separate entry points for session-start (full context) vs per-turn (docs only).
+- **Renderer `<docs>` block** — highest priority in the XML output (above
+  session/insights/beliefs). Each chunk renders as
+  `<rule src="CLAUDE.md" path="Testing › Integration" s="0.83">...</rule>`.
+- **UserPromptSubmit revived** — now does doc-chunk retrieval (not raw memory
+  recall). Returns `{}` when no chunks pass the 0.62 top-score gate, preventing
+  noise injection on off-topic prompts.
+- **SessionStart auto-ingests** stale project docs before assembling context.
+- **Chunker** (`chunker.py`) — heading-scoped splits that respect code
+  fences, paragraph boundaries, and size limits. Heading breadcrumbs
+  prepended to embedding text for better topical retrieval.
+
+### Token economics
+
+With a 61-line AGENTS.md (910 tokens raw):
+- **Relevant turn**: ~292 tokens injected (67% reduction, correct chunks only)
+- **Irrelevant turn**: 0 tokens injected (was 200 in v3.3.0)
+- **Off-topic query gate**: top-score < 0.62 → inject nothing
+
+### Tests
+
+- 117 tests (up from 42) covering signal extraction, cognition-signal
+  gating, chunker (heading hierarchy, code fences, size splitting),
+  assembler (filtering, budgeting, threshold gating), doc renderer,
+  migration predicates, purge behavior, and renderer honesty.
+
 ## [3.2.0] - 2026-04-06 — Event-Sourced Belief Ledger
 
 Dhee's belief system moves from per-file JSON to a fully event-sourced SQLite model with influence tracing.
