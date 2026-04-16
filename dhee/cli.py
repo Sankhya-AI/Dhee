@@ -318,6 +318,58 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
         print("Cancelled.")
 
 
+def cmd_task(args: argparse.Namespace) -> None:
+    """Start Claude Code with Dhee cognition hooks."""
+    from dhee.hooks.claude_code.install import ensure_installed
+
+    result = ensure_installed()
+    if result.already_installed:
+        pass  # hooks already in place
+    elif result.created or result.updated:
+        print(f"  Dhee hooks installed → {result.settings_path}")
+
+    # Find claude executable
+    claude_bin = shutil.which("claude")
+    if not claude_bin:
+        print("Error: 'claude' not found in PATH. Install Claude Code first.", file=sys.stderr)
+        sys.exit(1)
+
+    # Build command
+    cmd = [claude_bin]
+    if args.print_mode:
+        cmd.append("--print")
+    if args.description:
+        cmd.append(args.description)
+
+    # Replace current process with claude
+    os.execvp(claude_bin, cmd)
+
+
+def cmd_install_hooks(args: argparse.Namespace) -> None:
+    """Install Dhee hooks into Claude Code."""
+    from dhee.hooks.claude_code.install import install_hooks
+
+    result = install_hooks(force=args.force)
+    if result.already_installed and not args.force:
+        print("  Dhee hooks already installed.")
+    else:
+        action = "Created" if result.created else "Updated"
+        print(f"  {action} {result.settings_path}")
+        print(f"  Hooks: {', '.join(result.events)}")
+        if result.backed_up:
+            print(f"  Backup: {result.backed_up}")
+
+
+def cmd_uninstall_hooks(args: argparse.Namespace) -> None:
+    """Remove Dhee hooks from Claude Code."""
+    from dhee.hooks.claude_code.install import uninstall_hooks
+
+    if uninstall_hooks():
+        print("  Dhee hooks removed.")
+    else:
+        print("  No Dhee hooks found.")
+
+
 def cmd_benchmark(args: argparse.Namespace) -> None:
     """Run performance benchmarks."""
     import time
@@ -458,6 +510,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_status = sub.add_parser("status", help="Show version, config, and agents")
     p_status.add_argument("--json", action="store_true", help="JSON output")
 
+    # task
+    p_task = sub.add_parser("task", help="Start Claude Code with Dhee cognition")
+    p_task.add_argument("description", nargs="?", default="", help="Task description")
+    p_task.add_argument("--user-id", default="default", help="User ID")
+    p_task.add_argument("--print", dest="print_mode", action="store_true", help="One-shot mode")
+
+    # install (hooks)
+    p_install = sub.add_parser("install", help="Install Dhee hooks into Claude Code")
+    p_install.add_argument("--force", action="store_true", help="Overwrite existing hooks")
+
+    # uninstall-hooks
+    sub.add_parser("uninstall-hooks", help="Remove Dhee hooks from Claude Code")
+
     # benchmark
     sub.add_parser("benchmark", help="Run performance benchmarks")
 
@@ -481,6 +546,9 @@ COMMAND_MAP = {
     "export": cmd_export,
     "import": cmd_import,
     "status": cmd_status,
+    "task": cmd_task,
+    "install": cmd_install_hooks,
+    "uninstall-hooks": cmd_uninstall_hooks,
     "benchmark": cmd_benchmark,
     "uninstall": cmd_uninstall,
 }

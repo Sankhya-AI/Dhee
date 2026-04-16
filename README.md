@@ -78,12 +78,42 @@ d.context("fixing auth bug")
 d.checkpoint("Fixed it", what_worked="git blame first")
 ```
 
+### Claude Code — Native Hooks (v3.3.0)
+
+One command. Every Claude Code session becomes self-evolving.
+
+```bash
+dhee install
+```
+
+That's it. Dhee hooks into Claude Code's lifecycle — no CLAUDE.md bloat, no SKILL.md files, no markdown accumulation. Structured XML context injection, budgeted to ~630 tokens regardless of how much memory you have.
+
+**What happens automatically:**
+
+| Hook | When | What Dhee does |
+|:-----|:-----|:---------------|
+| `SessionStart` | Session opens | Injects last session, insights, performance trends, relevant memories |
+| `UserPromptSubmit` | Every prompt | Surfaces memories relevant to what you just asked |
+| `PostToolUse` | After Edit/Write/Bash | Captures what Claude did (secrets auto-stripped) |
+| `PreCompact` | Before context compaction | Checkpoints state so nothing is lost |
+| `Stop` | Session ends | Records outcomes — what worked, what failed, learnings |
+
+Or start Claude Code directly with context:
+
+```bash
+dhee task "fix the flaky auth test"
+```
+
+**Why not CLAUDE.md?** Markdown files are static. After 6 months of accumulated knowledge, they rot — stale patterns sit at equal weight to current ones, no retrieval ranking, no forgetting. Dhee uses vector memory with strength-based decay. Relevant memories surface. Irrelevant ones fade. The context budget stays constant at ~630 tokens whether you have 50 memories or 50,000.
+
 ### CLI
 
 ```bash
 dhee remember "User prefers Python"
 dhee recall "programming language"
 dhee checkpoint "Fixed auth bug" --what-worked "checked logs"
+dhee install          # install Claude Code hooks
+dhee uninstall-hooks  # remove them
 ```
 
 ### Docker
@@ -219,8 +249,18 @@ These are surfaced through `context()` and `checkpoint()` automatically when ena
 ## Architecture
 
 ```
-Agent (Claude, GPT, Cursor, custom)
+Claude Code (or any agent)
   │
+  ├── SessionStart hook ──→ dhee.context() ──→ XML renderer ──→ system prompt injection
+  ├── UserPromptSubmit ───→ dhee.recall()  ──→ ranked memories ──→ per-turn context
+  ├── PostToolUse ────────→ dhee.remember() ─→ privacy filter ──→ stored (0 LLM)
+  ├── PreCompact ─────────→ dhee.checkpoint() + re-inject context
+  └── Stop ───────────────→ dhee.checkpoint(what_worked, what_failed, outcome_score)
+```
+
+The 4-operation API under the hooks:
+
+```
   ├── remember(content)     → Engram: embed + store (0 LLM)
   ├── recall(query)         → Engram: embed + vector search (0 LLM)
   ├── context(task)         → Buddhi: performance + insights + intentions + memories
