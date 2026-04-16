@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [3.4.0] - 2026-04-16 — Caveman Injection + One-Line Install
+
+### Renderer compression (Caveman-inspired)
+
+Every token that isn't technical substance is now gone. The old injection wrapped content in a header sentence, `<dhee-context>` tag, `<docs>`/`<insights>`/`<memories>` wrappers, 2-space indentation, and verbose attributes like `src="CLAUDE.md" path="Repository Guidelines › Coding Style & Naming Conventions"`. All of it was scaffolding the LLM didn't need.
+
+- **Killed the header sentence.** ~25 tokens per injection, zero value.
+- **Killed wrapper tags.** Items are flat children of `<dhee>`, not nested inside `<docs>`/`<memories>`/etc.
+- **Killed indentation.** No leading spaces on any line.
+- **Short tag names.** `<rule>` → `<r>`, `<row>` → `<perf>`, `<i>` for insights.
+- **Dropped redundant metadata.** Doc chunks no longer ship `src="..."` or `path="breadcrumb"` — the content is authoritative on its own.
+- **Session block collapsed.** One-line pipe-separated format instead of nested `<decisions>`/`<files>`/`<todos>` tags.
+
+Net: ~40% fewer structural tokens per injection, same information content. Same XML parseability (still valid XML).
+
+### One-line install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Sankhya-AI/Dhee/main/install.sh | sh
+```
+
+Creates `~/.dhee` with a hidden venv, installs the package, configures Claude Code hooks automatically. No `python -m venv`, no `pip install`, no editing `~/.claude/settings.json`. Re-running updates. `pip install dhee` and `git clone` remain available for users who prefer to manage their own environment.
+
+---
+
 ## [3.3.1] - 2026-04-16 — Honest Injection
 
 Dogfooding v3.3.0 revealed the Claude Code hook was a net-negative feature:

@@ -43,13 +43,34 @@ Your files stay exactly where they are. You maintain them the same way. Dhee jus
 
 ## Quick Start
 
+**One command. No venv. No config. No pasting into settings.json.**
+
 ```bash
-pip install dhee
-dhee install    # hooks into Claude Code lifecycle
-dhee ingest     # chunks your CLAUDE.md, AGENTS.md into vector memory
+curl -fsSL https://raw.githubusercontent.com/Sankhya-AI/Dhee/main/install.sh | sh
 ```
 
-Done. Every Claude Code session now gets selective context injection.
+That's it. The installer creates `~/.dhee` with a hidden venv, installs the `dhee` package, and wires Claude Code hooks automatically. Next time you open Claude Code in any project, cognition is on.
+
+<details>
+<summary>Other install options</summary>
+
+**Via pip (if you manage your own venv):**
+```bash
+pip install dhee
+dhee install       # configure Claude Code hooks
+```
+
+**From source (contributors):**
+```bash
+git clone https://github.com/Sankhya-AI/Dhee.git
+cd Dhee
+./scripts/bootstrap_dev_env.sh
+source .venv-dhee/bin/activate
+dhee install
+```
+</details>
+
+After install, Dhee auto-ingests project docs (CLAUDE.md, AGENTS.md, etc.) on the first session. Run `dhee ingest` manually any time to re-chunk.
 
 ---
 
@@ -93,10 +114,10 @@ Dhee manages information through a complete lifecycle — not just storage and r
                        ▼                     ▼
               ┌─────────────────────────────────────┐
               │  Token-budgeted XML injection        │
-              │  <docs><rule src="CLAUDE.md"         │
-              │    path="Testing" s="0.83">          │
-              │    Always run pytest before...       │
-              │  </rule></docs>                      │
+              │  <dhee>                              │
+              │    <r s="0.83">Always run pytest...│
+              │    </r>                              │
+              │  </dhee>                             │
               └─────────────────────────────────────┘
                                    │
                             LLM sees only
@@ -286,7 +307,7 @@ Zero LLM calls on hot path. Pure pattern matching + statistics.
 - **Chunker** — heading-scoped splits that respect code fences, paragraph boundaries, size limits
 - **Ingest** — SHA-tracked. Re-ingesting unchanged files is a no-op. Changed files get atomic chunk replacement.
 - **Assembler** — vector similarity search filtered by `kind=doc_chunk`, score threshold, token budget
-- **Renderer** — structured XML: `<docs><rule src="CLAUDE.md" path="Testing" s="0.83">...</rule></docs>`
+- **Renderer** — Caveman-compressed XML: `<dhee><r s="0.83">...</r></dhee>`. No header, no wrapper tags, no indentation — every byte earns its place. ~40% fewer structural tokens vs v3.3.
 
 ---
 
