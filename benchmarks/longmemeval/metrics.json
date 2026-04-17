@@ -1,0 +1,21 @@
+{
+  "run": "longmemeval_v3.4.0_nvidia_retrieval_0_500",
+  "date": "2026-04-16",
+  "dhee_version": "3.4.0",
+  "embedder": "nvidia/llama-nemotron-embed-vl-1b-v2",
+  "reranker": "nvidia/llama-3.2-nv-rerankqa-1b-v2",
+  "questions": 500,
+  "retrieval_only": true,
+  "metrics": {
+    "recall_all@1": 0.332,
+    "recall_all@10": 0.98,
+    "recall_all@3": 0.852,
+    "recall_all@5": 0.934,
+    "recall_any@1": 0.948,
+    "recall_any@10": 0.998,
+    "recall_any@3": 0.99,
+    "recall_any@5": 0.994,
+    "n": 500,
+    "miss_at_1_count": 26
+  }
+}

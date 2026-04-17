@@ -12,6 +12,11 @@
 <p align="center">
   <a href="https://pypi.org/project/dhee"><img src="https://img.shields.io/badge/python-3.9%2B-blue.svg" alt="Python 3.9+"></a>
   <a href="https://github.com/Sankhya-AI/Dhee/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
+  <a href="benchmarks/longmemeval/"><img src="https://img.shields.io/badge/LongMemEval-%231%20recall%20%E2%80%94%20R%401%2094.8%25-brightgreen.svg" alt="#1 on LongMemEval recall"></a>
+</p>
+
+<p align="center">
+  <b>#1 on LongMemEval recall</b> — R@1 <b>94.8%</b> / R@5 <b>99.4%</b> on full 500 questions. Beats MemPalace (96.6% R@5) and agentmemory (95.2% R@5). <a href="#benchmarks">Proof →</a>
 </p>
 
 ---
@@ -308,6 +313,34 @@ Zero LLM calls on hot path. Pure pattern matching + statistics.
 - **Ingest** — SHA-tracked. Re-ingesting unchanged files is a no-op. Changed files get atomic chunk replacement.
 - **Assembler** — vector similarity search filtered by `kind=doc_chunk`, score threshold, token budget
 - **Renderer** — Caveman-compressed XML: `<dhee><r s="0.83">...</r></dhee>`. No header, no wrapper tags, no indentation — every byte earns its place. ~40% fewer structural tokens vs v3.3.
+
+---
+
+<a id="benchmarks"></a>
+## Benchmarks
+
+> **#1 on LongMemEval recall.** R@1 94.8%, R@5 99.4%, R@10 99.8% — full 500 questions, no held-out split, no cherry-picking.
+
+**LongMemEval-S — retrieval recall (500 questions, `--retrieval-only`):**
+
+| System | R@1 | R@3 | R@5 | R@10 |
+|:-------|:----|:----|:----|:-----|
+| **Dhee v3.4.0** | **94.8%** | **99.0%** | **99.4%** | **99.8%** |
+| [MemPalace](https://github.com/MemPalace/mempalace#benchmarks) (raw) | — | — | 96.6% | — |
+| [MemPalace](https://github.com/MemPalace/mempalace#benchmarks) (hybrid v4, held-out 450q) | — | — | 98.4% | — |
+| [agentmemory](https://github.com/rohitg00/agentmemory#benchmarks) | — | — | 95.2% | 98.6% |
+
+Stack: NVIDIA `llama-nemotron-embed-vl-1b-v2` embedder + `llama-3.2-nv-rerankqa-1b-v2` reranker, top-k 10. Full 500 questions, no held-out split.
+
+**Proof is in-tree, not screenshots.** The exact command, metrics, and
+per-question retrieval output are committed:
+
+- [`benchmarks/longmemeval/command.sh`](benchmarks/longmemeval/command.sh) — exact run command
+- [`benchmarks/longmemeval/metrics.json`](benchmarks/longmemeval/metrics.json) — both `any@k` and stricter `all@k`
+- [`benchmarks/longmemeval/retrieval.jsonl`](benchmarks/longmemeval/retrieval.jsonl) — 500 records: top-10 IDs, gold IDs, gold rank
+- [`benchmarks/longmemeval/README.md`](benchmarks/longmemeval/README.md) — reproduction steps
+
+Recompute R@k yourself from the committed `retrieval.jsonl` — any mismatch is a bug you can open.
 
 ---
 
