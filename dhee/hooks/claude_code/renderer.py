@@ -8,10 +8,17 @@ Empty input → empty string (no tags).
 Token philosophy (Caveman-inspired): drop structural fluff, keep
 technical substance exact. No indentation, short tags, no wrapper
 nesting, no redundant metadata. Every byte earns its place.
+
+Phase 5 (2026-04-17): root is ``<dhee v="1">`` with typed
+sections. Doc chunks carry ``src``/``head``/``s`` so the model knows
+the origin, not just a weighted fragment. ``<edits>`` is a first-class
+section, fed in from the edit ledger. Schema stays terse — JSON-heavy
+envelopes were rejected as more expensive than the caveman tags.
 """
 
 from __future__ import annotations
 
+import os
 from typing import Any
 from xml.sax.saxutils import escape as _xml_escape
 
@@ -28,12 +35,15 @@ def render_context(
     max_insights: int = 5,
     max_intentions: int = 3,
     doc_matches: list | None = None,
+    edits_block: str | None = None,
 ) -> str:
     """Render Dhee context dict as flat XML for Claude Code injection.
 
     Returns empty string when nothing to inject.
     """
     sections: list[tuple[int, list[str]]] = [
+        (120, _router_block()),
+        (115, _edits_section(edits_block)),
         (110, _docs_block(doc_matches)),
         (100, _session_block(ctx.get("last_session"))),
         (90, _performance_block(ctx.get("performance", []))),
@@ -55,6 +65,7 @@ def render_context(
     attrs = ""
     if task_description:
         attrs = f' task="{_esc_attr(task_description[:120])}"'
+    attrs += ' v="1"'
 
     open_tag = f"<dhee{attrs}>"
     close_tag = "</dhee>"
@@ -88,20 +99,48 @@ def estimate_tokens(text: str) -> int:
 # ---------------------------------------------------------------------------
 
 
+_ROUTER_NUDGE = (
+    "router=on. Prefer mcp__dhee__dhee_read over Read for files >200 lines "
+    "(pass offset/limit for ranges). Prefer mcp__dhee__dhee_bash over Bash "
+    "for commands likely >2KB output (git log/diff, pytest, find, grep, "
+    "ls -R). After a subagent/large tool return, pass the text through "
+    "mcp__dhee__dhee_agent to keep raw out of context. Call "
+    "mcp__dhee__dhee_expand_result(ptr) only when a digest is genuinely "
+    "insufficient — raw re-enters context."
+)
+
+
+def _router_block() -> list[str]:
+    """One-time router nudge. Only rendered when DHEE_ROUTER=1."""
+    if os.environ.get("DHEE_ROUTER") != "1":
+        return []
+    return [f"<router>{_xml_escape(_ROUTER_NUDGE)}</router>"]
+
+
 def _docs_block(doc_matches: list | None) -> list[str]:
     if not doc_matches:
         return []
     items: list[str] = []
     for m in doc_matches:
-        path = getattr(m, "heading_breadcrumb", "") or ""
+        head = getattr(m, "heading_breadcrumb", "") or ""
+        src = getattr(m, "source_name", "") or ""
         score = getattr(m, "score", 0.0)
         text = getattr(m, "text", "")
         if not text:
             continue
-        if path and text.startswith(path):
-            text = text[len(path):].lstrip("\n")
-        items.append(_tag("r", _score_attr(score), text))
+        if head and text.startswith(head):
+            text = text[len(head):].lstrip("\n")
+        attrs = _attrs(src=src, head=head)
+        score_attr = _score_attr(score)
+        a = f"{attrs} {score_attr}" if attrs else score_attr
+        items.append(_tag("doc", a, text))
     return items
+
+
+def _edits_section(edits_block: str | None) -> list[str]:
+    if not edits_block:
+        return []
+    return [edits_block]
 
 
 def _session_block(session: dict[str, Any] | None) -> list[str]:

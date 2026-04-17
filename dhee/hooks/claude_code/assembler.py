@@ -5,14 +5,19 @@ entire CLAUDE.md + AGENTS.md + skills into every prompt, Dhee selects
 only the chunks relevant to THIS specific prompt and assembles them into
 a token-budgeted injection.
 
-The economics:
-    CLAUDE.md is ~2000 tokens. Over a 20-turn conversation, that's 40K
-    input tokens of mostly-irrelevant context. If Dhee injects ~200 tokens
-    of relevant chunks per turn, that's 4K tokens — 10x savings on the
-    costliest model (Opus).
+The economics (revised 2026-04-17):
+    Phase 0 audit (`dhee/benchmarks/phase0_context_audit.py`) parsed real
+    Anthropic `usage` fields across 14 sessions / 4,680 assistant turns.
+    CLAUDE.md first-turn cost bundled with system prompt + skill catalog
+    + tool schemas is ~5–8K tokens — a rounding error, not the fat. The
+    actual fat is **tool-result accumulation** (~57% of growing content)
+    and tool-use inputs (~31%). Top 10% of turns account for 75% of new
+    input.
 
-    Even with a Dhee-side embedding call for retrieval (~$0.0001), the
-    savings on Opus input ($0.015/1K tokens) yield >100x ROI.
+    This assembler therefore does relevance-filtering on *docs* (a small
+    marginal win), not the primary win. The primary router lever is
+    `dhee.router` — digest-at-source MCP wrappers (`dhee_read`, etc.)
+    that keep raw tool output out of the context entirely.
 
 The assembler is a pure selection pipeline:
     query → vector search → filter(kind, score) → budget → render
@@ -110,7 +115,7 @@ def assemble(
                 user_id=os.environ.get("DHEE_USER_ID", "default"),
             )
             if isinstance(ctx, dict):
-                typed = ctx
+                typed = _strip_internal_warnings(ctx)
         except Exception:
             pass
 
@@ -119,6 +124,32 @@ def assemble(
         typed_cognition=typed,
         doc_tokens_used=doc_tokens,
     )
+
+
+# Degradation messages come from internal error paths (e.g. embedder 401s,
+# store read failures). They're meant for logs and telemetry, not for the
+# LLM — surfacing them wastes tokens and can leak error-string content
+# (headers, stack traces, model names). Stripped here so the renderer
+# never sees them.
+_INTERNAL_WARNING_PREFIXES = (
+    "Context assembly degraded:",
+    "Cognitive state degraded:",
+)
+
+
+def _strip_internal_warnings(ctx: dict[str, Any]) -> dict[str, Any]:
+    warnings = ctx.get("warnings")
+    if not isinstance(warnings, list):
+        return ctx
+    visible = [
+        w for w in warnings
+        if isinstance(w, str) and not w.startswith(_INTERNAL_WARNING_PREFIXES)
+    ]
+    if len(visible) == len(warnings):
+        return ctx
+    scrubbed = dict(ctx)
+    scrubbed["warnings"] = visible
+    return scrubbed
 
 
 def assemble_docs_only(

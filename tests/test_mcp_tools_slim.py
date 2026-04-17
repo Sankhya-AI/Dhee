@@ -29,6 +29,11 @@ EXPECTED_TOOL_NAMES = {
     "record_outcome",
     "reflect",
     "store_intention",
+    # Router tools (digest-at-source wrappers)
+    "dhee_read",
+    "dhee_bash",
+    "dhee_agent",
+    "dhee_expand_result",
 }
 
 

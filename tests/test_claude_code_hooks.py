@@ -119,7 +119,8 @@ class TestRenderer:
 
     def test_rich_context_produces_all_sections(self):
         xml = render_context(_rich_ctx())
-        assert xml.startswith("<dhee>")
+        assert xml.startswith("<dhee")  # Phase 5: <dhee v="1">
+        assert 'v="1"' in xml
         # Flat format — no wrapper tags, check item tags directly
         for tag in ["session", "perf", "i", "intent", "m", "b", "p", "w"]:
             assert f"<{tag}" in xml, f"Missing tag: {tag}"
@@ -446,8 +447,14 @@ class TestInstaller:
             settings = json.loads(fake.read_text())
             assert "permissions" in settings
             ptu = settings["hooks"]["PreToolUse"]
-            assert len(ptu) == 1
-            assert ptu[0]["hooks"][0]["command"] == "other-tool"
+            # Phase 6: Dhee now installs its own PreToolUse entry alongside.
+            assert len(ptu) == 2
+            assert any(
+                "other-tool" in e["hooks"][0]["command"] for e in ptu
+            )
+            assert any(
+                "dhee.hooks.claude_code" in e["hooks"][0]["command"] for e in ptu
+            )
 
     def test_post_tool_use_has_matcher(self, tmp_path):
         fake = self._fake_settings(tmp_path)
@@ -920,7 +927,7 @@ class TestRendererDocs:
             DocMatch("Use RS256 for JWT", "CLAUDE.md", "Auth", 0.78, 1),
         ]
         xml = render_context({}, doc_matches=matches)
-        assert "<r " in xml
+        assert "<doc " in xml  # Phase 5 typed tag
         assert "Always run tests" in xml
         assert "Use RS256 for JWT" in xml
 
@@ -932,7 +939,7 @@ class TestRendererDocs:
             "memories": [{"memory": "m " * 200, "score": 0.5}],
         }
         xml = render_context(ctx, max_tokens=120, doc_matches=matches)
-        assert "<r " in xml
+        assert "<doc " in xml  # Phase 5 typed tag
         assert "Critical rule" in xml
 
     def test_no_docs_no_section(self):
@@ -1089,3 +1096,59 @@ class TestPurgeLegacyNoise:
         assert r.removed == 0
         assert r.db_path is None
         assert r.skipped_reason is None
+
+
+# ---------------------------------------------------------------------------
+# Regression: internal degradation warnings must not leak to the LLM
+# ---------------------------------------------------------------------------
+
+
+class TestAssemblerScrubsInternalWarnings:
+    def test_context_assembly_degraded_stripped(self):
+        from dhee.hooks.claude_code.assembler import _strip_internal_warnings
+
+        ctx = {
+            "warnings": [
+                "Context assembly degraded: memory.search: RuntimeError: 401",
+                "Performance on 'bug_fix' declining",  # proactive, keep
+                "Cognitive state degraded: beliefs.get_contradictions: boom",
+            ],
+            "memories": [],
+        }
+        scrubbed = _strip_internal_warnings(ctx)
+        assert scrubbed["warnings"] == ["Performance on 'bug_fix' declining"]
+
+    def test_no_warnings_key_is_noop(self):
+        from dhee.hooks.claude_code.assembler import _strip_internal_warnings
+
+        ctx = {"memories": [{"memory": "x"}]}
+        assert _strip_internal_warnings(ctx) is ctx
+
+    def test_all_internal_returns_empty_warnings(self):
+        from dhee.hooks.claude_code.assembler import _strip_internal_warnings
+
+        ctx = {
+            "warnings": [
+                "Context assembly degraded: X",
+                "Cognitive state degraded: Y",
+            ],
+        }
+        scrubbed = _strip_internal_warnings(ctx)
+        assert scrubbed["warnings"] == []
+
+    def test_renderer_sees_no_internal_warnings(self):
+        """End-to-end: assembler output into renderer → no <w> tag with
+        'degraded:' prefix reaches the rendered XML."""
+        from dhee.hooks.claude_code.assembler import _strip_internal_warnings
+        from dhee.hooks.claude_code.renderer import render_context
+
+        ctx = _strip_internal_warnings({
+            "warnings": [
+                "Context assembly degraded: leaked api key: sk-abc123",
+                "real proactive warning",
+            ],
+        })
+        xml = render_context(ctx)
+        assert "sk-abc123" not in xml
+        assert "degraded:" not in xml
+        assert "real proactive warning" in xml
