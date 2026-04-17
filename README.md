@@ -1,71 +1,76 @@
 <p align="center">
-  <img src="docs/dhee-logo.png" alt="Dhee" width="80"> <h1 align="center">Dhee</h1>
+  <img src="docs/dhee-logo.png" alt="Dhee" width="80">
 </p>
 
-<h3 align="center">Stop burning tokens on context your agent doesn't need this turn.</h3>
+<h1 align="center">Dhee</h1>
+
+<h3 align="center">Self-evolving memory for every AI agent.</h3>
 
 <p align="center">
-  Keep your CLAUDE.md, your skills, your AGENTS.md — exactly as they are.<br>
-  Dhee selects what's relevant per prompt and injects only that.
-</p>
-
-<p align="center">
-  <a href="https://pypi.org/project/dhee"><img src="https://img.shields.io/badge/python-3.9%2B-blue.svg" alt="Python 3.9+"></a>
-  <a href="https://github.com/Sankhya-AI/Dhee/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
-  <a href="benchmarks/longmemeval/"><img src="https://img.shields.io/badge/LongMemEval-%231%20recall%20%E2%80%94%20R%401%2094.8%25-brightgreen.svg" alt="#1 on LongMemEval recall"></a>
+  Fat skills, thin tokens. Perfect recall, even years in.<br>
+  Future-proof your CLAUDE.md, your AGENTS.md, your GBrain, your skills library.
 </p>
 
 <p align="center">
-  <b>#1 on LongMemEval recall</b> — R@1 <b>94.8%</b> / R@5 <b>99.4%</b> on full 500 questions. Beats MemPalace (96.6% R@5) and agentmemory (95.2% R@5). <a href="#benchmarks">Proof →</a>
+  <a href="https://pypi.org/project/dhee"><img src="https://img.shields.io/badge/python-3.9%2B-blue.svg?style=flat-square" alt="Python 3.9+"></a>
+  <a href="https://github.com/Sankhya-AI/Dhee/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square" alt="MIT License"></a>
+  <a href="benchmarks/longmemeval/"><img src="https://img.shields.io/badge/LongMemEval-%231%20recall%20%E2%80%94%20R%401%2094.8%25-brightgreen.svg?style=flat-square" alt="#1 on LongMemEval recall"></a>
+  <a href="https://pypi.org/project/dhee"><img src="https://img.shields.io/pypi/v/dhee?style=flat-square&color=orange" alt="PyPI"></a>
+</p>
+
+<p align="center">
+  <b>#1 on LongMemEval retrieval</b> — R@1 <b>94.8%</b> / R@5 <b>99.4%</b> / R@10 <b>99.8%</b> on 500 questions, no held-out split. <a href="#benchmarks">Beats MemPalace and agentmemory →</a>
+</p>
+
+<p align="center">
+  <a href="#what-dhee-is">What is Dhee</a> &middot;
+  <a href="#quick-start">Quick Start</a> &middot;
+  <a href="#benchmarks">Benchmarks</a> &middot;
+  <a href="#vs-alternatives">vs Alternatives</a> &middot;
+  <a href="#how-it-works">How It Works</a> &middot;
+  <a href="#integrations">Integrations</a>
 </p>
 
 ---
 
-## The Problem
+## What Dhee is
 
-Every AI coding agent today dumps your entire CLAUDE.md into every LLM call. 200 lines of project rules, coding conventions, testing guidelines — loaded into the prompt whether you're running tests or writing a docstring. Every turn. Full price.
+Dhee is a **self-evolving memory and cognition layer** that sits between your AI agent and the LLM. It does three things, well:
 
-Over a 20-turn session on Opus, that's **40,000+ tokens of mostly-irrelevant context**. You're paying for the model to read your git commit conventions while it's fixing an auth bug.
+1. **Reduces tokens.** The agent only sees the slice of context it needs this turn. Your 2,000-line CLAUDE.md becomes ~300 tokens. A 10 MB tool-result becomes a 40-token digest with a pointer. Over a session, that's a 90%+ token reduction with zero information loss.
 
-And it gets worse over time. After 6 months, your CLAUDE.md is 500 lines. Your skills directory has 12 files. Your AGENTS.md has grown. But the agent still loads all of it, every turn, at full token cost. The markdown files that were supposed to make your agent smarter are now your biggest line item.
+2. **Remembers everything — forever.** Doc chunks, session outcomes, failures, decisions, user preferences. Ebbinghaus decay pushes unused knowledge out of the hot path. Frequently-referenced memories are promoted. After five years you have 50,000 memories and the per-turn injection is still ~300 tokens.
 
-## How Dhee Fixes It
+3. **Self-evolves.** Dhee watches which memories the model actually expands, which digests are deep enough, which rules it ignores. It tunes its own retrieval depth per tool, per intent, per file type. No config file to hand-maintain. The longer you use it, the better it gets.
 
-```
-Before Dhee:  CLAUDE.md (2000 tokens) → loaded every turn → 40K tokens/session
-With Dhee:    CLAUDE.md → chunked + vectorized → ~300 tokens of relevant rules per turn
-```
+### Who it's for
 
-Dhee sits between your documentation and the LLM. It chunks your markdown files into heading-scoped pieces, embeds them once, and on each prompt selects only the chunks that match what the user is actually asking about.
-
-**"How do I run the tests?"** → Dhee injects your Testing Guidelines section (292 tokens), not your entire CLAUDE.md (2000 tokens). **67% reduction, zero information loss.**
-
-**"Explain dark matter to me"** → Dhee injects nothing. No project docs are relevant. **100% reduction.**
-
-Your files stay exactly where they are. You maintain them the same way. Dhee just makes the delivery intelligent.
+- **Every Claude Code / Cursor / Codex / Gemini CLI / Aider / Cline user** who has ever hit a context limit or a $200 token bill.
+- **Anyone maintaining a fat agent** — a 5,000-line CLAUDE.md, a Skills library, a GBrain-style agent framework, a library of prompts. Dhee future-proofs it. Keep writing. Dhee handles the delivery.
+- **Teams building AI products** who want one memory layer that works across every model, every host, every language. SQLite + MCP. No infra to run.
 
 ---
 
 ## Quick Start
 
-**One command. No venv. No config. No pasting into settings.json.**
+**One command. No venv. No config. No pasting into `settings.json`.**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Sankhya-AI/Dhee/main/install.sh | sh
 ```
 
-That's it. The installer creates `~/.dhee` with a hidden venv, installs the `dhee` package, and wires Claude Code hooks automatically. Next time you open Claude Code in any project, cognition is on.
+The installer creates `~/.dhee`, installs the `dhee` package, and auto-wires Claude Code hooks. Next time you open Claude Code in any project, cognition is on.
 
 <details>
-<summary>Other install options</summary>
+<summary><b>Other install options</b></summary>
 
-**Via pip (if you manage your own venv):**
+**Via pip:**
 ```bash
 pip install dhee
 dhee install       # configure Claude Code hooks
 ```
 
-**From source (contributors):**
+**From source:**
 ```bash
 git clone https://github.com/Sankhya-AI/Dhee.git
 cd Dhee
@@ -73,160 +78,217 @@ cd Dhee
 source .venv-dhee/bin/activate
 dhee install
 ```
+
+**Via Docker:**
+```bash
+docker compose up -d   # uses OPENAI_API_KEY from env
+```
 </details>
 
-After install, Dhee auto-ingests project docs (CLAUDE.md, AGENTS.md, etc.) on the first session. Run `dhee ingest` manually any time to re-chunk.
+After install, Dhee auto-ingests project docs (CLAUDE.md, AGENTS.md, SKILL.md, etc.) on the first session. Run `dhee ingest` manually any time to re-chunk.
 
 ---
 
-## The Lifecycle
+## Benchmarks
 
-Dhee manages information through a complete lifecycle — not just storage and retrieval, but learning, decay, and promotion.
+> **#1 on LongMemEval recall.** R@1 94.8%, R@5 99.4%, R@10 99.8% — full 500 questions, no held-out split, no cherry-picking.
+
+| System | R@1 | R@3 | R@5 | R@10 |
+|:-------|:----|:----|:----|:-----|
+| **Dhee v3.4.0** | **94.8%** | **99.0%** | **99.4%** | **99.8%** |
+| [MemPalace](https://github.com/MemPalace/mempalace#benchmarks) (raw) | — | — | 96.6% | — |
+| [MemPalace](https://github.com/MemPalace/mempalace#benchmarks) (hybrid v4, held-out 450q) | — | — | 98.4% | — |
+| [agentmemory](https://github.com/rohitg00/agentmemory#benchmarks) | — | — | 95.2% | 98.6% |
+
+Stack: NVIDIA `llama-nemotron-embed-vl-1b-v2` embedder + `llama-3.2-nv-rerankqa-1b-v2` reranker, top-k 10.
+
+**Proof is in-tree, not screenshots.** Exact command, metrics, and per-question output are committed under [`benchmarks/longmemeval/`](benchmarks/longmemeval/). Recompute R@k yourself — any mismatch is a bug you can open.
+
+---
+
+## What Dhee does on every turn
 
 ```
-                        ┌─────────────────────────┐
-                        │   Your Documentation     │
-                        │   CLAUDE.md, AGENTS.md   │
-                        │   SKILL.md, etc.         │
-                        └──────────┬──────────────┘
-                                   │
-                            dhee ingest
-                          (chunk + embed)
-                                   │
-                                   ▼
-┌──────────────────────────────────────────────────────────────┐
-│                     Dhee Vector Store                         │
-│                                                              │
-│  Doc Chunks (high strength, heading-scoped)                  │
-│  Short-term memories (facts, file edits, failures)           │
-│  Long-term memories (promoted by access + strength)          │
-│  Typed cognition (insights, beliefs, policies, intentions)   │
-└──────────────────────────────────────────────────────────────┘
-                                   │
-                        ┌──────────┴──────────┐
-                        │                     │
-                   Session Start         Each Prompt
-                   (full assembly)     (doc chunks only)
-                        │                     │
-                        ▼                     ▼
-              ┌─────────────────┐   ┌─────────────────┐
-              │ Relevant docs   │   │ Matching rules   │
-              │ + insights      │   │ above threshold  │
-              │ + performance   │   │ or nothing       │
-              │ + warnings      │   │                  │
-              └────────┬────────┘   └────────┬────────┘
-                       │                     │
-                       ▼                     ▼
-              ┌─────────────────────────────────────┐
-              │  Token-budgeted XML injection        │
-              │  <dhee>                              │
-              │    <r s="0.83">Always run pytest...│
-              │    </r>                              │
-              │  </dhee>                             │
-              └─────────────────────────────────────┘
-                                   │
-                            LLM sees only
-                         what it needs this turn
+                      ┌──────────────────────────┐
+                      │   Your fat context        │
+                      │   CLAUDE.md, AGENTS.md,   │
+                      │   SKILL.md, GBrain, docs  │
+                      │   session history, tools  │
+                      └──────────┬───────────────┘
+                                 │
+                         Dhee ingests once
+                      (chunk + embed + index)
+                                 │
+                                 ▼
+  ┌───────────────────────────────────────────────────────────────┐
+  │                   Dhee memory + cognition                      │
+  │                                                                │
+  │  Doc chunks · Short-term · Long-term · Insights · Beliefs     │
+  │  Policies · Intentions · Performance · Episodes · Edits       │
+  └────────────────────────────┬──────────────────────────────────┘
+                                │
+           ┌────────────────────┴────────────────────┐
+           │                                          │
+     Session start                              Each user prompt
+     (full assembly)                            (doc chunks only)
+           │                                          │
+           ▼                                          ▼
+   ┌───────────────┐                         ┌───────────────┐
+   │ Relevant docs  │                         │ Matching rules │
+   │ + insights     │                         │ above threshold│
+   │ + performance  │                         │ or nothing     │
+   │ + warnings     │                         │                │
+   └───────┬───────┘                         └───────┬───────┘
+           │                                          │
+           └────────────────────┬────────────────────┘
+                                │
+                                ▼
+                ┌──────────────────────────────┐
+                │  Token-budgeted XML            │
+                │  <dhee v="1">                  │
+                │    <doc src="CLAUDE.md"...>   │
+                │    <i>What worked last time</i>│
+                │  </dhee>                       │
+                └──────────────────────────────┘
+                                │
+                     LLM sees only what it
+                     needs, when it needs it.
 ```
 
-### During the session
+And on the tool-use side, the **router** digests raw output at source — a 10 MB `git log` becomes a 40-token summary + a pointer. The model expands the pointer only when the digest isn't enough.
 
-| Event | What Dhee does | Token cost |
-|:------|:---------------|:-----------|
-| **Session opens** | Auto-ingests stale docs, assembles relevant doc chunks + typed cognition | ~300-900 tokens (vs 2000+ for raw files) |
-| **Each user prompt** | Searches doc chunks for THIS specific question. Injects matching rules above threshold. | 0-300 tokens (0 when nothing matches) |
-| **Tool use (Edit/Write)** | Records which files were touched (for session context) | 0 tokens (storage only) |
-| **Tool failure (Bash)** | Stores the failure + error message as a learnable signal | 0 tokens (storage only) |
-| **Session ends** | Checkpoints outcomes, what worked/failed → becomes insights for next session | 0 tokens (storage only) |
+---
 
-### Between sessions
+## <span id="vs-alternatives">vs alternatives</span>
 
-| Phase | What happens |
-|:------|:-------------|
-| **Short-term memory** | Facts from the session sit in SML with natural decay |
-| **Promotion** | Frequently-accessed memories promote to long-term (LML) automatically |
+| | **Dhee** | CLAUDE.md | Mem0 | Letta | MemPalace | agentmemory |
+|:--|:-:|:-:|:-:|:-:|:-:|:-:|
+| **Token cost per turn** | **~300** | 2,000+ | varies | ~1K+ | varies | ~1,900 |
+| **LongMemEval R@5** | **99.4%** | N/A | N/A | N/A | 96.6% | 95.2% |
+| **Self-evolving retrieval policy** | **Yes** | No | No | No | No | No |
+| **Auto-digest tool output** | **Yes (router)** | No | No | No | No | No |
+| **Works across every MCP agent** | **Yes** | No | Partial | No | Yes | Yes |
+| **Typed cognition (insights/beliefs/policies)** | **Yes** | No | No | Partial | No | No |
+| **Proof in-tree (reproducible)** | **Yes** | — | — | — | Yes | Partial |
+| **External DB required** | No (SQLite) | No | Qdrant/pgvector | Postgres+vector | No | No |
+| **License** | MIT | — | Apache-2 | Apache-2 | MIT | MIT |
+
+Dhee is the only one that **reduces tokens *and* self-evolves its own retrieval policy *and* leads on recall.**
+
+---
+
+## Self-evolution — the part nobody else does
+
+Most memory layers are static: you write rules, they retrieve. Dhee watches what happens and tunes itself.
+
+- **Intent classification**: Every `Read`/`Bash`/`Agent` call is bucketed by intent (source code, test, config, doc, data, build). Each intent gets its own retrieval depth.
+- **Expansion tracking**: When the model calls `dhee_expand_result(ptr)`, Dhee logs which tool / intent / depth required expansion. A digest that's always expanded is too shallow. A digest that's never expanded might be too deep.
+- **Policy tuning**: `dhee router tune` reads the expansion ledger, applies thresholds (>30% expansion → deepen; <5% expansion → make shallower), and persists the new policy atomically to `~/.dhee/router_policy.json`.
+- **No config file to maintain.** The policy is the behavior. The behavior is learned.
+
+This means: **the longer a team uses Dhee, the better it gets at serving that specific team's workflow.** Frontend-heavy teams get deeper JS/TS digests. Data teams get richer CSV/JSONL summaries. You don't have to pick — Dhee picks for you, based on what you actually expand.
+
+---
+
+## Perfect recall, five years in
+
+Doc bloat is every AI team's silent tax. Your CLAUDE.md grew from 50 lines to 500 to 2,000 in 18 months. Your skills directory has 30 files. Your prompt library has a thousand entries. Every new agent session loads all of it, every turn, at full token cost.
+
+Dhee turns that library into searchable, decay-aware, self-promoting memory:
+
+| Phase | What Dhee does |
+|:------|:---------------|
+| **Ingest** | Heading-scoped chunking with SHA tracking. Re-ingest is a no-op if unchanged. |
+| **Hot path** | Vector search + heading-breadcrumb matching. Filters by threshold + token budget. |
+| **Promotion** | Frequently-referenced memories auto-promote from short-term to long-term. |
 | **Decay** | Unused memories fade on an Ebbinghaus curve. Your 50th memory costs the same as your 50,000th. |
-| **Insight synthesis** | `what_worked` / `what_failed` from checkpoints become transferable learnings |
-| **Intentions** | "Remember to run auth tests after login.py changes" fires when the trigger matches |
+| **Insight synthesis** | What-worked / what-failed from session checkpoints becomes transferable learnings. |
+| **Prospective** | `"Remember to run auth tests after login.py changes"` fires when the trigger matches — days, weeks, or months later. |
 
-### The result
-
-Your documentation stays fat and thorough — that's your team's knowledge base. But the LLM only sees the slice it needs, when it needs it. After a year, you have 50 files and 10,000 memories. The per-turn injection is still ~300 tokens.
+**Result:** after a year, you have 50 doc files, 10,000 memories, and 200 insights. The per-turn injection is still ~300 tokens of the *right* stuff. The 500-line CLAUDE.md your team grew into is an asset, not a liability.
 
 ---
 
-## Why Not Just CLAUDE.md?
+## Future-proof your fat skills
 
-Markdown files work great at first. 50 lines, manually curated, loaded fresh every session. But they don't scale:
+Got a GBrain? An AGENTS.md with 15 sections? A Skills library that your team reluctantly prunes every sprint because it "got too big for context"? Stop pruning. Dhee was built for this.
 
-| | Markdown files | Dhee |
-|:--|:--------------|:-----|
-| **Token cost** | Linear with file size. 500 lines = 5000 tokens every turn. | Constant ~300 tokens regardless of total knowledge. |
-| **Relevance** | Everything loaded, always. Git commit rules injected while fixing auth. | Only matching chunks. Off-topic turns cost 0 tokens. |
-| **Staleness** | Equal weight forever. A rule from 6 months ago sits next to today's. | Natural decay. Unused knowledge fades. Fresh knowledge surfaces. |
-| **Scale** | Hits context limits. You start deleting old rules to make room. | 50,000 memories, same injection cost as 50. |
-| **Learning** | Static. Agent makes the same mistakes next session. | Captures what worked/failed. Synthesizes transferable insights. |
-| **Cross-session** | Cold start every time unless you manually update the file. | Session handoff, performance trends, prospective memory. |
+```bash
+# Point Dhee at your skills directory
+dhee ingest ~/my-agent/skills/        # 50 files, 200K tokens
+dhee ingest ~/my-agent/CLAUDE.md      # 5K tokens
+dhee ingest ~/my-agent/AGENTS.md      # 3K tokens
+```
 
-**Dhee doesn't replace your markdown files. It makes them work at scale.** Keep writing CLAUDE.md the way you always have. Dhee handles the delivery.
+Dhee chunks them heading-by-heading, embeds them once, and on every turn only the *relevant* slice is injected. Your fat skills stay fat where they should be — in your repo, authored by humans, reviewable, version-controlled. They just stop paying rent in your model's context window.
 
 ---
 
-## The 4-Operation API
+## How It Works
+
+### The 4-operation API
 
 Every interface — hooks, MCP, Python, CLI — exposes the same 4 operations.
 
-### `remember(content)` — Store a fact
-0 LLM calls, 1 embedding (~$0.0002). Stored immediately. Echo enrichment (paraphrases, keywords for better recall) runs at checkpoint.
-
 ```python
+from dhee import Dhee
+
+d = Dhee()
 d.remember("User prefers FastAPI over Flask")
+d.recall("what framework does the project use?")
+d.context("fixing the auth bug")
+d.checkpoint("Fixed auth bug", what_worked="git blame first", outcome_score=1.0)
 ```
 
-### `recall(query)` — Search memory
-0 LLM calls, 1 embedding. Pure vector search with echo-boosted re-ranking.
+| Operation | LLM calls | Cost |
+|:----------|:----------|:-----|
+| `remember` | 0 | ~$0.0002 |
+| `recall` | 0 | ~$0.0002 |
+| `context` | 0 | ~$0.0002 |
+| `checkpoint` | 1 per ~10 memories | ~$0.001 |
+| **Typical 20-turn Opus session** | **1** | **~$0.004** |
 
-```python
-results = d.recall("what framework does the project use?")
-# [{"memory": "User prefers FastAPI over Flask", "score": 0.94}]
-```
+Dhee overhead: ~$0.004 per session. Token savings on a 20-turn Opus session: **~$0.50+**. That's a **>100× ROI**.
 
-### `context(task_description)` — Session bootstrap
-Returns everything the agent needs: last session state, performance trends, insights, intentions, warnings, and relevant memories.
+### The router — digest at source
 
-```python
-ctx = d.context("fixing the auth bug")
-# ctx["insights"] → [{"content": "What worked: git blame → found breaking commit"}]
-# ctx["warnings"] → ["Performance on 'bug_fix' declining"]
-```
+The part that saves the most tokens isn't doc injection. It's keeping raw tool output out of context in the first place.
 
-### `checkpoint(summary, ...)` — End-of-session cognition
-Where the learning happens. 1 LLM call per ~10 memories.
+Four MCP tools replace `Read`/`Bash`/`Agent` on heavy calls:
 
-```python
-d.checkpoint(
-    "Fixed auth bug",
-    what_worked="git blame showed the exact breaking commit",
-    what_failed="grep was too slow on the monorepo",
-    outcome_score=1.0,
-)
-```
+- `mcp__dhee__dhee_read(file_path, offset?, limit?)` — returns a digest (symbols, head, tail, kind, token estimate) + pointer. Raw content stored, not injected.
+- `mcp__dhee__dhee_bash(command)` — runs the command, digests output by class (git log, pytest, grep, listing, generic), returns summary + pointer.
+- `mcp__dhee__dhee_agent(text)` — digests any long subagent return: file refs, headings, bullets, error signals, head/tail.
+- `mcp__dhee__dhee_expand_result(ptr)` — only called when the digest genuinely isn't enough. Raw re-enters context on demand.
+
+A 10 MB `git log --oneline -50000` becomes a ~200-token digest. Nothing else gets into context. This is where the serious savings live.
+
+### The cognition engine
+
+Parallel intelligence layer — zero LLM calls on the hot path.
+
+- **Performance tracking** — outcomes per task type, trend detection, regression warnings.
+- **Insight synthesis** — causal hypotheses from what worked/failed, with confidence scores.
+- **Prospective memory** — future triggers with keyword matching.
+- **Belief store** — confidence-tracked facts with contradiction detection.
+- **Policy store** — condition→action rules mined from task completions.
+- **Edit ledger** — dedup of repeated Edit/Write so compaction keeps the *unique* changes, not 50 iterations.
 
 ---
 
-## Integration
+## Integrations
 
 ### Claude Code — Native Hooks
 
 ```bash
 pip install dhee
 dhee install    # installs lifecycle hooks
-dhee ingest     # chunks project docs into vector memory
+dhee ingest     # chunks project docs into memory
 ```
 
-That's it. Six hooks fire automatically at the right moments. No SKILL.md, no plugin directories. The agent doesn't even know Dhee is there — it just gets better context.
+Six hooks fire at the right moments. No SKILL.md, no plugin directory. The agent doesn't even know Dhee is there — it just gets better context.
 
-### MCP Server (Claude Code, Cursor, any MCP client)
+### MCP Server (Claude Code, Cursor, Codex, Gemini CLI, Cline, Goose, any MCP client)
 
 ```json
 {
@@ -236,111 +298,19 @@ That's it. Six hooks fire automatically at the right moments. No SKILL.md, no pl
 }
 ```
 
-4 tools exposed. The agent uses them as needed.
+28 tools exposed. The agent uses them as needed.
 
-### Python SDK
-
-```python
-from dhee import Dhee
-
-d = Dhee()
-d.remember("User prefers dark mode")
-d.recall("what theme does the user like?")
-d.context("fixing auth bug")
-d.checkpoint("Fixed it", what_worked="git blame first")
-```
-
-### CLI
+### Python SDK / CLI / Docker
 
 ```bash
 dhee remember "User prefers Python"
 dhee recall "programming language"
-dhee ingest CLAUDE.md AGENTS.md    # chunk specific files
-dhee ingest                        # auto-scan project
+dhee ingest CLAUDE.md AGENTS.md
 dhee docs                          # show ingested manifest
-dhee checkpoint "Fixed auth bug" --what-worked "checked logs"
-dhee install                       # install Claude Code hooks
-dhee uninstall-hooks               # remove them
+dhee router report                 # router stats + replay projection
+dhee router tune                   # re-tune retrieval policy
+dhee checkpoint "Fixed auth" --what-worked "checked logs"
 ```
-
-### Docker
-
-```bash
-docker compose up -d   # uses OPENAI_API_KEY from env
-```
-
----
-
-## Cost
-
-| Operation | LLM calls | Embed calls | Cost |
-|:----------|:----------|:------------|:-----|
-| `remember` | 0 | 1 | ~$0.0002 |
-| `recall` | 0 | 1 | ~$0.0002 |
-| `context` | 0 | 0-1 | ~$0.0002 |
-| `checkpoint` | 1 per ~10 memories | 0 | ~$0.001 |
-| **Typical session** | **1** | **~15** | **~$0.004** |
-
-The Dhee overhead per session is ~$0.004. The token savings from selective injection on a 20-turn Opus session are ~$0.50+. **>100x ROI.**
-
----
-
-## Under the Hood
-
-### Memory Store (Engram)
-
-SQLite + vector index. On the hot path (`remember`/`recall`), zero LLM calls — just embedding. At `checkpoint`, unified enrichment runs in one batched LLM call:
-
-- **Echo encoding** — paraphrases, keywords, question-forms so "User likes dark mode" matches "what theme?"
-- **Category inference** — auto-tags for filtering
-- **Strength-based decay** — Ebbinghaus curve. Frequently accessed → promoted to long-term. Unused → fades.
-
-### Cognition Engine (Buddhi)
-
-Parallel intelligence layer that builds meta-knowledge from the memory pipeline:
-
-- **Performance tracking** — outcomes per task type, trend detection, regression warnings
-- **Insight synthesis** — causal hypotheses from what worked/failed, with confidence scores
-- **Prospective memory** — future triggers with keyword matching
-- **Belief store** — confidence-tracked facts with contradiction detection (experimental)
-- **Policy store** — condition→action rules from task completions (experimental)
-
-Zero LLM calls on hot path. Pure pattern matching + statistics.
-
-### Doc Pipeline (v3.3.1)
-
-- **Chunker** — heading-scoped splits that respect code fences, paragraph boundaries, size limits
-- **Ingest** — SHA-tracked. Re-ingesting unchanged files is a no-op. Changed files get atomic chunk replacement.
-- **Assembler** — vector similarity search filtered by `kind=doc_chunk`, score threshold, token budget
-- **Renderer** — Caveman-compressed XML: `<dhee><r s="0.83">...</r></dhee>`. No header, no wrapper tags, no indentation — every byte earns its place. ~40% fewer structural tokens vs v3.3.
-
----
-
-<a id="benchmarks"></a>
-## Benchmarks
-
-> **#1 on LongMemEval recall.** R@1 94.8%, R@5 99.4%, R@10 99.8% — full 500 questions, no held-out split, no cherry-picking.
-
-**LongMemEval-S — retrieval recall (500 questions, `--retrieval-only`):**
-
-| System | R@1 | R@3 | R@5 | R@10 |
-|:-------|:----|:----|:----|:-----|
-| **Dhee v3.4.0** | **94.8%** | **99.0%** | **99.4%** | **99.8%** |
-| [MemPalace](https://github.com/MemPalace/mempalace#benchmarks) (raw) | — | — | 96.6% | — |
-| [MemPalace](https://github.com/MemPalace/mempalace#benchmarks) (hybrid v4, held-out 450q) | — | — | 98.4% | — |
-| [agentmemory](https://github.com/rohitg00/agentmemory#benchmarks) | — | — | 95.2% | 98.6% |
-
-Stack: NVIDIA `llama-nemotron-embed-vl-1b-v2` embedder + `llama-3.2-nv-rerankqa-1b-v2` reranker, top-k 10. Full 500 questions, no held-out split.
-
-**Proof is in-tree, not screenshots.** The exact command, metrics, and
-per-question retrieval output are committed:
-
-- [`benchmarks/longmemeval/command.sh`](benchmarks/longmemeval/command.sh) — exact run command
-- [`benchmarks/longmemeval/metrics.json`](benchmarks/longmemeval/metrics.json) — both `any@k` and stricter `all@k`
-- [`benchmarks/longmemeval/retrieval.jsonl`](benchmarks/longmemeval/retrieval.jsonl) — 500 records: top-10 IDs, gold IDs, gold rank
-- [`benchmarks/longmemeval/README.md`](benchmarks/longmemeval/README.md) — reproduction steps
-
-Recompute R@k yourself from the committed `retrieval.jsonl` — any mismatch is a bug you can open.
 
 ---
 
@@ -348,6 +318,7 @@ Recompute R@k yourself from the committed `retrieval.jsonl` — any mismatch is 
 
 ```bash
 pip install dhee[openai,mcp]     # OpenAI (recommended, cheapest embeddings)
+pip install dhee[nvidia,mcp]     # NVIDIA NIM (current SOTA stack)
 pip install dhee[gemini,mcp]     # Google Gemini
 pip install dhee[ollama,mcp]     # Ollama (local, no API costs)
 ```
@@ -361,13 +332,15 @@ git clone https://github.com/Sankhya-AI/Dhee.git
 cd Dhee
 ./scripts/bootstrap_dev_env.sh
 source .venv-dhee/bin/activate
-pytest    # 978 tests
+pytest    # 1098 tests, 10 skipped
 ```
+
+Benchmarks are reproducible from [`benchmarks/longmemeval/`](benchmarks/longmemeval/). Any improvement to R@k with full per-question output is welcome.
 
 ---
 
 <p align="center">
-  <b>Your docs stay fat. Your token bill stays thin.</b>
+  <b>Your fat skills stay fat. Your token bill stays thin. Your agent gets smarter every session.</b>
   <br><br>
   <a href="https://github.com/Sankhya-AI/Dhee">GitHub</a> &middot;
   <a href="https://pypi.org/project/dhee">PyPI</a> &middot;
