@@ -23,6 +23,10 @@
 </p>
 
 <p align="center">
+  <img src="docs/demo/demo.gif" alt="Dhee demo — fat skills, thin tokens, self-evolving retrieval" width="900">
+</p>
+
+<p align="center">
   <a href="#what-dhee-is">What is Dhee</a> &middot;
   <a href="#quick-start">Quick Start</a> &middot;
   <a href="#benchmarks">Benchmarks</a> &middot;
