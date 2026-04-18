@@ -4,6 +4,56 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [4.0.0] - 2026-04-18 — Context Router Release
+
+Memory + token-saving router, one install. The router is now a first-class, in-tree feature with its own CLI surface, hooks, enforcement gate, and shareable savings report.
+
+### Router — digest tool output at source
+
+Four MCP tools replace native `Read` / `Bash` / subagent returns on heavy calls. Raw output is stored behind a pointer; only a short digest reaches the model. Raw only re-enters context if the model explicitly calls `dhee_expand_result(ptr)`.
+
+- `mcp__dhee__dhee_read` — file read → symbols + head/tail + token estimate + ptr
+- `mcp__dhee__dhee_bash` — shell command → class-aware digest (git log, pytest, grep, listing, generic) + ptr
+- `mcp__dhee__dhee_agent` — subagent return → file refs, headings, bullets, error signals + ptr
+- `mcp__dhee__dhee_expand_result` — retrieve raw behind a ptr on demand
+
+### Unified `dhee router enable`
+
+One command now installs the PreToolUse hook, adds router permissions to `~/.claude/settings.json`, sets `DHEE_ROUTER=1` on the Dhee MCP server, and turns on the enforcement flag. Was previously three separate steps; PreToolUse was silently absent on most machines.
+
+- `dhee router enable` — hooks + permissions + MCP env + enforce flag, atomic, auto-backup
+- `dhee router disable` — one-command rollback, restores settings from backup in <1s
+- `dhee router status` — reports current state without side effects
+
+### Digest inflation floor
+
+When raw payload is <2KB and the digest wrapper would be larger than the raw, handlers now fall back to a minimal inlined block. Closes the worst-case variance where per-session savings dipped below 20% on small-file workflows.
+
+### Shareable customer report
+
+- `dhee router report --share` emits a redacted Markdown artifact: dhee version, hooks installed, projected savings %, expansion rate, reproduce + rollback steps. No absolute paths, no session ids.
+- `dhee router report` (no flag) — human-readable local output + JSON sidecar at `~/.dhee/session_quality_report.json`.
+
+### Measurement, in-tree
+
+- `dhee/benchmarks/router_replay.py` — counterfactual replay harness. Re-tokenizes real recorded sessions with and without the router.
+- `dhee/benchmarks/phase0_context_audit.py` — Anthropic `usage`-field audit (ground-truth cache-read / input tokens per turn).
+- On the author's own sessions: **59% projected token savings**, **10.7% expansion rate** (healthy — model rarely needs raw behind a digest).
+
+### Self-evolution surface
+
+- `dhee router tune` — reads the expansion ledger, applies thresholds (>30% expansion → deepen digest; <5% → shallower), atomically rewrites `~/.dhee/router_policy.json`.
+- `dhee router stats` — ptr-store aggregates: calls diverted, bytes, expansion rate, bash classes, edit ledger.
+
+### Enforcement gate
+
+- PreToolUse hook (`dhee.router.pre_tool_gate`) denies native `Read` on files >20KB and `Bash` on heavy-output patterns (git log/diff/show, grep -r, rg, find, pytest, npm test, curl, tail -f). Steers the model to the `dhee_*` equivalents with an `additionalContext` hint.
+- Gated on `DHEE_ROUTER_ENFORCE=1` env or `~/.dhee/router_enforce` flag file. No-op when off.
+
+### What I'm not claiming in this release
+
+Direct task-completion parity with native flow has not been benchmarked. Quality signal is expansion rate — a proxy. If a digest is too shallow for your workflow, open an issue with the file type and I'll tune the policy. Rollback is one command.
+
 ## [3.4.0] - 2026-04-16 — Caveman Injection + One-Line Install
 
 ### Renderer compression (Caveman-inspired)

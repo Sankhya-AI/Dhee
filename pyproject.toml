@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dhee"
-version = "3.4.0"
+version = "4.0.0"
 description = "Cognition layer for AI agents — persistent memory, performance tracking, and insight synthesis"
 readme = "README.md"
 requires-python = ">=3.9"
