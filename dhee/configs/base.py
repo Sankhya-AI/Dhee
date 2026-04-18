@@ -418,6 +418,21 @@ class CausalInlineConfig(BaseModel):
     auto_detect_causal_language: bool = True
 
 
+class ResolverBoostConfig(BaseModel):
+    """Wire the deterministic ContextResolver into the retrieval read path.
+
+    The ContextResolver already runs on write to supersede single-valued facts
+    (subject|predicate in _SINGLE_VALUED_PREDICATES get valid_until set when
+    a newer fact arrives). On read, resolver.resolve(query) returns the
+    memory_ids that ground the current, non-superseded answer. This config
+    controls whether those memory_ids get a composite-score boost in search
+    results, making fact-aware supersede observable at rank 1.
+    """
+    enable_resolver_boost: bool = True
+    resolver_boost_weight: float = 0.7  # applied as combined *= (1 + weight)
+    emit_fact_status: bool = True       # include fact counts + resolver fields in results
+
+
 class DheeModelConfig(BaseModel):
     """Configuration for the DheeModel (fine-tuned Qwen3.5 family)."""
     model_path: str = "auto"               # auto-download or local path
@@ -509,7 +524,7 @@ class RerankConfig(BaseModel):
     """Configuration for neural reranking (cross-encoder second stage)."""
     enable_rerank: bool = False
     provider: str = "nvidia"  # Currently only nvidia supported
-    model: str = "nvidia/llama-3.2-nv-rerankqa-1b-v2"
+    model: str = "nvidia/llama-nemotron-rerank-vl-1b-v2"
     api_key_env: str = "NVIDIA_API_KEY"  # Env var name for API key
     top_n: int = 0  # Number of results to return after reranking (0 = return all, re-sorted)
     config: Dict[str, Any] = Field(default_factory=dict)
@@ -633,6 +648,7 @@ class MemoryConfig(BaseModel):
     working_memory: WorkingMemoryInlineConfig = Field(default_factory=WorkingMemoryInlineConfig)
     salience: SalienceInlineConfig = Field(default_factory=SalienceInlineConfig)
     causal: CausalInlineConfig = Field(default_factory=CausalInlineConfig)
+    resolver_boost: ResolverBoostConfig = Field(default_factory=ResolverBoostConfig)
     # Dhee: Cognition as a Service
     dhee_model: DheeModelConfig = Field(default_factory=DheeModelConfig)
     cognition: CognitionConfig = Field(default_factory=CognitionConfig)

@@ -37,6 +37,48 @@ MAX_READ_BYTES = 5 * 1024 * 1024  # 5 MB
 # older than this when the router is invoked.
 PTR_TTL_SECONDS = 24 * 3600  # 24 h
 
+# Inflation floor. When raw input is small, a full digest wrapper can
+# exceed the raw content, *losing* tokens. Below this size we compare
+# the rendered digest against the raw and fall back to a minimal
+# inlined wrapper when the digest would inflate the payload. Set
+# empirically: beyond 2 KB the digest is always cheaper because the
+# symbol + head/tail summary compresses well; under that it often
+# isn't.
+INLINE_INFLATION_THRESHOLD = 2048
+
+
+def _inline_read(content: str, ptr: str, path: str, line_count: int, char_count: int) -> str:
+    """Minimal inlined dhee_read output used when the full digest would
+    be larger than the raw content.
+    """
+    trailer = "" if content.endswith("\n") else "\n"
+    return (
+        f'<dhee_read ptr="{ptr}" inlined="1">\n'
+        f"path={path}\n"
+        f"size={line_count} lines, {char_count} chars (inlined — digest not shorter)\n"
+        f"{content}{trailer}"
+        f"</dhee_read>"
+    )
+
+
+def _inline_bash(cmd: str, exit_code: int, duration_ms: int, stdout: str, stderr: str, ptr: str) -> str:
+    """Minimal inlined dhee_bash output used when the full digest would
+    be larger than the raw stdout+stderr combined.
+    """
+    parts: list[str] = [
+        f'<dhee_bash ptr="{ptr}" inlined="1">',
+        f"cmd={cmd}",
+        f"exit={exit_code} duration={duration_ms}ms (inlined — digest not shorter)",
+    ]
+    if stdout:
+        parts.append("stdout:")
+        parts.append(stdout.rstrip("\n"))
+    if stderr:
+        parts.append("stderr:")
+        parts.append(stderr.rstrip("\n"))
+    parts.append("</dhee_bash>")
+    return "\n".join(parts)
+
 
 def _evict_stale_ptr_sessions() -> None:
     """Prune ptr-cache session directories older than PTR_TTL_SECONDS.
@@ -161,13 +203,19 @@ def handle_dhee_read(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "depth": depth,
         },
     )
+    rendered = d.render(stored.ptr, depth=depth)
+    inlined = False
+    if d.char_count < INLINE_INFLATION_THRESHOLD and len(rendered) >= len(content):
+        rendered = _inline_read(content, stored.ptr, file_path, d.line_count, d.char_count)
+        inlined = True
     return {
         "ptr": stored.ptr,
-        "digest": d.render(stored.ptr, depth=depth),
+        "digest": rendered,
         "line_count": d.line_count,
         "char_count": d.char_count,
         "est_tokens": d.est_tokens,
         "kind": d.kind,
+        "inlined": inlined,
     }
 
 
@@ -262,15 +310,22 @@ def handle_dhee_bash(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "timed_out": timed_out,
         },
     )
+    rendered = d.render(stored.ptr)
+    raw_output_bytes = d.stdout_bytes + d.stderr_bytes
+    inlined = False
+    if raw_output_bytes < INLINE_INFLATION_THRESHOLD and len(rendered) >= raw_output_bytes:
+        rendered = _inline_bash(cmd, exit_code, duration_ms, stdout, stderr, stored.ptr)
+        inlined = True
     return {
         "ptr": stored.ptr,
-        "digest": d.render(stored.ptr),
+        "digest": rendered,
         "exit_code": exit_code,
         "duration_ms": duration_ms,
         "class": d.cls,
         "stdout_bytes": d.stdout_bytes,
         "stderr_bytes": d.stderr_bytes,
         "timed_out": timed_out,
+        "inlined": inlined,
     }
 
 

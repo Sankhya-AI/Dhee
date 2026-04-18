@@ -2,13 +2,13 @@
   <img src="docs/dhee-logo.png" alt="Dhee" width="80">
 </p>
 
-<h1 align="center">Dhee</h1>
+<h1 align="center">Dhee — Self-Evolving Memory & Context Router for AI Agents</h1>
 
-<h3 align="center">Self-evolving memory for every AI agent.</h3>
+<h3 align="center">Cut LLM tokens by 90%. Perfect recall, even years in. Works with Claude Code, Cursor, Codex, Gemini CLI, Aider, Cline, and any MCP client.</h3>
 
 <p align="center">
-  Fat skills, thin tokens. Perfect recall, even years in.<br>
-  Future-proof your CLAUDE.md, your AGENTS.md, your GBrain, your skills library.
+  Open-source agent memory layer and tool-output router for LLM apps.<br>
+  Future-proof your <b>CLAUDE.md</b>, <b>AGENTS.md</b>, GBrain, and skills library — without blowing your context window or your token budget.
 </p>
 
 <p align="center">
@@ -37,9 +37,9 @@
 
 ---
 
-## What Dhee is
+## What is Dhee?
 
-Dhee is a **self-evolving memory and cognition layer** that sits between your AI agent and the LLM. It does three things, well:
+**Dhee is an open-source, self-evolving memory and context-router for LLM-powered AI agents.** It sits between your agent (Claude Code, Cursor, Codex, Gemini CLI, Aider, Cline, Goose, or any MCP-compatible client) and the model, and does three things so your CLAUDE.md, AGENTS.md, skills library, and tool output stop costing you tokens:
 
 1. **Reduces tokens.** The agent only sees the slice of context it needs this turn. Your 2,000-line CLAUDE.md becomes ~300 tokens. A 10 MB tool-result becomes a 40-token digest with a pointer. Over a session, that's a 90%+ token reduction with zero information loss.
 
@@ -329,6 +329,31 @@ pip install dhee[ollama,mcp]     # Ollama (local, no API costs)
 
 ---
 
+## FAQ
+
+### What problem does Dhee solve?
+Large AI-agent projects accumulate a fat `CLAUDE.md`, `AGENTS.md`, skills library, and tool output that gets re-injected into the LLM's context window on every turn. Dhee chunks, indexes, and decays that knowledge, and digests fat tool output at the source, so only the relevant 300-ish tokens reach the model — cutting a 20-turn Claude Opus session from ~$0.50 of stale-rule tokens down to a few cents.
+
+### How is Dhee different from Mem0, Letta, MemPalace, and agentmemory?
+Dhee is the only agent memory layer that (a) leads on the [LongMemEval](https://github.com/xiaowu0162/LongMemEval) retrieval benchmark at R@5 99.4% on the full 500-question set, (b) self-evolves its retrieval policy per tool and per intent, and (c) ships a **context router** that digests `Read`, `Bash`, and subagent output at source instead of dumping raw into context. See the [comparison table](#vs-alternatives).
+
+### Does Dhee work with Claude Code, Cursor, Codex, Gemini CLI, or Aider?
+Yes. Dhee ships native Claude Code hooks, an MCP server that plugs into Cursor, Codex, Gemini CLI, Cline, Goose, and any MCP client, plus a Python SDK and CLI. One install, every host.
+
+### How does Dhee reduce Claude Code token usage?
+Two ways: (1) it replaces a 500-line `CLAUDE.md` that normally re-loads every turn with a vector-indexed memory that injects only matching rules (~240 tokens instead of 5,700); (2) its router wraps `Read` and `Bash` so a 10 MB `git log` becomes a ~40-token digest with a pointer — raw content only re-enters context if the model explicitly expands the pointer.
+
+### Is Dhee production-ready? What storage does it use?
+Dhee runs on SQLite by default — no Postgres, no Qdrant, no pgvector, no extra infra. It has 1000+ tests, reproducible benchmarks in-tree, an MIT license, and works offline with Ollama embeddings or online with OpenAI, NVIDIA NIM, or Gemini.
+
+### How does Dhee's self-evolution actually work?
+Every time the model calls `dhee_expand_result(ptr)` to see the raw output behind a digest, Dhee logs (tool, intent, depth). `dhee router tune` reads that ledger and atomically rewrites `~/.dhee/router_policy.json` — deeper digests for file types the model keeps expanding, shallower ones it never does. No config to hand-maintain. The longer you use it, the better it fits your workflow.
+
+### Where are the benchmarks and can I reproduce them?
+Full command, per-question JSONL output, and `metrics.json` are committed under [`benchmarks/longmemeval/`](benchmarks/longmemeval/). Clone the repo, run the command, recompute R@k yourself — any mismatch is an issue you can open.
+
+---
+
 ## Contributing
 
 ```bash
@@ -352,3 +377,7 @@ Benchmarks are reproducible from [`benchmarks/longmemeval/`](benchmarks/longmeme
 </p>
 
 <p align="center">MIT License &mdash; <a href="https://sankhyaailabs.com">Sankhya AI</a></p>
+
+<p align="center"><sub>
+<b>Topics:</b> ai-agents · agent-memory · llm-memory · claude-code · claude-code-hooks · claudemd · agentsmd · mcp · mcp-server · model-context-protocol · context-router · context-engineering · context-compression · token-optimization · llm-tools · vector-memory · sqlite · longmemeval · memory-for-llm-agents · retrieval-augmented-generation · rag · mem0-alternative · letta-alternative · mempalace-alternative · cursor · codex · gemini-cli · aider · cline · goose
+</sub></p>

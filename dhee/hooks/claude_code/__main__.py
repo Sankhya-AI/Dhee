@@ -79,7 +79,8 @@ def handle_session_start(payload: dict[str, Any]) -> dict[str, Any]:
 
     # Assemble: doc chunks + typed cognition, budgeted.
     assembled = assemble(dhee, query=task_desc, include_cognition=True)
-    if assembled.is_empty:
+    router_on = os.environ.get("DHEE_ROUTER") == "1"
+    if assembled.is_empty and not router_on:
         return {}
 
     xml = _render(
@@ -127,17 +128,53 @@ def handle_user_prompt(payload: dict[str, Any]) -> dict[str, Any]:
     return {"systemMessage": xml}
 
 
+def handle_pre_tool(payload: dict[str, Any]) -> dict[str, Any]:
+    """Router enforcement gate. No-op unless DHEE_ROUTER_ENFORCE=1."""
+    from dhee.router.pre_tool_gate import evaluate
+
+    try:
+        return evaluate(payload) or {}
+    except Exception:
+        return {}
+
+
 def handle_post_tool(payload: dict[str, Any]) -> dict[str, Any]:
     from dhee.hooks.claude_code.signal import extract_signal
 
     if not isinstance(payload, dict):
         return {}
 
+    tool_name = payload.get("tool_name", "")
+    tool_input = payload.get("tool_input", {}) or {}
+    tool_result = payload.get("tool_result", "")
+    success = payload.get("success", True)
+
+    # Phase 7: record successful edits into the per-session ledger for
+    # PreCompact dedup. Best-effort, never fails the hook.
+    if success and tool_name in {"Edit", "Write", "MultiEdit", "NotebookEdit"}:
+        try:
+            from dhee.router.edit_ledger import record as _record_edit
+
+            path = ""
+            new_content = ""
+            if isinstance(tool_input, dict):
+                path = str(tool_input.get("file_path") or tool_input.get("path") or "")
+                new_content = str(
+                    tool_input.get("new_string")
+                    or tool_input.get("content")
+                    or tool_input.get("new_source")
+                    or ""
+                )
+            if path:
+                _record_edit(tool_name, path, new_content)
+        except Exception:
+            pass
+
     signal = extract_signal(
-        tool_name=payload.get("tool_name", ""),
-        tool_input=payload.get("tool_input", {}),
-        tool_result=payload.get("tool_result", ""),
-        success=payload.get("success", True),
+        tool_name=tool_name,
+        tool_input=tool_input,
+        tool_result=tool_result,
+        success=success,
     )
     if signal is None:
         return {}
@@ -173,11 +210,23 @@ def handle_pre_compact(payload: dict[str, Any]) -> dict[str, Any]:
 
     # Re-inject context to survive compaction.
     assembled = assemble(dhee, query=summary, include_cognition=True)
-    if assembled.is_empty:
+
+    # Phase 7: deduped edit ledger fed as a first-class renderer section.
+    edits_block = ""
+    try:
+        from dhee.router.edit_ledger import render_block as _edits_block
+
+        edits_block = _edits_block()
+    except Exception:
+        edits_block = ""
+
+    if assembled.is_empty and not edits_block:
         return {}
+
     xml = _render(
         assembled.typed_cognition,
         doc_matches=assembled.doc_matches,
+        edits_block=edits_block or None,
     )
     if not xml:
         return {}
@@ -227,6 +276,7 @@ def handle_stop(payload: dict[str, Any]) -> dict[str, Any]:
 _HANDLERS = {
     "SessionStart": handle_session_start,
     "UserPromptSubmit": handle_user_prompt,
+    "PreToolUse": handle_pre_tool,
     "PostToolUse": handle_post_tool,
     "PreCompact": handle_pre_compact,
     "Stop": handle_stop,
@@ -262,6 +312,15 @@ def main() -> int:
     except Exception as exc:
         sys.stderr.write(f"dhee hook {event}: {exc}\n")
         sys.stdout.write("{}\n")
+        return 0
+
+    # PreToolUse deny signalling: emit JSON + exit 2 per Claude Code docs.
+    if (
+        event == "PreToolUse"
+        and isinstance(result, dict)
+        and result.get("permissionDecision") == "deny"
+    ):
+        return 2
 
     return 0
 

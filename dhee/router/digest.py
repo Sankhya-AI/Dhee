@@ -53,9 +53,17 @@ class ReadDigest:
         if self.symbols:
             lines.append("symbols:")
             for k, v in self.symbols.items():
-                if v:
-                    shown = v if len(v) <= 20 else v[:20] + [f"(+{len(v)-20} more)"]
-                    lines.append(f"  {k}: [{', '.join(shown)}]")
+                if not v:
+                    continue
+                counts: dict[str, int] = {}
+                order: list[str] = []
+                for item in v:
+                    if item not in counts:
+                        order.append(item)
+                    counts[item] = counts.get(item, 0) + 1
+                rendered = [(f"{s} x{counts[s]}" if counts[s] > 1 else s) for s in order]
+                shown = rendered if len(rendered) <= 20 else rendered[:20] + [f"(+{len(rendered)-20} more)"]
+                lines.append(f"  {k}: [{', '.join(shown)}]")
         if depth != "shallow":
             if self.head:
                 lines.append("head:")

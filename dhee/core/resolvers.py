@@ -23,7 +23,11 @@ _COUNT_RE = re.compile(
 )
 _LATEST_RE = re.compile(
     r"\b(?:current(?:ly)?|latest|most recent(?:ly)?|right now|now(?:adays)?|at the moment"
-    r"|what (?:is|are) (?:my|the)\b.*\bnow)\b",
+    r"|what (?:is|are) (?:my|the)\b.*\bnow"
+    # Current-habit queries: "what time do I [habit]" → asking current value,
+    # not a timeline. "when do I [habit]" covers present-tense habituals too.
+    r"|what time do (?:i|you)\b"
+    r"|when do (?:i|you)\b)\b",
     re.I,
 )
 _SUM_RE = re.compile(
@@ -152,6 +156,61 @@ class ContextResolver:
             from_clause += " WHERE " + " AND ".join(conditions)
         return from_clause, params
 
+    def get_fact_status(
+        self,
+        memory_ids: List[str],
+        *,
+        user_id: Optional[str] = None,
+        subject: Optional[str] = None,
+        predicate: Optional[str] = None,
+    ) -> Dict[str, Dict[str, int]]:
+        """Batch-return active vs superseded engram_fact counts per memory_id.
+
+        Used by the search pipeline to make fact-level supersede visible at
+        rank time. A memory with a superseded fact for (subject, predicate)
+        is not authoritative for that question — the newer memory holding
+        the non-superseded fact should outrank it. This helper exposes the
+        signal; scoring is the caller's decision.
+
+        Returns {memory_id: {"active": int, "superseded": int}} — memory_ids
+        with no matching fact rows default to {"active": 0, "superseded": 0}.
+        """
+        status: Dict[str, Dict[str, int]] = {
+            memory_id: {"active": 0, "superseded": 0} for memory_id in memory_ids if memory_id
+        }
+        if not status or not self._has_engram_tables():
+            return status
+
+        try:
+            with self.db._get_connection() as conn:
+                placeholders = ",".join("?" for _ in status)
+                conditions = [f"f.memory_id IN ({placeholders})", "m.tombstone = 0"]
+                params: List[Any] = list(status.keys())
+                if user_id:
+                    conditions.append("m.user_id = ?")
+                    params.append(user_id)
+                if subject:
+                    conditions.append("f.subject = ?")
+                    params.append(subject)
+                if predicate:
+                    conditions.append("f.predicate = ?")
+                    params.append(predicate)
+                sql = (
+                    "SELECT f.memory_id, "
+                    "SUM(CASE WHEN f.valid_until IS NULL THEN 1 ELSE 0 END) AS active, "
+                    "SUM(CASE WHEN f.valid_until IS NOT NULL THEN 1 ELSE 0 END) AS superseded "
+                    "FROM engram_facts f JOIN memories m ON m.id = f.memory_id "
+                    "WHERE " + " AND ".join(conditions) + " GROUP BY f.memory_id"
+                )
+                for row in conn.execute(sql, params).fetchall():
+                    status[row["memory_id"]] = {
+                        "active": int(row["active"] or 0),
+                        "superseded": int(row["superseded"] or 0),
+                    }
+        except Exception as e:
+            logger.debug("get_fact_status skipped: %s", e)
+        return status
+
     def resolve(
         self,
         query: str,
@@ -225,12 +284,19 @@ class ContextResolver:
                 plan.predicate = predicate
                 break
 
-        # If we have an intent but no predicate, try to infer from engram_facts
-        if plan.intent != "freeform" and not plan.predicate:
+        # Infer predicate from engram_facts when no regex match fired.
+        # Running this on freeform queries too lets the resolver ground fact
+        # lookups for any user question where we have matching stored facts
+        # (e.g., "what time do I wake up?" → predicate `wake_time` if stored).
+        # Safe because _resolve_fact_lookup filters valid_only=True — it can
+        # only surface non-superseded facts.
+        if not plan.predicate:
             plan.predicate = self._infer_predicate_from_db(query, user_id=user_id)
 
-        # Default subject to "user" for all intents
-        if plan.intent != "freeform" and not plan.subject:
+        # Default subject to "user" for any query — most user questions are
+        # self-referential ("I", "my", "me"). If a fact lookup returns nothing
+        # we fall back to vector search regardless.
+        if not plan.subject:
             plan.subject = "user"
 
         return plan
@@ -760,7 +826,16 @@ class ContextResolver:
         context_ids: Optional[List[str]],
         user_id: Optional[str],
     ) -> Optional[ResolverResult]:
-        """General fact lookup by subject and/or predicate."""
+        """General fact lookup by subject and/or predicate.
+
+        When both subject and predicate are specified, this is a "what's my
+        current X?" query. We apply read-time latest-wins: the memory with
+        the highest valid_from for (subject, predicate) is the authoritative
+        grounding. This gives knowledge-update questions a supersede answer
+        even when the write-side _SINGLE_VALUED_PREDICATES whitelist didn't
+        catch the predicate — any fact with a newer valid_from outranks older
+        ones at read time.
+        """
         with self.db._get_connection() as conn:
             from_clause, params = self._fact_query_parts(
                 user_id=user_id,
@@ -778,11 +853,23 @@ class ContextResolver:
                 return None
 
             facts = [dict(r) for r in rows]
+
+            # Read-time latest-wins: if subject+predicate were both specified
+            # and multiple active facts exist, ground on the single latest one.
+            # This implements fact-level supersede at read time for predicates
+            # outside the write-side whitelist.
+            latest_wins = bool(plan.subject and plan.predicate and len(facts) > 1)
+            if latest_wins:
+                grounding = facts[:1]
+            else:
+                grounding = facts
+
             return ResolverResult(
-                answer=facts[0].get("value") if len(facts) == 1 else None,
-                facts=facts,
-                memory_ids=self._dedupe_memory_ids([f.get("memory_id", "") for f in facts]),
-                resolver_path="context->sql->fact_lookup",
+                answer=grounding[0].get("value") if len(grounding) == 1 else None,
+                facts=grounding,
+                memory_ids=self._dedupe_memory_ids([f.get("memory_id", "") for f in grounding]),
+                resolver_path="context->sql->fact_lookup"
+                    + ("->latest_wins" if latest_wins else ""),
             )
 
     def _has_engram_tables(self) -> bool:

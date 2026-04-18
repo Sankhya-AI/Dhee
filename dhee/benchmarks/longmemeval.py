@@ -278,7 +278,7 @@ SESSION_ID_PATTERN = re.compile(r"^Session ID:\s*(?P<session_id>\S+)\s*$", re.MU
 HISTORY_HEADER = "User Transcript:"
 DEFAULT_NVIDIA_LLM_MODEL = "meta/llama-3.1-8b-instruct"
 DEFAULT_NVIDIA_EMBEDDER_MODEL = "nvidia/llama-nemotron-embed-vl-1b-v2"
-DEFAULT_NVIDIA_RERANK_MODEL = "nvidia/llama-3.2-nv-rerankqa-1b-v2"
+DEFAULT_NVIDIA_RERANK_MODEL = "nvidia/llama-nemotron-rerank-vl-1b-v2"
 
 
 def extract_user_only_text(session_turns: Sequence[Dict[str, Any]]) -> str:
@@ -1143,6 +1143,7 @@ def build_memory(
     enable_hierarchical_retrieval: bool = True,
     enable_orchestrated_search: bool = True,
     cost_guardrail_strict: bool = True,
+    disable_batch_writes: bool = False,
 ) -> Memory:
     """Build Engram Memory for LongMemEval. By default uses full potential (echo, categories, graph, scenes, profiles).
 
@@ -1210,7 +1211,10 @@ def build_memory(
             max_batch_size=5,
             defer_enrichment=defer_enrichment,
         ),
-        batch=BatchConfig(enable_batch=full_potential and not defer_enrichment, max_batch_size=50),
+        batch=BatchConfig(
+            enable_batch=(full_potential and not defer_enrichment and not disable_batch_writes),
+            max_batch_size=50,
+        ),
         rerank=rerank_cfg,
         engram_extraction=EngramExtractionConfig(enable_extraction=True, use_llm_extraction=full_potential),
     )
@@ -1388,6 +1392,7 @@ def run_longmemeval(args: argparse.Namespace) -> Dict[str, Any]:
         enable_hierarchical_retrieval=getattr(args, "enable_hierarchical_retrieval", True),
         enable_orchestrated_search=getattr(args, "enable_orchestrated_search", True),
         cost_guardrail_strict=getattr(args, "cost_guardrail_strict", True),
+        disable_batch_writes=getattr(args, "disable_batch_writes", False),
     )
 
     # Separate answer LLM for reasoning models (DeepSeek, etc.)
@@ -1443,7 +1448,7 @@ def run_longmemeval(args: argparse.Namespace) -> Dict[str, Any]:
             logger.info("Using memory LLM for orchestration map stage: %s", getattr(memory.llm, "model", "unknown"))
 
     hf_responder: Optional[HFResponder] = None
-    if args.answer_backend == "hf":
+    if args.answer_backend == "hf" and not getattr(args, "retrieval_only", False):
         hf_responder = HFResponder(model_name=args.hf_model, max_new_tokens=args.hf_max_new_tokens)
 
     output_path = Path(args.output_jsonl)
@@ -1664,155 +1669,161 @@ def run_longmemeval(args: argparse.Namespace) -> Dict[str, Any]:
                 )
                 per_question_metrics.append(metrics)
 
-                max_results = context_limit
-                per_result_max = getattr(args, "answer_context_max_chars", 4000)
+                # Defaults when retrieval_only skips the answer-gen block below.
+                # Keeps the downstream write/export path unchanged.
+                hypothesis = ""
+                context = ""
 
-                # Prefer the core orchestrated context; fallback to legacy builder.
-                context = str(orchestration_payload.get("context") or "").strip()
-                if not context:
-                    context = build_context_text(
-                        results=results,
-                        max_chars=args.max_context_chars,
-                        max_results=max_results,
-                        per_result_max_chars=per_result_max,
-                        query=query,
+                if not getattr(args, "retrieval_only", False):
+                    max_results = context_limit
+                    per_result_max = getattr(args, "answer_context_max_chars", 4000)
+
+                    # Prefer the core orchestrated context; fallback to legacy builder.
+                    context = str(orchestration_payload.get("context") or "").strip()
+                    if not context:
+                        context = build_context_text(
+                            results=results,
+                            max_chars=args.max_context_chars,
+                            max_results=max_results,
+                            per_result_max_chars=per_result_max,
+                            query=query,
+                        )
+                    reduced_answer: Optional[str] = orchestration_payload.get("reduced_answer")
+
+                    prompt = build_answer_prompt(
+                        question=query,
+                        retrieved_context=context,
+                        question_date=question_date,
+                        question_type=question_type,
                     )
-                reduced_answer: Optional[str] = orchestration_payload.get("reduced_answer")
 
-                prompt = build_answer_prompt(
-                    question=query,
-                    retrieved_context=context,
-                    question_date=question_date,
-                    question_type=question_type,
-                )
+                    # NOTE: Phase 1 shortcut disabled — the 8b model's fact
+                    # extraction is unreliable (over/under-counts), so the LLM
+                    # with full grounding/refinement chain produces better answers.
+                    # reduced_answer is still logged for diagnostics.
 
-                # NOTE: Phase 1 shortcut disabled — the 8b model's fact
-                # extraction is unreliable (over/under-counts), so the LLM
-                # with full grounding/refinement chain produces better answers.
-                # reduced_answer is still logged for diagnostics.
+                    if args.answer_backend == "hf":
+                        assert hf_responder is not None
+                        answer_llm = hf_responder
+                        hypothesis = str(hf_responder.generate(prompt)).strip()
+                    else:
+                        answer_llm = _answer_llm or memory.llm
+                        # For thinking models, strip reasoning instructions — thinking handles that.
+                        # Just ask for the direct concise answer.
+                        answer_prompt = prompt
+                        if _answer_llm and getattr(_answer_llm, "enable_thinking", False):
+                            answer_prompt = prompt.replace(
+                                "Think step by step, then provide your answer.\n\n"
+                                "Reasoning:\n[Identify which conversations contain relevant information and quote the exact supporting text]\n\n"
+                                "Answer:\n[Your concise final answer — use the exact words/numbers from the context]",
+                                "Give your concise final answer directly — use the exact words/numbers from the context. "
+                                "For list questions, list the items. For number questions, give the number. "
+                                "Do NOT include evidence or citations — just the answer."
+                            )
+                        raw_answer = str(answer_llm.generate(answer_prompt)).strip()
+                        # Parse Answer: section from CoT output if present
+                        hypothesis = _parse_answer_section(raw_answer)
 
-                if args.answer_backend == "hf":
-                    assert hf_responder is not None
-                    answer_llm = hf_responder
-                    hypothesis = str(hf_responder.generate(prompt)).strip()
-                else:
-                    answer_llm = _answer_llm or memory.llm
-                    # For thinking models, strip reasoning instructions — thinking handles that.
-                    # Just ask for the direct concise answer.
-                    answer_prompt = prompt
-                    if _answer_llm and getattr(_answer_llm, "enable_thinking", False):
-                        answer_prompt = prompt.replace(
-                            "Think step by step, then provide your answer.\n\n"
-                            "Reasoning:\n[Identify which conversations contain relevant information and quote the exact supporting text]\n\n"
-                            "Answer:\n[Your concise final answer — use the exact words/numbers from the context]",
-                            "Give your concise final answer directly — use the exact words/numbers from the context. "
-                            "For list questions, list the items. For number questions, give the number. "
-                            "Do NOT include evidence or citations — just the answer."
-                        )
-                    raw_answer = str(answer_llm.generate(answer_prompt)).strip()
-                    # Parse Answer: section from CoT output if present
-                    hypothesis = _parse_answer_section(raw_answer)
-
-                    # --- Answer Grounding Verification ---
-                    # If the hypothesis contains numbers not found in the
-                    # context, the LLM likely hallucinated.  Re-generate
-                    # with a stricter grounding constraint.
-                    # Skip for count-style questions — those numbers are
-                    # computed by enumeration, not extracted verbatim.
-                    if (
-                        not _is_refusal(hypothesis)
-                        and not _is_count_style_question(query)
-                        and not _answer_grounded_in_context(hypothesis, context)
-                    ):
-                        logger.info(
-                            "Grounding check failed for %s — re-generating with constraint",
-                            question_id,
-                        )
-                        grounded_prompt = (
-                            prompt
-                            + "\n\nCRITICAL: Your previous answer contained a number or fact "
-                            "that does NOT appear in the provided context. Re-read the "
-                            "conversations above very carefully and answer using ONLY "
-                            "values explicitly written in the text. Quote the exact "
-                            "number/fact from the context."
-                        )
-                        raw_answer2 = str(answer_llm.generate(grounded_prompt)).strip()
-                        hypothesis2 = _parse_answer_section(raw_answer2)
-                        # Accept the re-generated answer only if it IS grounded
+                        # --- Answer Grounding Verification ---
+                        # If the hypothesis contains numbers not found in the
+                        # context, the LLM likely hallucinated.  Re-generate
+                        # with a stricter grounding constraint.
+                        # Skip for count-style questions — those numbers are
+                        # computed by enumeration, not extracted verbatim.
                         if (
-                            not _is_refusal(hypothesis2)
-                            and _answer_grounded_in_context(hypothesis2, context)
+                            not _is_refusal(hypothesis)
+                            and not _is_count_style_question(query)
+                            and not _answer_grounded_in_context(hypothesis, context)
                         ):
-                            hypothesis = hypothesis2
+                            logger.info(
+                                "Grounding check failed for %s — re-generating with constraint",
+                                question_id,
+                            )
+                            grounded_prompt = (
+                                prompt
+                                + "\n\nCRITICAL: Your previous answer contained a number or fact "
+                                "that does NOT appear in the provided context. Re-read the "
+                                "conversations above very carefully and answer using ONLY "
+                                "values explicitly written in the text. Quote the exact "
+                                "number/fact from the context."
+                            )
+                            raw_answer2 = str(answer_llm.generate(grounded_prompt)).strip()
+                            hypothesis2 = _parse_answer_section(raw_answer2)
+                            # Accept the re-generated answer only if it IS grounded
+                            if (
+                                not _is_refusal(hypothesis2)
+                                and _answer_grounded_in_context(hypothesis2, context)
+                            ):
+                                hypothesis = hypothesis2
 
-                    # --- Count refinement ---
-                    # Run for ALL count-style questions including multi-session.
-                    # Multi-session counting is the hardest case and benefits most
-                    # from explicit enumeration.
-                    if _is_count_style_question(query) and not _is_refusal(hypothesis):
-                        logger.info(
-                            "Running count refinement for %s (draft=%r, multi=%s)",
-                            question_id, hypothesis, "multi-session" in question_type.lower(),
-                        )
+                        # --- Count refinement ---
+                        # Run for ALL count-style questions including multi-session.
+                        # Multi-session counting is the hardest case and benefits most
+                        # from explicit enumeration.
+                        if _is_count_style_question(query) and not _is_refusal(hypothesis):
+                            logger.info(
+                                "Running count refinement for %s (draft=%r, multi=%s)",
+                                question_id, hypothesis, "multi-session" in question_type.lower(),
+                            )
 
-                        # 1) Entity registry lookup (zero LLM cost)
-                        registry_answer = None
-                        try:
-                            if hasattr(memory, "lookup_entity_aggregates"):
-                                registry_answer = memory.lookup_entity_aggregates(
-                                    query=query, user_id=args.user_id,
-                                )
-                                if registry_answer:
-                                    logger.info(
-                                        "Entity registry answer for %s: %r",
-                                        question_id, registry_answer,
-                                    )
-                        except Exception as reg_exc:
-                            logger.debug("Entity registry lookup failed for %s: %s", question_id, reg_exc)
-
-                        code_exec_answer = None
-
-                        # 3) Pick best: code_exec > registry > existing refinement
-                        if code_exec_answer and not _is_refusal(code_exec_answer):
-                            hypothesis = code_exec_answer
-                        elif registry_answer and not _is_refusal(registry_answer):
-                            hypothesis = registry_answer
-                        else:
-                            # Fall through to existing _refine_count_hypothesis
+                            # 1) Entity registry lookup (zero LLM cost)
+                            registry_answer = None
                             try:
-                                refinement_llm = _answer_llm or memory.llm
-                                refined = _refine_count_hypothesis(
-                                    llm=refinement_llm,
-                                    question=query,
-                                    question_type=question_type,
-                                    question_date=question_date,
-                                    retrieved_context=context,
-                                    draft_answer=hypothesis,
-                                )
-                                logger.info(
-                                    "Count refinement result for %s: refined=%r, is_refusal=%s",
-                                    question_id, refined, _is_refusal(refined) if refined else "N/A",
-                                )
-                                if refined and not _is_refusal(refined):
-                                    hypothesis = refined
-                            except Exception as refine_exc:
-                                logger.warning("Count refinement failed for question %s: %s", question_id, refine_exc)
+                                if hasattr(memory, "lookup_entity_aggregates"):
+                                    registry_answer = memory.lookup_entity_aggregates(
+                                        query=query, user_id=args.user_id,
+                                    )
+                                    if registry_answer:
+                                        logger.info(
+                                            "Entity registry answer for %s: %r",
+                                            question_id, registry_answer,
+                                        )
+                            except Exception as reg_exc:
+                                logger.debug("Entity registry lookup failed for %s: %s", question_id, reg_exc)
 
-                        if not _is_refusal(hypothesis):
-                            pre_canon = hypothesis
-                            hypothesis = _canonicalize_count_answer(hypothesis, query)
-                            if hypothesis != pre_canon:
-                                logger.info("Canonicalized %r -> %r for %s", pre_canon, hypothesis, question_id)
+                            code_exec_answer = None
 
-                    # Fallback: if reducer produced an answer for LATEST intent
-                    # and the LLM answer is low-confidence, prefer the reducer.
-                    if (
-                        reduced_answer
-                        and not _is_refusal(reduced_answer)
-                        and intent_value == "latest"
-                        and is_low_confidence_answer(hypothesis)
-                    ):
-                        hypothesis = reduced_answer
+                            # 3) Pick best: code_exec > registry > existing refinement
+                            if code_exec_answer and not _is_refusal(code_exec_answer):
+                                hypothesis = code_exec_answer
+                            elif registry_answer and not _is_refusal(registry_answer):
+                                hypothesis = registry_answer
+                            else:
+                                # Fall through to existing _refine_count_hypothesis
+                                try:
+                                    refinement_llm = _answer_llm or memory.llm
+                                    refined = _refine_count_hypothesis(
+                                        llm=refinement_llm,
+                                        question=query,
+                                        question_type=question_type,
+                                        question_date=question_date,
+                                        retrieved_context=context,
+                                        draft_answer=hypothesis,
+                                    )
+                                    logger.info(
+                                        "Count refinement result for %s: refined=%r, is_refusal=%s",
+                                        question_id, refined, _is_refusal(refined) if refined else "N/A",
+                                    )
+                                    if refined and not _is_refusal(refined):
+                                        hypothesis = refined
+                                except Exception as refine_exc:
+                                    logger.warning("Count refinement failed for question %s: %s", question_id, refine_exc)
+
+                            if not _is_refusal(hypothesis):
+                                pre_canon = hypothesis
+                                hypothesis = _canonicalize_count_answer(hypothesis, query)
+                                if hypothesis != pre_canon:
+                                    logger.info("Canonicalized %r -> %r for %s", pre_canon, hypothesis, question_id)
+
+                        # Fallback: if reducer produced an answer for LATEST intent
+                        # and the LLM answer is low-confidence, prefer the reducer.
+                        if (
+                            reduced_answer
+                            and not _is_refusal(reduced_answer)
+                            and intent_value == "latest"
+                            and is_low_confidence_answer(hypothesis)
+                        ):
+                            hypothesis = reduced_answer
 
                 output_row = build_output_row(
                     question_id=question_id,
@@ -1854,6 +1865,12 @@ def run_longmemeval(args: argparse.Namespace) -> Dict[str, Any]:
                                     "rerank_passage_chars": rerank_passage_chars,
                                     "evidence_source": result.get("evidence_source"),
                                     "evidence_chars": result.get("evidence_chars"),
+                                    "resolver_boost": _coerce_finite_float(result.get("resolver_boost")),
+                                    "resolver_boost_applied": bool(result.get("resolver_boost_applied")),
+                                    "fact_active_count": result.get("fact_active_count"),
+                                    "fact_superseded_count": result.get("fact_superseded_count"),
+                                    "resolver_intent": result.get("resolver_intent"),
+                                    "resolver_predicate": result.get("resolver_predicate"),
                                 }
                             )
                         retrieval_row.update(
@@ -1872,7 +1889,30 @@ def run_longmemeval(args: argparse.Namespace) -> Dict[str, Any]:
 
                 processed += 1
                 if args.print_every > 0 and processed % args.print_every == 0:
-                    print(f"[LongMemEval] processed={processed} question_id={question_id}", flush=True)
+                    # Per-question recall (this question)
+                    q_any1 = metrics.get("recall_any@1", 0.0)
+                    q_any5 = metrics.get("recall_any@5", 0.0)
+                    q_any10 = metrics.get("recall_any@10", 0.0)
+                    q_all1 = metrics.get("recall_all@1", 0.0)
+                    q_all5 = metrics.get("recall_all@5", 0.0)
+                    q_all10 = metrics.get("recall_all@10", 0.0)
+                    # Rolling aggregate across all questions so far
+                    n = len(per_question_metrics)
+                    agg_any1 = sum(m.get("recall_any@1", 0.0) for m in per_question_metrics) / n if n else 0.0
+                    agg_any5 = sum(m.get("recall_any@5", 0.0) for m in per_question_metrics) / n if n else 0.0
+                    agg_any10 = sum(m.get("recall_any@10", 0.0) for m in per_question_metrics) / n if n else 0.0
+                    agg_all1 = sum(m.get("recall_all@1", 0.0) for m in per_question_metrics) / n if n else 0.0
+                    agg_all5 = sum(m.get("recall_all@5", 0.0) for m in per_question_metrics) / n if n else 0.0
+                    agg_all10 = sum(m.get("recall_all@10", 0.0) for m in per_question_metrics) / n if n else 0.0
+                    hit1 = "HIT" if q_any1 >= 1.0 else "MISS"
+                    print(
+                        f"[LongMemEval] {processed:3d}/{len(selected)}  qid={question_id[:8]}  "
+                        f"{hit1}@1  this:any[1/5/10]={q_any1:.0f}/{q_any5:.0f}/{q_any10:.0f} "
+                        f"all[1/5/10]={q_all1:.0f}/{q_all5:.0f}/{q_all10:.0f}  "
+                        f"running:R@1={agg_any1:.1%} R@5={agg_any5:.1%} R@10={agg_any10:.1%} "
+                        f"[all] R@1={agg_all1:.1%} R@5={agg_all5:.1%} R@10={agg_all10:.1%}",
+                        flush=True,
+                    )
 
                 # Export training data BEFORE next iteration's delete_all() wipes DB
                 _training_data_dir = getattr(args, "training_data_dir", None)
@@ -2100,6 +2140,23 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--enable-rerank", action="store_true", default=False, help="Enable neural reranking (cross-encoder second stage on retrieved results).")
     parser.add_argument(
+        "--disable-batch-writes",
+        action="store_true",
+        default=False,
+        help="Force per-item writes (batch.enable_batch=False). The batch write "
+             "path skips conflict detection + supersede; this flag re-enables them "
+             "for every ingested session. Diagnostic for confirming the live "
+             "supersede mechanism on LongMemEval without changing substrate code.",
+    )
+    parser.add_argument(
+        "--retrieval-only",
+        action="store_true",
+        default=False,
+        help="Skip answer generation entirely. Only compute retrieval metrics (R@1-R@10). "
+             "Drops HF/LLM answer costs, emits hypothesis=\"\" in output rows. "
+             "For publishing recall benchmarks without LLM dependency.",
+    )
+    parser.add_argument(
         "--rerank-model",
         default=None,
         help=f"Reranker model override (default: {DEFAULT_NVIDIA_RERANK_MODEL}).",
@@ -2113,7 +2170,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--rerank-max-passage-chars",
         type=int,
-        default=3500,
+        default=32000,
         help="Maximum characters per rerank passage.",
     )
     parser.add_argument(

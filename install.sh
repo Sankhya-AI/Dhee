@@ -6,7 +6,8 @@
 # What it does:
 #   1. Creates ~/.dhee with a hidden Python venv
 #   2. Installs the dhee package
-#   3. Configures Claude Code hooks (automatic cognition every session)
+#   3. Full Claude Code bootstrap: hooks + MCP server + context router
+#      (all enabled by default — see CLI flags to opt out individual pieces)
 #
 # Requires: Python 3.9+, Claude Code CLI
 set -e
@@ -100,16 +101,21 @@ case ":$PATH:" in
         ;;
 esac
 
-# --- Install Claude Code hooks ---
+# --- Full Claude Code bootstrap (hooks + MCP + router) ---
 if command -v claude >/dev/null 2>&1 || [ -f "$HOME/.claude/settings.json" ]; then
-    "$VENV_DIR/bin/dhee" install >/dev/null 2>&1 && done_ "Claude Code hooks configured" || warn "Hook install failed — run 'dhee install' manually"
+    if "$VENV_DIR/bin/dhee" install >/dev/null 2>&1; then
+        done_ "Claude Code wired: hooks + MCP + router"
+    else
+        warn "Bootstrap failed — run 'dhee install' manually for details"
+    fi
 else
     warn "Claude Code not found — run 'dhee install' after installing Claude Code"
 fi
 
 # --- Done ---
 printf "\n${BOLD}${GREEN}Dhee is ready.${RESET}\n"
-printf "  Open Claude Code in any project — cognition is automatic.\n\n"
-printf "  Commands:  dhee status | dhee install | dhee uninstall\n"
+printf "  Open Claude Code in any project — cognition + router are automatic.\n\n"
+printf "  Inspect:   dhee router status | dhee router stats\n"
+printf "  Opt out:   dhee router disable   (keeps hooks + MCP, drops router)\n"
 printf "  Update:    re-run this script\n"
-printf "  Remove:    rm -rf ~/.dhee && dhee uninstall-hooks\n\n"
+printf "  Remove:    dhee uninstall-hooks && rm -rf ~/.dhee\n\n"

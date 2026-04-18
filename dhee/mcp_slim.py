@@ -225,6 +225,90 @@ TOOLS = [
             "required": ["summary"],
         },
     ),
+    Tool(
+        name="dhee_read",
+        description=(
+            "Router wrapper for Read. Opens a file, extracts a factual digest "
+            "(path + line/char/token counts, symbols for Python/Markdown/JSON/"
+            "JS/TS/Go/Rust, head+tail excerpt), stores the full raw content "
+            "under a pointer `ptr`, and returns only the digest. Use INSTEAD "
+            "OF native `Read` to keep large file contents out of the "
+            "conversation context. If the digest is insufficient, call "
+            "`dhee_expand_result(ptr=...)` to retrieve the raw."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string", "description": "Absolute path to the file"},
+                "offset": {"type": "integer", "description": "1-indexed start line (optional)"},
+                "limit": {"type": "integer", "description": "Number of lines to read from offset (optional)"},
+                "digest_depth": {
+                    "type": "string",
+                    "enum": ["shallow", "normal", "deep"],
+                    "description": "shallow=counts+symbols only; normal=+5-line head/tail; deep=+10-line head/tail. Default: normal",
+                },
+            },
+            "required": ["file_path"],
+        },
+    ),
+    Tool(
+        name="dhee_bash",
+        description=(
+            "Router wrapper for Bash. Executes a shell command, captures "
+            "stdout/stderr/exit, classifies the command (git_log, pytest, "
+            "listing, grep, generic), and returns a class-aware digest. "
+            "Full raw output is stored under `ptr` for later expansion. Use "
+            "INSTEAD OF native `Bash` for any command that might produce "
+            "large output (git log, pytest, find, grep)."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "Shell command to run"},
+                "cwd": {"type": "string", "description": "Working directory (optional)"},
+                "timeout": {"type": "number", "description": "Seconds before SIGKILL (default 120, max 600)"},
+            },
+            "required": ["command"],
+        },
+    ),
+    Tool(
+        name="dhee_agent",
+        description=(
+            "Router wrapper for long-text tool returns (subagent results, "
+            "pasted docs, etc.). Extracts file:line refs, headings, bullets, "
+            "error signals, head+tail from the text; stores the full raw "
+            "under `ptr`. Use INSTEAD OF pasting a subagent's full response "
+            "back into your reasoning."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "Raw text to digest"},
+                "kind": {
+                    "type": "string",
+                    "description": "Optional hint (e.g. 'code-review', 'error-report'). Auto-detected if omitted.",
+                },
+                "source": {"type": "string", "description": "Optional label (e.g. 'subagent:Explore')"},
+            },
+            "required": ["text"],
+        },
+    ),
+    Tool(
+        name="dhee_expand_result",
+        description=(
+            "Retrieve the full raw content previously stored by a dhee_* "
+            "router tool, identified by its `ptr` (e.g. 'R-1a2b3c4d'). Raw "
+            "content will re-enter the context — only call when the digest "
+            "was genuinely insufficient."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "ptr": {"type": "string", "description": "Pointer returned by a dhee_* tool"},
+            },
+            "required": ["ptr"],
+        },
+    ),
 ]
 
 
@@ -312,11 +396,35 @@ def _handle_checkpoint(args: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
+def _handle_dhee_read(args: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee.router.handlers import handle_dhee_read
+    return handle_dhee_read(args)
+
+
+def _handle_dhee_bash(args: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee.router.handlers import handle_dhee_bash
+    return handle_dhee_bash(args)
+
+
+def _handle_dhee_agent(args: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee.router.handlers import handle_dhee_agent
+    return handle_dhee_agent(args)
+
+
+def _handle_dhee_expand_result(args: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee.router.handlers import handle_dhee_expand_result
+    return handle_dhee_expand_result(args)
+
+
 HANDLERS = {
     "remember": _handle_remember,
     "recall": _handle_recall,
     "context": _handle_context,
     "checkpoint": _handle_checkpoint,
+    "dhee_read": _handle_dhee_read,
+    "dhee_bash": _handle_dhee_bash,
+    "dhee_agent": _handle_dhee_agent,
+    "dhee_expand_result": _handle_dhee_expand_result,
 }
 
 

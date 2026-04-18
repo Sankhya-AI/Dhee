@@ -24,6 +24,7 @@ from typing import Any
 HOOK_EVENTS: tuple[str, ...] = (
     "SessionStart",
     "UserPromptSubmit",
+    "PreToolUse",
     "PostToolUse",
     "PreCompact",
     "Stop",
@@ -37,6 +38,7 @@ LEGACY_EVENTS: tuple[str, ...] = ()
 
 TOOL_MATCHERS: dict[str, str] = {
     "PostToolUse": "Edit|Write|MultiEdit|Bash",
+    "PreToolUse": "Read|Bash",
 }
 
 _DHEE_COMMAND_MARKER = "dhee.hooks.claude_code"

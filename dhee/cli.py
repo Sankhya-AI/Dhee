@@ -346,18 +346,51 @@ def cmd_task(args: argparse.Namespace) -> None:
 
 
 def cmd_install_hooks(args: argparse.Namespace) -> None:
-    """Install Dhee hooks into Claude Code."""
-    from dhee.hooks.claude_code.install import install_hooks
+    """Full Claude Code bootstrap: hooks + MCP + router.
 
-    result = install_hooks(force=args.force)
-    if result.already_installed and not args.force:
-        print("  Dhee hooks already installed.")
+    Defaults to "everything on". Flags let the user opt out of
+    individual pieces:
+      --no-router : install hooks + MCP, but don't enable router
+      --no-mcp    : skip MCP registration (e.g. already configured)
+      --hooks-only: only install hooks (legacy behavior)
+    """
+    from dhee.router import bootstrap as _boot
+
+    hooks_only = getattr(args, "hooks_only", False)
+    no_router = getattr(args, "no_router", False)
+    no_mcp = getattr(args, "no_mcp", False)
+
+    if hooks_only:
+        register_mcp = False
+        enable_router = False
     else:
-        action = "Created" if result.created else "Updated"
-        print(f"  {action} {result.settings_path}")
-        print(f"  Hooks: {', '.join(result.events)}")
-        if result.backed_up:
-            print(f"  Backup: {result.backed_up}")
+        register_mcp = not no_mcp
+        enable_router = not no_router
+
+    result = _boot.bootstrap(
+        enable_router=enable_router,
+        register_mcp=register_mcp,
+        install_hooks=True,
+    )
+
+    if result.already_complete:
+        print("  Dhee already fully configured.")
+        return
+
+    print(f"  Settings: {result.settings_path}")
+    if result.hooks_installed:
+        print("  Hooks installed")
+    if result.mcp_registered:
+        cmd = result.details.get("mcp_command", "dhee-mcp")
+        print(f"  MCP registered (command: {cmd})")
+    if result.router_enabled:
+        print("  Router enabled (DHEE_ROUTER=1, permissions allowed)")
+    if result.backed_up:
+        print(f"  Backup:   {result.backed_up}")
+    print("")
+    print("  Restart Claude Code to activate.")
+    print("  Disable router only:  dhee router disable")
+    print("  Disable everything:   dhee uninstall-hooks")
 
 
 def cmd_uninstall_hooks(args: argparse.Namespace) -> None:
@@ -454,6 +487,183 @@ def cmd_docs(args: argparse.Namespace) -> None:
     for path, info in summary["entries"].items():
         name = path.rsplit("/", 1)[-1]
         print(f"  {name}: {info['chunks']} chunks (sha:{info['sha']})")
+
+
+def cmd_router(args: argparse.Namespace) -> None:
+    """Enable/disable/inspect the Dhee context router for Claude Code."""
+    from dhee.router import install as router_install
+    from dhee.router import stats as router_stats
+
+    action = getattr(args, "router_action", None)
+
+    if action == "enable":
+        result = router_install.enable()
+        if args.json:
+            _json_out({
+                "action": result.action,
+                "settings_path": str(result.settings_path),
+                "added_allows": result.added_allows,
+                "env_flag_set": result.env_flag_set,
+                "backed_up": str(result.backed_up) if result.backed_up else None,
+                "hooks_installed": result.hooks_installed,
+                "enforce_turned_on": result.enforce_turned_on,
+            })
+            return
+        if result.action == "already_enabled":
+            print("  Router already enabled.")
+        else:
+            print(f"  Router enabled → {result.settings_path}")
+            if result.added_allows:
+                print(f"  Allowed: {', '.join(result.added_allows)}")
+            if result.env_flag_set:
+                print("  DHEE_ROUTER=1 on dhee MCP server")
+            if result.hooks_installed:
+                print("  Hooks installed (SessionStart/PreToolUse/PostToolUse/PreCompact)")
+            if result.enforce_turned_on:
+                print("  Enforcement ON — native Read on >20KB files / heavy Bash will be denied")
+            if result.backed_up:
+                print(f"  Backup: {result.backed_up}")
+            print("  Restart Claude Code for changes to take effect.")
+        return
+
+    if action == "disable":
+        result = router_install.disable()
+        if args.json:
+            _json_out({
+                "action": result.action,
+                "settings_path": str(result.settings_path),
+                "removed_allows": result.removed_allows,
+                "env_flag_cleared": result.env_flag_cleared,
+                "backed_up": str(result.backed_up) if result.backed_up else None,
+                "enforce_turned_off": result.enforce_turned_off,
+            })
+            return
+        if result.action == "already_disabled":
+            print("  Router was not enabled.")
+        else:
+            print(f"  Router disabled → {result.settings_path}")
+            if result.removed_allows:
+                print(f"  Removed: {', '.join(result.removed_allows)}")
+            if result.enforce_turned_off:
+                print("  Enforcement OFF (flag file removed)")
+            if result.backed_up:
+                print(f"  Backup: {result.backed_up}")
+        return
+
+    if action == "status":
+        s = router_install.status()
+        if args.json:
+            _json_out({
+                "enabled": s.enabled,
+                "settings_path": str(s.settings_path),
+                "allowed_tools": s.allowed_tools,
+                "env_flag": s.env_flag,
+                "managed": s.managed,
+            })
+            return
+        print(f"  Enabled:   {s.enabled}")
+        print(f"  Settings:  {s.settings_path}")
+        print(f"  Allowed:   {', '.join(s.allowed_tools) or '(none)'}")
+        print(f"  DHEE_ROUTER: {s.env_flag or '(unset)'}")
+        return
+
+    if action == "enforce":
+        sub = getattr(args, "enforce_action", None)
+        from dhee.router.pre_tool_gate import _flag_file
+        flag = _flag_file()
+        if sub == "on":
+            flag.parent.mkdir(parents=True, exist_ok=True)
+            flag.write_text("1\n", encoding="utf-8")
+            if args.json:
+                _json_out({"enforce": True, "flag_file": str(flag)})
+            else:
+                print(f"  Enforcement ON → {flag}")
+                print("  Native Read/Bash on large files/heavy commands will be denied.")
+                print("  Restart Claude Code for changes to take effect.")
+                print("  Turn off: dhee router enforce off")
+            return
+        if sub == "off":
+            existed = flag.exists()
+            if existed:
+                flag.unlink()
+            if args.json:
+                _json_out({"enforce": False, "was_on": existed})
+            else:
+                print(f"  Enforcement OFF{' (was on)' if existed else ' (was already off)'}")
+            return
+        # status (no subcommand)
+        on = flag.exists()
+        if args.json:
+            _json_out({"enforce": on, "flag_file": str(flag)})
+        else:
+            print(f"  Enforcement: {'ON' if on else 'off'} ({flag})")
+        return
+
+    if action == "stats":
+        computed = router_stats.compute_stats()
+        if args.json:
+            _json_out(computed.to_dict())
+            return
+        print(router_stats.format_human(computed))
+        return
+
+    if action == "tune":
+        from dhee.router import policy as _policy
+        from dhee.router import tune as _tune
+
+        sub = getattr(args, "enforce_action", None)  # reuses the 2nd positional slot
+        report = _tune.build_report()
+        if sub == "apply":
+            n = _tune.apply(report)
+            if args.json:
+                _json_out({"applied": n, "report": report.to_dict()})
+                return
+            print(_tune.format_human(report))
+            print("")
+            print(f"  applied {n} suggestion(s) → {_policy._policy_path()}")
+            return
+        if sub == "clear":
+            n = _policy.clear()
+            if args.json:
+                _json_out({"cleared": n})
+                return
+            print(f"  cleared {n} policy entries")
+            return
+        # default: suggest
+        if args.json:
+            _json_out(report.to_dict())
+            return
+        print(_tune.format_human(report))
+        return
+
+    if action == "report":
+        from dhee.router import quality_report
+
+        report = quality_report.build_report(
+            limit=getattr(args, "limit", 0) or 0,
+        )
+        out_path = quality_report.save_report(report)
+        if args.json:
+            _json_out(report.to_dict())
+            return
+        if getattr(args, "share", False):
+            from pathlib import Path as _Path
+
+            share_md = quality_report.format_share(report)
+            share_path = _Path.home() / ".dhee" / "session_quality_report.md"
+            share_path.parent.mkdir(parents=True, exist_ok=True)
+            share_path.write_text(share_md + "\n", encoding="utf-8")
+            print(share_md)
+            print("")
+            print(f"  share-ready markdown → {share_path}")
+            return
+        print(quality_report.format_human(report))
+        print("")
+        print(f"  report saved → {out_path}")
+        return
+
+    # default: print subcommand help
+    print("Usage: dhee router {enable|disable|status|stats|enforce|report}")
 
 
 def cmd_benchmark(args: argparse.Namespace) -> None:
@@ -602,9 +812,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_task.add_argument("--user-id", default="default", help="User ID")
     p_task.add_argument("--print", dest="print_mode", action="store_true", help="One-shot mode")
 
-    # install (hooks)
-    p_install = sub.add_parser("install", help="Install Dhee hooks into Claude Code")
+    # install (full bootstrap: hooks + MCP + router)
+    p_install = sub.add_parser(
+        "install",
+        help="Full Claude Code bootstrap: hooks + MCP + router (everything on)",
+    )
     p_install.add_argument("--force", action="store_true", help="Overwrite existing hooks")
+    p_install.add_argument("--hooks-only", action="store_true", help="Only install hooks (legacy)")
+    p_install.add_argument("--no-router", action="store_true", help="Install hooks + MCP, skip router")
+    p_install.add_argument("--no-mcp", action="store_true", help="Skip MCP registration")
 
     # uninstall-hooks
     sub.add_parser("uninstall-hooks", help="Remove Dhee hooks from Claude Code")
@@ -627,6 +843,24 @@ def build_parser() -> argparse.ArgumentParser:
     # docs
     p_docs = sub.add_parser("docs", help="Show ingested doc manifest")
     p_docs.add_argument("--json", action="store_true", help="JSON output")
+
+    # router
+    p_router = sub.add_parser("router", help="Context router (enable/disable/stats)")
+    p_router.add_argument(
+        "router_action",
+        nargs="?",
+        choices=["enable", "disable", "status", "stats", "enforce", "report", "tune"],
+        help="Subcommand",
+    )
+    p_router.add_argument(
+        "enforce_action",
+        nargs="?",
+        choices=["on", "off", "apply", "clear"],
+        help="For `router enforce`: on|off  |  For `router tune`: apply|clear (omit to dry-run)",
+    )
+    p_router.add_argument("--limit", type=int, default=0, help="For `router report`: replay only N most-recent sessions (0 = all)")
+    p_router.add_argument("--share", action="store_true", help="For `router report`: emit customer-shareable redacted Markdown")
+    p_router.add_argument("--json", action="store_true", help="JSON output")
 
     # benchmark
     sub.add_parser("benchmark", help="Run performance benchmarks")
@@ -657,6 +891,7 @@ COMMAND_MAP = {
     "install": cmd_install_hooks,
     "uninstall-hooks": cmd_uninstall_hooks,
     "purge-legacy-noise": cmd_purge_legacy_noise,
+    "router": cmd_router,
     "benchmark": cmd_benchmark,
     "uninstall": cmd_uninstall,
 }

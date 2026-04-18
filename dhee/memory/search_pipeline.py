@@ -98,6 +98,10 @@ class SearchPipeline:
     def _parallel_config(self):
         return getattr(self._config, "parallel", None)
 
+    @property
+    def _resolver_boost_config(self):
+        return getattr(self._config, "resolver_boost", None)
+
     # -- Main search ----------------------------------------------------------
 
     def search(
@@ -236,6 +240,39 @@ class SearchPipeline:
         vr_by_id = {resolve_memory_id(vr): vr for vr in vector_results}
         memories_bulk = self._db.get_memories_bulk(candidate_ids)
 
+        # Fact-level supersede signal: the ContextResolver already stamps
+        # valid_until on superseded single-valued facts at write time
+        # (core/resolvers.py store_engram). Here we (a) batch-fetch each
+        # candidate's active vs superseded fact counts and (b) boost candidates
+        # that ground the resolver's deterministic answer. No short-circuit —
+        # vector search still runs; this only reshapes rank.
+        resolver_config = self._resolver_boost_config
+        boost_enabled = bool(resolver_config and resolver_config.enable_resolver_boost)
+        emit_fact_status = bool(resolver_config and resolver_config.emit_fact_status)
+        resolver_grounded_ids: Set[str] = set()
+        resolver_intent: Optional[str] = None
+        resolver_predicate: Optional[str] = None
+        fact_status_by_id: Dict[str, Dict[str, int]] = {}
+        if resolver_result is not None:
+            resolver_grounded_ids = set(resolver_result.grounded_memory_ids())
+            resolver_intent = getattr(resolver_result, "resolver_path", None) or None
+            resolver_facts = getattr(resolver_result, "facts", None) or []
+            if resolver_facts and isinstance(resolver_facts[0], dict):
+                resolver_predicate = resolver_facts[0].get("predicate") or None
+        if context_resolver and (boost_enabled or emit_fact_status) and candidate_ids:
+            try:
+                fact_status_by_id = context_resolver.get_fact_status(
+                    candidate_ids,
+                    user_id=user_id,
+                )
+            except Exception as e:
+                logger.debug("fact status fetch skipped: %s", e)
+                fact_status_by_id = {}
+        resolver_boost_weight = float(resolver_config.resolver_boost_weight) if resolver_config else 0.0
+        resolver_grounded_missing = [
+            mid for mid in resolver_grounded_ids if mid and mid not in set(candidate_ids)
+        ]
+
         results: List[Dict[str, Any]] = []
         access_ids: List[str] = []
         strength_updates: Dict[str, float] = {}
@@ -366,6 +403,18 @@ class SearchPipeline:
                     salience_boost = float(sal_score) * self._config.salience.salience_boost_weight
                     combined = combined * (1 + salience_boost)
 
+            # Resolver boost: memories that ground the deterministic resolver's
+            # fact-level answer (honoring engram_facts.valid_until supersede)
+            # get a composite-score multiplier. Neutral for memories with no
+            # fact grounding; positive-only — never demotes on its own.
+            resolver_boost = 0.0
+            resolver_boost_applied = False
+            fact_status = fact_status_by_id.get(memory_id, {"active": 0, "superseded": 0})
+            if boost_enabled and memory_id in resolver_grounded_ids:
+                resolver_boost = resolver_boost_weight
+                combined = combined * (1 + resolver_boost)
+                resolver_boost_applied = True
+
             if boost_on_access:
                 access_ids.append(memory["id"])
                 if self._fade_config.access_strength_boost > 0:
@@ -423,6 +472,13 @@ class SearchPipeline:
                     "proc_boost": proc_boost,
                     "salience_boost": salience_boost,
                     "temporal_boost": temporal_boost,
+                    "resolver_boost": resolver_boost,
+                    "resolver_boost_applied": resolver_boost_applied,
+                    "fact_active_count": fact_status["active"],
+                    "fact_superseded_count": fact_status["superseded"],
+                    "resolver_intent": resolver_intent,
+                    "resolver_predicate": resolver_predicate,
+                    "resolver_grounded_missing_count": len(resolver_grounded_missing),
                     "memory_type": mem_type,
                     "query_intent": query_intent.value if query_intent else None,
                     "confidence": metadata.get("mm_confidence"),
@@ -473,9 +529,9 @@ class SearchPipeline:
                 if passage_strategy not in {"full", "snippet", "vector_text"}:
                     passage_strategy = "full"
                 try:
-                    max_passage_chars = int(rerank_opts.get("max_passage_chars", 3500))
+                    max_passage_chars = int(rerank_opts.get("max_passage_chars", 32000))
                 except (TypeError, ValueError):
-                    max_passage_chars = 3500
+                    max_passage_chars = 32000
                 max_passage_chars = max(1, max_passage_chars)
                 try:
                     context_lines = int(rerank_opts.get("context_lines", 1))
