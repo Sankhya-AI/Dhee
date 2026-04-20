@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 
 from .sqlite_analytics import SQLiteAnalyticsMixin
+from .sqlite_artifacts import SQLiteArtifactMixin
 from .sqlite_common import (
     VALID_MEMORY_COLUMNS,
     VALID_PROFILE_COLUMNS,
@@ -195,7 +196,7 @@ class CoreSQLiteManager(_SQLiteBase):
         )
 
     # Core memory operations
-    def add_memory(self, memory_data: Dict[str, Any]) -> str:
+    def add_memory(self, memory_data: Dict[str, Any], *, log_history: bool = True) -> str:
         memory_id = memory_data.get("id", str(uuid.uuid4()))
         now = _utcnow_iso()
         metadata = memory_data.get("metadata", {}) or {}
@@ -236,15 +237,16 @@ class CoreSQLiteManager(_SQLiteBase):
                 ),
             )
             # Log the add event
-            conn.execute(
-                """
-                INSERT INTO memory_history (
-                    memory_id, event, old_value, new_value,
-                    old_strength, new_strength, old_layer, new_layer
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (memory_id, "ADD", None, memory_data.get("memory"), None, None, None, None),
-            )
+            if log_history:
+                conn.execute(
+                    """
+                    INSERT INTO memory_history (
+                        memory_id, event, old_value, new_value,
+                        old_strength, new_strength, old_layer, new_layer
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (memory_id, "ADD", None, memory_data.get("memory"), None, None, None, None),
+                )
         return memory_id
 
     def get_memory(self, memory_id: str, include_tombstoned: bool = False) -> Optional[Dict[str, Any]]:
@@ -517,7 +519,12 @@ class CoreSQLiteManager(_SQLiteBase):
             return count
 
 
-class FullSQLiteManager(SQLiteAnalyticsMixin, SQLiteDomainMixin, CoreSQLiteManager):
+class FullSQLiteManager(
+    SQLiteAnalyticsMixin,
+    SQLiteArtifactMixin,
+    SQLiteDomainMixin,
+    CoreSQLiteManager,
+):
     def __repr__(self) -> str:
         return f"SQLiteManager(db_path={self.db_path!r})"
 
@@ -723,7 +730,17 @@ class FullSQLiteManager(SQLiteAnalyticsMixin, SQLiteDomainMixin, CoreSQLiteManag
             self._ensure_episodic_tables(conn)
             self._ensure_episodic_v2_columns(conn)
             self._ensure_cost_counter_tables(conn)
+            self._ensure_entity_aggregates_table(conn)
             self._ensure_v3_universal_engram(conn)
+            self._ensure_engram_fact_tiering(conn)
+            self._ensure_engram_preferences(conn)
+            self._ensure_engram_verification(conn)
+            self._ensure_engram_cold_archive(conn)
+            self._ensure_artifact_tables(conn)
+            self._ensure_harness_stream_tables(conn)
+            self._ensure_shared_task_tables(conn)
+            self._ensure_thread_state_table(conn)
+            self._ensure_route_decision_tables(conn)
             return
 
         # v2 columns on existing canonical tables.
@@ -834,6 +851,187 @@ class FullSQLiteManager(SQLiteAnalyticsMixin, SQLiteDomainMixin, CoreSQLiteManag
         self._ensure_cost_counter_tables(conn)
         self._ensure_entity_aggregates_table(conn)
         self._ensure_v3_universal_engram(conn)
+        self._ensure_engram_fact_tiering(conn)
+        self._ensure_engram_preferences(conn)
+        self._ensure_engram_verification(conn)
+        self._ensure_engram_cold_archive(conn)
+        self._ensure_artifact_tables(conn)
+        self._ensure_harness_stream_tables(conn)
+        self._ensure_shared_task_tables(conn)
+        self._ensure_thread_state_table(conn)
+        self._ensure_route_decision_tables(conn)
+
+    def _ensure_engram_verification(self, conn: sqlite3.Connection) -> None:
+        """M3 Epistemic Control Loop — ``last_verified_at`` on facts + prefs.
+
+        Distinct from ``last_reaffirmed_at``: verification means the fact
+        was cited by a policy / context bundle and the downstream task
+        ran without user correction. It is the "still true as of T" signal.
+        Reaffirmation is "user restated this"; verification is "world
+        didn't push back". Agents use it to decide whether to epistemically
+        re-check a load-bearing fact before acting on it.
+        """
+        if self._is_migration_applied(conn, "v4_engram_verification"):
+            return
+        for table in ("engram_facts", "engram_preferences"):
+            try:
+                conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN last_verified_at REAL"
+                )
+            except sqlite3.OperationalError:
+                pass
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version) VALUES "
+            "('v4_engram_verification')"
+        )
+
+    def _ensure_engram_cold_archive(self, conn: sqlite3.Connection) -> None:
+        """Cold-archive tables for lineage-preserving forgetting.
+
+        Movement 3 forgetting never deletes — it moves the row into an
+        archive table so ``dhee_why`` / lineage queries can still surface
+        it on demand. A JSON blob holds the original row verbatim so
+        future schema changes on the live table don't break the archive.
+        """
+        if self._is_migration_applied(conn, "v4_engram_cold_archive"):
+            return
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS engram_fact_archive (
+                id TEXT PRIMARY KEY,
+                canonical_key TEXT,
+                memory_id TEXT,
+                subject TEXT,
+                predicate TEXT,
+                value TEXT,
+                payload TEXT NOT NULL,
+                archived_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                reason TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_efa_canonical
+                ON engram_fact_archive(canonical_key);
+            CREATE INDEX IF NOT EXISTS idx_efa_subject_predicate
+                ON engram_fact_archive(subject, predicate);
+
+            CREATE TABLE IF NOT EXISTS engram_preference_archive (
+                id TEXT PRIMARY KEY,
+                canonical_key TEXT,
+                memory_id TEXT,
+                user_id TEXT,
+                subject TEXT,
+                topic TEXT,
+                value TEXT,
+                payload TEXT NOT NULL,
+                archived_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                reason TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_epa_canonical
+                ON engram_preference_archive(canonical_key);
+            CREATE INDEX IF NOT EXISTS idx_epa_subject_topic
+                ON engram_preference_archive(subject, topic);
+            """
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version) VALUES "
+            "('v4_engram_cold_archive')"
+        )
+
+    def _ensure_engram_preferences(self, conn: sqlite3.Connection) -> None:
+        """First-class preference store.
+
+        Preferences aren't just facts — they carry stance (like/dislike/
+        neutral), decay differently, and survive supersede as a lineage
+        chain rather than as simple overwrite. The same tier vocabulary
+        used for facts applies here.
+        """
+        if self._is_migration_applied(conn, "v4_engram_preferences"):
+            return
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS engram_preferences (
+                id TEXT PRIMARY KEY,
+                memory_id TEXT NOT NULL REFERENCES memories(id),
+                user_id TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                topic TEXT NOT NULL,
+                stance TEXT NOT NULL,
+                value TEXT,
+                canonical_key TEXT NOT NULL,
+                confidence REAL DEFAULT 1.0,
+                tier TEXT DEFAULT 'medium',
+                superseded_by_id TEXT,
+                reaffirmed_count INTEGER DEFAULT 0,
+                last_reaffirmed_at REAL,
+                valid_from TEXT,
+                valid_until TEXT,
+                schema_v INTEGER DEFAULT 1,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_ep_user_canonical
+                ON engram_preferences(user_id, canonical_key);
+            CREATE INDEX IF NOT EXISTS idx_ep_subject_topic
+                ON engram_preferences(subject, topic);
+            CREATE INDEX IF NOT EXISTS idx_ep_tier
+                ON engram_preferences(tier);
+            CREATE INDEX IF NOT EXISTS idx_ep_superseded
+                ON engram_preferences(superseded_by_id);
+            CREATE INDEX IF NOT EXISTS idx_ep_active_canonical
+                ON engram_preferences(canonical_key)
+                WHERE superseded_by_id IS NULL;
+            CREATE INDEX IF NOT EXISTS idx_ep_memory
+                ON engram_preferences(memory_id);
+            """
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version) VALUES "
+            "('v4_engram_preferences')"
+        )
+
+    def _ensure_engram_fact_tiering(self, conn: sqlite3.Connection) -> None:
+        """Add M2 tiering + supersede + reaffirmation columns to engram_facts.
+
+        SQLite ``ALTER TABLE ADD COLUMN`` cannot attach a ``CHECK`` constraint
+        on an existing table, so tier values are validated at the write-path
+        layer (see dhee/core/resolvers.py). All columns are nullable-safe
+        with sane defaults so existing rows upgrade cleanly.
+        """
+        if self._is_migration_applied(conn, "v4_engram_fact_tiering"):
+            return
+
+        additions = (
+            ("tier", "TEXT DEFAULT 'medium'"),
+            ("superseded_by_id", "TEXT"),
+            ("reaffirmed_count", "INTEGER DEFAULT 0"),
+            ("last_reaffirmed_at", "REAL"),
+            ("schema_v", "INTEGER DEFAULT 1"),
+        )
+        for col, col_type in additions:
+            try:
+                conn.execute(
+                    f"ALTER TABLE engram_facts ADD COLUMN {col} {col_type}"
+                )
+            except sqlite3.OperationalError:
+                pass
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ef_tier ON engram_facts(tier)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ef_superseded "
+            "ON engram_facts(superseded_by_id)"
+        )
+        # Active rows are the overwhelming majority of reads; index them for
+        # the "return current, expose chain on demand" retrieval pattern.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ef_active_canonical "
+            "ON engram_facts(canonical_key) "
+            "WHERE superseded_by_id IS NULL"
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version) VALUES "
+            "('v4_engram_fact_tiering')"
+        )
 
     def _ensure_deferred_enrichment_columns(self, conn: sqlite3.Connection) -> None:
         """Add conversation_context and enrichment_status columns for deferred enrichment."""
@@ -1158,7 +1356,7 @@ class FullSQLiteManager(SQLiteAnalyticsMixin, SQLiteDomainMixin, CoreSQLiteManag
             "INSERT OR IGNORE INTO schema_migrations (version) VALUES ('v2_cls_columns_complete')"
         )
 
-    def add_memory(self, memory_data: Dict[str, Any]) -> str:
+    def add_memory(self, memory_data: Dict[str, Any], *, log_history: bool = True) -> str:
         memory_id = memory_data.get("id", str(uuid.uuid4()))
         now = _utcnow_iso()
         metadata = memory_data.get("metadata", {}) or {}
@@ -1219,15 +1417,16 @@ class FullSQLiteManager(SQLiteAnalyticsMixin, SQLiteDomainMixin, CoreSQLiteManag
             )
 
             # Log within the same transaction -- atomic with the insert.
-            conn.execute(
-                """
-                INSERT INTO memory_history (
-                    memory_id, event, old_value, new_value,
-                    old_strength, new_strength, old_layer, new_layer
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (memory_id, "ADD", None, memory_data.get("memory"), None, None, None, None),
-            )
+            if log_history:
+                conn.execute(
+                    """
+                    INSERT INTO memory_history (
+                        memory_id, event, old_value, new_value,
+                        old_strength, new_strength, old_layer, new_layer
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (memory_id, "ADD", None, memory_data.get("memory"), None, None, None, None),
+                )
 
         return memory_id
 

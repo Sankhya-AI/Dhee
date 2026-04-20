@@ -1,22 +1,27 @@
-"""MetaBuddhi — the improvement procedure that improves itself.
+"""MetaBuddhi — proposal machinery for self-referential strategy updates.
 
-Based on Meta's DGM-Hyperagents (arXiv:2603.19461): self-referential
-meta-agents that modify their own improvement procedure.
+Native to Dhee (no opt-in flag). Today the module:
 
-The DGM-H insight: the agent doesn't just improve at tasks — it improves
-at improving. The meta-level feedback loop:
+  - Proposes candidate strategy deltas with lineage (``ImprovementAttempt``
+    records are persisted as versioned JSON, diffable, rollback-safe).
+  - Scores candidates against EMA-smoothed samskara signals when available.
+  - Skips promotion unless ``_MIN_EVAL_COUNT`` and ``_PROMOTION_THRESHOLD``
+    are met (fail-safe default).
 
+What closes the loop in the next release (Movement 4 of the public plan):
+
+  - Replay-based assessment of each candidate against recorded sessions
+    in ``~/.claude/projects/…``.
+  - Automatic commit/rollback driven by the replay outcome.
+  - Group-relative confidence updates (Dr.RTL-style) when multiple
+    candidates fire on the same task type.
+
+Meta DGM-Hyperagents framing (arXiv:2603.19461):
   1. MetaBuddhi proposes a strategy change (e.g., increase keyword_weight)
-  2. The system runs with the new strategy for N interactions
-  3. Samskara signals measure whether retrieval/answer quality improved
-  4. If improved → promote the strategy. If degraded → rollback.
+  2. The candidate is assessed against recorded sessions
+  3. Samskara-derived signals measure whether retrieval quality improved
+  4. If improved → promote with lineage. If degraded → rollback.
   5. The RULES for proposing changes are themselves updated by outcomes.
-
-This is the self-referential loop: MetaBuddhi modifies the weights
-that Buddhi uses, and the results modify how MetaBuddhi proposes changes.
-
-Strategies are stored as versioned JSON files — fully inspectable,
-diffable, and rollback-safe.
 """
 
 from __future__ import annotations
@@ -50,6 +55,13 @@ _TUNABLE_FIELDS = {
 _MIN_EVAL_COUNT = 5
 # Minimum improvement to justify promotion
 _PROMOTION_THRESHOLD = 0.03
+# M4.2b: per-task-type "don't let one group tank" guardrail. If any single
+# task-type group regresses by this much vs. the parent baseline, the
+# candidate is rolled back even if the aggregated delta looks positive.
+_GROUP_CATASTROPHE_THRESHOLD = 0.06
+# M4.2b: minimum samples per group before we trust its delta. Below this,
+# the group contributes only to the rolling baseline, not to the decision.
+_MIN_GROUP_SAMPLES = 2
 
 
 @dataclass
@@ -67,6 +79,16 @@ class ImprovementAttempt:
     status: str = "evaluating"           # evaluating | promoted | rolled_back | abandoned
     eval_scores: List[float] = field(default_factory=list)
     resolved_at: Optional[float] = None
+    # M4.2b: per-sample task_type tags (one dict per eval call).
+    # Kept alongside eval_scores so legacy untagged attempts still load.
+    eval_samples: List[Dict[str, Any]] = field(default_factory=list)
+    # M4.2b: snapshot of the parent strategy's per-task-type baseline at
+    # propose time, so the resolution delta is computed against what the
+    # parent actually scored on the SAME task types the candidate saw.
+    parent_baseline_by_task: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    # M4.2b: populated at resolve time — per-task-type candidate delta
+    # vs. parent baseline; surfaced via get_stats() for debuggability.
+    group_deltas: Dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -80,6 +102,9 @@ class ImprovementAttempt:
             "proposed_at": self.proposed_at,
             "status": self.status,
             "eval_scores": self.eval_scores[-20:],
+            "eval_samples": self.eval_samples[-20:],
+            "parent_baseline_by_task": dict(self.parent_baseline_by_task),
+            "group_deltas": dict(self.group_deltas),
             "resolved_at": self.resolved_at,
         }
 
@@ -111,7 +136,13 @@ class MetaBuddhi:
         )
         self._attempts: Dict[str, ImprovementAttempt] = {}
         self._pending_attempt: Optional[str] = None
+        # M4.2b: per-task-type rolling baseline. Updated on every
+        # record_evaluation call — even when no attempt is pending — so
+        # the next proposal has a fresh parent baseline to snapshot.
+        # Shape: {task_type: {"mean": float, "n": int, "last_updated": float}}
+        self._group_stats: Dict[str, Dict[str, Any]] = {}
         self._load_attempts()
+        self._load_group_stats()
 
     @property
     def strategy_store(self) -> StrategyStore:
@@ -196,6 +227,14 @@ class MetaBuddhi:
             rationale=rationale,
             proposed_at=time.time(),
         )
+        # M4.2b: snapshot parent's per-task-type baseline right now, so
+        # resolution compares apples-to-apples per task type.
+        attempt.parent_baseline_by_task = {
+            t: {"mean": float(stat["mean"]), "n": int(stat["n"])}
+            for t, stat in self._group_stats.items()
+            if int(stat.get("n", 0)) >= _MIN_GROUP_SAMPLES
+        }
+
         self._attempts[attempt.id] = attempt
         self._pending_attempt = attempt.id
         self._save_attempts()
@@ -210,13 +249,30 @@ class MetaBuddhi:
     # Evaluate
     # ------------------------------------------------------------------
 
-    def record_evaluation(self, score: float) -> Optional[str]:
+    def record_evaluation(
+        self,
+        score: float,
+        *,
+        task_type: Optional[str] = None,
+    ) -> Optional[str]:
         """Record an evaluation score for the pending improvement.
 
-        Call this after each interaction while a candidate is being evaluated.
+        Call this after each interaction while a candidate is being
+        evaluated. The optional ``task_type`` tag enables group-relative
+        resolution (M4.2b): the candidate's per-group delta is compared
+        against the parent's per-group baseline, so a +0.03 lift on an
+        easy task type no longer drowns out a −0.10 regression on a
+        hard one.
+
         Returns the resolution status if the attempt has been resolved,
         or None if still evaluating.
         """
+        # Always update the rolling per-task-type baseline, even when no
+        # attempt is pending. This is what the NEXT proposal will
+        # snapshot as the parent baseline.
+        if task_type:
+            self._update_group_stat(task_type, score)
+
         if not self._pending_attempt:
             return None
 
@@ -225,6 +281,11 @@ class MetaBuddhi:
             return None
 
         attempt.eval_scores.append(score)
+        attempt.eval_samples.append({
+            "score": float(score),
+            "task_type": task_type,
+            "ts": time.time(),
+        })
 
         # Also track on the candidate strategy
         candidate = self._store.get(attempt.strategy_id)
@@ -240,38 +301,134 @@ class MetaBuddhi:
         self._save_attempts()
         return None
 
+    def _update_group_stat(self, task_type: str, score: float) -> None:
+        """Incremental mean update for the per-task-type baseline.
+
+        Welford-style running mean to avoid ever-growing score buffers.
+        """
+        stat = self._group_stats.get(task_type)
+        if stat is None:
+            self._group_stats[task_type] = {
+                "mean": float(score),
+                "n": 1,
+                "last_updated": time.time(),
+            }
+            self._save_group_stats()
+            return
+        n = int(stat.get("n", 0)) + 1
+        mean = float(stat.get("mean", 0.0))
+        mean += (float(score) - mean) / n
+        stat["mean"] = mean
+        stat["n"] = n
+        stat["last_updated"] = time.time()
+        self._save_group_stats()
+
     def _resolve_attempt(self, attempt: ImprovementAttempt) -> str:
-        """Judge whether the improvement helped."""
+        """Judge whether the improvement helped.
+
+        Resolution is group-relative when the candidate's eval_samples
+        carry task_type tags (M4.2b). A candidate is promoted iff:
+
+          * the aggregated per-group delta (weighted by min(n_cand, n_parent)
+            per group) meets ``_PROMOTION_THRESHOLD``, AND
+          * no single group regresses by more than
+            ``_GROUP_CATASTROPHE_THRESHOLD`` — an easy group cannot drown
+            out a hard-group regression.
+
+        If no tagged samples exist, we fall back to the original
+        global delta so existing call sites keep working.
+        """
+        delta, group_deltas, basis = self._compute_delta(attempt)
+        attempt.group_deltas = group_deltas
+
+        catastrophic_group = None
+        for t, d in group_deltas.items():
+            if d <= -_GROUP_CATASTROPHE_THRESHOLD:
+                catastrophic_group = (t, d)
+                break
+
+        promote = (
+            delta >= _PROMOTION_THRESHOLD
+            and catastrophic_group is None
+        )
+
+        if promote:
+            self._store.promote(attempt.strategy_id)
+            attempt.status = "promoted"
+            logger.info(
+                "MetaBuddhi promoted strategy: %s (delta=+%.3f basis=%s groups=%s)",
+                attempt.dimension, delta, basis, group_deltas,
+            )
+        else:
+            self._store.rollback(attempt.strategy_id)
+            attempt.status = "rolled_back"
+            if catastrophic_group is not None:
+                logger.info(
+                    "MetaBuddhi rolled back: %s (delta=%.3f basis=%s) — "
+                    "catastrophic group regression: %s=%.3f",
+                    attempt.dimension, delta, basis,
+                    catastrophic_group[0], catastrophic_group[1],
+                )
+            else:
+                logger.info(
+                    "MetaBuddhi rolled back: %s (delta=%.3f basis=%s groups=%s)",
+                    attempt.dimension, delta, basis, group_deltas,
+                )
+
+        attempt.resolved_at = time.time()
+        self._pending_attempt = None
+        self._save_attempts()
+        return attempt.status
+
+    def _compute_delta(
+        self, attempt: ImprovementAttempt
+    ) -> Tuple[float, Dict[str, float], str]:
+        """Return (aggregated_delta, per_group_deltas, basis).
+
+        ``basis`` is ``"group_relative"`` when the candidate's eval_samples
+        are tagged with task_type AND at least one group matches the
+        parent's baseline snapshot. Otherwise it falls back to
+        ``"global"`` (original behavior).
+        """
+        candidate_by_group: Dict[str, List[float]] = {}
+        for sample in attempt.eval_samples:
+            t = sample.get("task_type")
+            if not t:
+                continue
+            candidate_by_group.setdefault(t, []).append(float(sample["score"]))
+
+        parent_baseline = attempt.parent_baseline_by_task or {}
+
+        shared_groups = [
+            t for t, scores in candidate_by_group.items()
+            if len(scores) >= _MIN_GROUP_SAMPLES and t in parent_baseline
+        ]
+
+        if shared_groups:
+            group_deltas: Dict[str, float] = {}
+            weighted_sum = 0.0
+            total_weight = 0.0
+            for t in shared_groups:
+                cand_scores = candidate_by_group[t]
+                cand_mean = sum(cand_scores) / len(cand_scores)
+                parent_mean = float(parent_baseline[t]["mean"])
+                parent_n = int(parent_baseline[t]["n"])
+                weight = float(min(len(cand_scores), parent_n))
+                d = cand_mean - parent_mean
+                group_deltas[t] = d
+                weighted_sum += d * weight
+                total_weight += weight
+            aggregated = weighted_sum / total_weight if total_weight > 0 else 0.0
+            return aggregated, group_deltas, "group_relative"
+
+        # Fallback: global delta (original behavior)
         parent = self._store.get(attempt.parent_strategy_id)
         parent_avg = parent.avg_score if parent and parent.eval_scores else 0.5
         candidate_avg = (
             sum(attempt.eval_scores) / len(attempt.eval_scores)
             if attempt.eval_scores else 0.0
         )
-
-        delta = candidate_avg - parent_avg
-
-        if delta >= _PROMOTION_THRESHOLD:
-            # Improvement confirmed — promote
-            self._store.promote(attempt.strategy_id)
-            attempt.status = "promoted"
-            logger.info(
-                "MetaBuddhi promoted strategy: %s (delta=+%.3f)",
-                attempt.dimension, delta,
-            )
-        else:
-            # No improvement or regression — rollback
-            self._store.rollback(attempt.strategy_id)
-            attempt.status = "rolled_back"
-            logger.info(
-                "MetaBuddhi rolled back: %s (delta=%.3f)",
-                attempt.dimension, delta,
-            )
-
-        attempt.resolved_at = time.time()
-        self._pending_attempt = None
-        self._save_attempts()
-        return attempt.status
+        return candidate_avg - parent_avg, {}, "global"
 
     # ------------------------------------------------------------------
     # Dimension selection (the meta-meta level)
@@ -380,6 +537,11 @@ class MetaBuddhi:
                 1 for a in self._attempts.values() if a.status == "rolled_back"
             ),
             "strategies_total": len(self._store.list_all()),
+            # M4.2b surface — per-task-type rolling baselines.
+            "group_baselines": {
+                t: {"mean": float(s.get("mean", 0.0)), "n": int(s.get("n", 0))}
+                for t, s in self._group_stats.items()
+            },
         }
 
     # ------------------------------------------------------------------
@@ -424,9 +586,48 @@ class MetaBuddhi:
                             status=data.get("status", "evaluating"),
                             eval_scores=data.get("eval_scores", []),
                             resolved_at=data.get("resolved_at"),
+                            eval_samples=data.get("eval_samples", []),
+                            parent_baseline_by_task=data.get(
+                                "parent_baseline_by_task", {}
+                            ),
+                            group_deltas=data.get("group_deltas", {}),
                         )
                         self._attempts[attempt.id] = attempt
                     except (KeyError, TypeError):
                         continue
         except (OSError, json.JSONDecodeError) as e:
             logger.debug("Failed to load attempts: %s", e)
+
+    # ------------------------------------------------------------------
+    # M4.2b: group-baseline persistence
+    # ------------------------------------------------------------------
+
+    def _group_stats_path(self) -> str:
+        return os.path.join(self._dir, "group_stats.json")
+
+    def _save_group_stats(self) -> None:
+        try:
+            with open(self._group_stats_path(), "w", encoding="utf-8") as f:
+                json.dump(self._group_stats, f, ensure_ascii=False)
+        except OSError as e:
+            logger.debug("Failed to save group stats: %s", e)
+
+    def _load_group_stats(self) -> None:
+        path = self._group_stats_path()
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                self._group_stats = {
+                    str(k): {
+                        "mean": float(v.get("mean", 0.0)),
+                        "n": int(v.get("n", 0)),
+                        "last_updated": float(v.get("last_updated", 0.0)),
+                    }
+                    for k, v in data.items()
+                    if isinstance(v, dict)
+                }
+        except (OSError, json.JSONDecodeError, ValueError, TypeError) as e:
+            logger.debug("Failed to load group stats: %s", e)

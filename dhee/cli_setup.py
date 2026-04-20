@@ -2,16 +2,14 @@
 
 import logging
 import os
-import sys
 
 from dhee.cli_config import (
     CONFIG_DIR,
     PROVIDER_DEFAULTS,
-    get_default_config,
     load_config,
     save_config,
 )
-from dhee.cli_mcp import configure_mcp_servers, detect_agents
+from dhee.harness.install import install_harnesses
 from dhee.utils.factory import _detect_provider
 
 logger = logging.getLogger(__name__)
@@ -54,22 +52,18 @@ def run_setup() -> None:
     save_config(config)
     print(f"\n  Config saved to {os.path.join(CONFIG_DIR, 'config.json')}")
 
-    # Auto-configure MCP servers
-    agents = detect_agents()
-    if agents:
-        print(f"\n  Detected agents: {', '.join(agents)}")
-        print("  Configuring MCP servers...")
-        results = configure_mcp_servers(config)
-        for agent, status in results.items():
-            print(f"    {agent}: {status}")
-    else:
-        print("\n  No agents detected. MCP will configure when you install one.")
+    # Auto-configure native harnesses
+    print("\n  Configuring native harness integrations...")
+    results = install_harnesses(harness="all", enable_router=True)
+    for harness, result in results.items():
+        label = "Claude Code" if harness == "claude_code" else "Codex"
+        print(f"    {label}: {result.action}")
 
     print("\n" + "=" * 50)
     print(" Setup complete!")
     print()
     print(" Try:")
-    print('   dhee add "User prefers dark mode"')
-    print('   dhee search "preferences"')
-    print('   dhee status')
+    print("   dhee install --harness all")
+    print("   dhee harness status")
+    print("   dhee quality-report")
     print("=" * 50)

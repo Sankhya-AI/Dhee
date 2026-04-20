@@ -21,11 +21,13 @@ def router_tmp(tmp_path, monkeypatch):
     ptr_dir = tmp_path / "ptr"
     policy_path = tmp_path / "policy.json"
     flag_file = tmp_path / "enforce"
+    dhee_dir = tmp_path / "dhee"
 
     monkeypatch.setenv("DHEE_ROUTER_PTR_DIR", str(ptr_dir))
     monkeypatch.setenv("DHEE_ROUTER_POLICY", str(policy_path))
     monkeypatch.setenv("DHEE_ROUTER_ENFORCE_FILE", str(flag_file))
     monkeypatch.setenv("DHEE_ROUTER_SESSION_ID", "pytest")
+    monkeypatch.setenv("DHEE_DATA_DIR", str(dhee_dir))
     # Clear the enforce env toggle so tests use the flag file only.
     monkeypatch.delenv("DHEE_ROUTER_ENFORCE", raising=False)
     yield tmp_path
@@ -306,6 +308,36 @@ class TestHandlersRoundTrip:
         res = handlers.handle_dhee_read({"file_path": str(src), "digest_depth": "shallow"})
         meta = ptr_store.load_meta(res["ptr"])
         assert meta["depth"] == "shallow"
+
+    def test_read_records_critical_surface_decision(self, router_tmp, tmp_path):
+        from dhee.db.sqlite import SQLiteManager
+        from dhee.router import handlers
+
+        src = tmp_path / "mod.py"
+        src.write_text("def f(x):\n    return x + 1\n" * 256)
+        res = handlers.handle_dhee_read({"file_path": str(src)})
+        assert "ptr" in res
+
+        db = SQLiteManager(str((router_tmp / "dhee") / "history.db"))
+        decisions = db.list_route_decisions(user_id="default", limit=10)
+        assert decisions
+        decision = decisions[0]
+        assert decision["packet_kind"] == "routed_read"
+        assert decision["route"] == "reflect"
+        assert decision["source_event_id"] == res["ptr"]
+        assert decision["token_delta"] > 0
+        assert decision["locality_scope"] in {"folder", "workspace", "global"}
+
+    def test_quality_report_includes_critical_surface_summary(self, router_tmp, tmp_path):
+        from dhee.router import handlers, quality_report
+
+        src = tmp_path / "guide.md"
+        src.write_text(("router memory " * 200) + "\n")
+        handlers.handle_dhee_read({"file_path": str(src)})
+
+        report = quality_report.build_report(limit=0)
+        assert report.critical_surface["total_decisions"] >= 1
+        assert report.critical_surface["by_packet_kind"]["routed_read"] >= 1
 
     def test_expand_records_attribution(self, router_tmp, tmp_path):
         from dhee.router import handlers

@@ -4,6 +4,64 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [5.0.0] - 2026-04-20 — Portable Memory OS Release
+
+Native Claude Code + Codex on one shared Dhee kernel. This release turns Dhee from "memory + router for one harness" into a portable memory OS with native harness install, host-parsed artifact reuse, continuity/handoff, shared-task collaboration, and signed export/import packs.
+
+### Native harness layer
+
+- `dhee install --harness all` configures both Claude Code and Codex against the same `~/.dhee` root.
+- Claude Code remains hook-native for routing, memory updates, and context injection.
+- Codex is now first-class through native config wiring plus incremental event-stream sync, so post-tool results and host-parsed artifacts become reusable Dhee context without manual re-sync.
+- `dhee harness status|enable|disable` exposes install state and lets users turn either harness off cleanly from the CLI.
+
+### Portable packs: `.dheemem` v1
+
+- Added signed export/import packs with manifest validation.
+- Packs now carry durable memories, vector nodes, artifact manifests, artifact extractions, artifact chunks, lineage/provenance rows, and a derived `handoff.json` bootstrap snapshot.
+- Import supports `merge`, `replace`, and `dry-run`.
+- Goal: a new machine or new harness can recover the same smart agent state without re-uploading files or rebuilding reusable context from scratch.
+
+### Host-parsed artifact memory
+
+- Dhee no longer claims ownership of OCR/LLM extraction for uploads in the hot path.
+- Instead, the first successful host parse becomes the durable event: Claude Code `Read` results and Codex post-tool parse output can be stored as reusable artifact knowledge.
+- Added first-class artifact storage:
+  - `artifact_assets`
+  - `artifact_bindings`
+  - `artifact_extractions`
+  - `artifact_chunks`
+- Same artifact knowledge can now survive harness switches and portability import/export.
+
+### Continuity and collaboration
+
+- Added `thread_state` as the cheap continuity primitive for active work.
+- Added `handoff.json` as a derived, structured bootstrap artifact inside `.dheemem`.
+- Added shared-task collaboration so multiple agents on the same repo/task can reuse routed tool results and artifact knowledge instead of paying token cost repeatedly.
+- Shared-task feeds are intentionally ephemeral: durable knowledge survives, transient tool-result chatter does not.
+
+### Critical Surface Router v1
+
+- Added the first routing-intelligence substrate that records whether information was:
+  - reflected back as digest + pointer
+  - refracted into durable memory
+  - absorbed as episodic/task-local signal
+  - transmitted raw
+- Route decisions now track depth, semantic fit, structural fit, locality, confidence, and token delta.
+- Initial coverage is live for routed `Read`/`Bash`/`Grep` and artifact parse/reuse flows.
+
+### Years-of-memory substrate upgrades
+
+- Added tiering, consolidation, and verification modules for engram facts/preferences.
+- Introduced lineage/provenance read surfaces (`dhee why`, MCP `dhee_why`) so imported and artifact-derived knowledge stays inspectable.
+- Removed the old `dheeModel/` package in favor of the in-tree training/evolution direction used by the current kernel.
+
+### What I'm not claiming in this release
+
+- Codex still does not expose Claude-style live pre-tool hooks; its native path is event-stream based and post-tool, not interceptive.
+- The native harness story is real, but the architecture still has oversized composition-root files (`cli.py`, `mcp_server.py`, `sqlite.py`, `memory/main.py`) that need boundary cleanup in a follow-up pass.
+- This release ships the portability substrate and collaboration bus; the fully public replay corpus and the broader decades-portability benchmark story remain separate benchmark work.
+
 ## [4.0.0] - 2026-04-18 — Context Router Release
 
 Memory + token-saving router, one install. The router is now a first-class, in-tree feature with its own CLI surface, hooks, enforcement gate, and shareable savings report.

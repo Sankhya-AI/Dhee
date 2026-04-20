@@ -370,6 +370,64 @@ class SqliteVecStore(VectorStoreBase):
         self.delete_col()
         self._ensure_collection(self.collection_name, self.vector_size)
 
+    def export_entries(
+        self,
+        filters: Optional[Dict[str, Any]] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        self._check_open()
+        payload_table = self._payload_table(self.collection_name)
+        vec_table = self._vec_table(self.collection_name)
+        effective_limit = limit or 100000
+
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT p.uuid, p.payload, v.embedding
+                FROM [{payload_table}] p
+                JOIN [{vec_table}] v ON v.rowid = p.rowid
+                LIMIT ?
+                """,
+                (effective_limit * 3 if filters else effective_limit,),
+            ).fetchall()
+
+        entries: List[Dict[str, Any]] = []
+        for row in rows:
+            payload = {}
+            try:
+                payload = json.loads(row["payload"]) if row["payload"] else {}
+            except (json.JSONDecodeError, TypeError):
+                pass
+            if filters and not matches_filters(payload, filters):
+                continue
+            entries.append(
+                {
+                    "id": row["uuid"],
+                    "vector": _deserialize_float32(row["embedding"], self.vector_size),
+                    "payload": payload,
+                }
+            )
+            if len(entries) >= effective_limit:
+                break
+        return entries
+
+    def import_entries(self, entries: List[Dict[str, Any]]) -> int:
+        vectors: List[List[float]] = []
+        payloads: List[Dict[str, Any]] = []
+        ids: List[str] = []
+        for entry in entries:
+            vector_id = str(entry.get("id") or "").strip()
+            vector = entry.get("vector") or []
+            if not vector_id or not vector:
+                continue
+            vectors.append(list(vector))
+            payloads.append(dict(entry.get("payload") or {}))
+            ids.append(vector_id)
+        if not ids:
+            return 0
+        self.insert(vectors=vectors, payloads=payloads, ids=ids)
+        return len(ids)
+
     def _check_open(self) -> None:
         """Raise if the store has been closed."""
         if self._closed:

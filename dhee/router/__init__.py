@@ -6,6 +6,6 @@ stores the raw behind a pointer, and returns only `digest + ptr` to the
 model. The model can call `dhee_expand_result(ptr)` when the digest is
 insufficient.
 
-Phase 1 covers `dhee_read` + `dhee_expand_result`. Bash/Grep/Agent wrappers
-follow in later phases.
+Wired wrappers: `dhee_read`, `dhee_bash`, `dhee_agent`, `dhee_expand_result`.
+`dhee_grep` is planned (Movement 1) — not yet registered.
 """

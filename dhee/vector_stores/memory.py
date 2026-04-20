@@ -104,3 +104,41 @@ class InMemoryVectorStore(VectorStoreBase):
     def reset(self) -> None:
         with self._lock:
             self._store = {}
+
+    def export_entries(
+        self,
+        filters: Optional[Dict[str, Any]] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        entries: List[Dict[str, Any]] = []
+        with self._lock:
+            snapshot = list(self._store.items())
+        for vector_id, record in snapshot:
+            payload = record.get("payload", {})
+            if filters and not matches_filters(payload, filters):
+                continue
+            entries.append(
+                {
+                    "id": vector_id,
+                    "vector": list(record.get("vector", []) or []),
+                    "payload": payload,
+                }
+            )
+            if limit is not None and len(entries) >= limit:
+                break
+        return entries
+
+    def import_entries(self, entries: List[Dict[str, Any]]) -> int:
+        imported = 0
+        with self._lock:
+            for entry in entries:
+                vector_id = str(entry.get("id") or "").strip()
+                vector = entry.get("vector") or []
+                if not vector_id or not vector:
+                    continue
+                self._store[vector_id] = {
+                    "vector": list(vector),
+                    "payload": dict(entry.get("payload") or {}),
+                }
+                imported += 1
+        return imported

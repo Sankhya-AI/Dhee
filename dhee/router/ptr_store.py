@@ -23,11 +23,35 @@ _DEFAULT_DIR_ENV = "DHEE_ROUTER_PTR_DIR"
 
 
 def _session_id() -> str:
-    """Per-MCP-process session id. Stable for the life of the server."""
+    """Stable session id scoped to (project, user).
+
+    Historical behaviour keyed on ``pid{os.getpid()}``, which meant every
+    MCP restart orphaned prior pointers. This made long-lived ptrs
+    degrade silently across restarts — a user who expanded a pointer in
+    a new session would land on the reverse-mtime fallback at best, or
+    nothing at worst.
+
+    The new key is a short hash of (cwd, user). Two benefits:
+
+    - Pointers written in one MCP process are directly loadable from the
+      next — no fallback walk needed.
+    - A user running Dhee on two projects keeps their pointer caches
+      separate; ripples don't cross.
+
+    ``DHEE_ROUTER_SESSION_ID`` still overrides for tests and for users
+    who want to pin behaviour.
+    """
     env = os.environ.get("DHEE_ROUTER_SESSION_ID")
     if env:
         return env
-    return f"pid{os.getpid()}"
+    try:
+        cwd = os.getcwd()
+    except OSError:
+        cwd = ""
+    user = os.environ.get("USER") or os.environ.get("LOGNAME") or "user"
+    key = f"{user}|{cwd}"
+    digest = hashlib.sha1(key.encode("utf-8", errors="replace")).hexdigest()[:12]
+    return f"s-{digest}"
 
 
 def _root() -> Path:

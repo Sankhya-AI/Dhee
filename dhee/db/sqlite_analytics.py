@@ -10,6 +10,678 @@ from .sqlite_common import _utcnow_iso
 class SQLiteAnalyticsMixin:
     """Distillation, episodic indexing, counters, and aggregate APIs."""
 
+    def _ensure_harness_stream_tables(self, conn: sqlite3.Connection) -> None:
+        """Track incremental harness stream ingestion cursors."""
+        if self._is_migration_applied(conn, "v4_harness_stream_cursors"):
+            return
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS harness_stream_cursors (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                harness TEXT NOT NULL,
+                stream_id TEXT NOT NULL,
+                byte_offset INTEGER NOT NULL DEFAULT 0,
+                metadata TEXT DEFAULT '{}',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, harness, stream_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_harness_stream_cursors_user
+                ON harness_stream_cursors(user_id, harness, updated_at DESC);
+            """
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version) VALUES ('v4_harness_stream_cursors')"
+        )
+
+    def _ensure_shared_task_tables(self, conn: sqlite3.Connection) -> None:
+        """Add the repo/task-scoped collaboration bus tables."""
+        if self._is_migration_applied(conn, "v4_shared_tasks"):
+            return
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS shared_tasks (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                repo TEXT,
+                workspace_id TEXT,
+                folder_path TEXT,
+                title TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active'
+                    CHECK (status IN ('active', 'paused', 'completed', 'closed')),
+                created_by TEXT,
+                metadata TEXT DEFAULT '{}',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                closed_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_shared_tasks_user_updated
+                ON shared_tasks(user_id, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_shared_tasks_repo
+                ON shared_tasks(user_id, repo, workspace_id, updated_at DESC);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_shared_tasks_one_active
+                ON shared_tasks(user_id, repo, workspace_id)
+                WHERE status = 'active';
+
+            CREATE TABLE IF NOT EXISTS shared_task_results (
+                id TEXT PRIMARY KEY,
+                result_key TEXT NOT NULL UNIQUE,
+                shared_task_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                repo TEXT,
+                workspace_id TEXT,
+                folder_path TEXT,
+                packet_kind TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                result_status TEXT NOT NULL DEFAULT 'completed'
+                    CHECK (result_status IN ('in_flight', 'completed', 'abandoned')),
+                source_event_id TEXT,
+                source_path TEXT,
+                ptr TEXT,
+                artifact_id TEXT,
+                digest TEXT,
+                metadata TEXT DEFAULT '{}',
+                session_id TEXT,
+                thread_id TEXT,
+                harness TEXT,
+                agent_id TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_shared_task_results_task_created
+                ON shared_task_results(shared_task_id, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_shared_task_results_path
+                ON shared_task_results(shared_task_id, source_path, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_shared_task_results_status
+                ON shared_task_results(shared_task_id, result_status, updated_at DESC);
+            """
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version) VALUES ('v4_shared_tasks')"
+        )
+
+    def _ensure_thread_state_table(self, conn: sqlite3.Connection) -> None:
+        """Add lightweight thread-native continuity state."""
+        if self._is_migration_applied(conn, "v4_thread_state"):
+            return
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS thread_states (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                repo TEXT,
+                workspace_id TEXT,
+                folder_path TEXT,
+                status TEXT DEFAULT 'active',
+                summary TEXT,
+                current_goal TEXT,
+                current_step TEXT,
+                session_id TEXT,
+                handoff_session_id TEXT,
+                metadata TEXT DEFAULT '{}',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, thread_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_thread_states_user_updated
+                ON thread_states(user_id, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_thread_states_repo
+                ON thread_states(user_id, repo, updated_at DESC);
+            """
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version) VALUES ('v4_thread_state')"
+        )
+
+    def _ensure_route_decision_tables(self, conn: sqlite3.Connection) -> None:
+        """Add critical-surface route decision table."""
+        if self._is_migration_applied(conn, "v4_route_decisions"):
+            return
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS route_decisions (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                source_event_id TEXT,
+                packet_kind TEXT NOT NULL,
+                route TEXT NOT NULL,
+                depth_score REAL DEFAULT 0.0,
+                semantic_fit REAL DEFAULT 0.0,
+                structural_fit REAL DEFAULT 0.0,
+                novelty REAL DEFAULT 0.0,
+                confidence REAL DEFAULT 0.0,
+                locality_scope TEXT DEFAULT 'global',
+                workspace_id TEXT,
+                folder_path TEXT,
+                source_path TEXT,
+                token_delta INTEGER DEFAULT 0,
+                outcome_alignment REAL,
+                metadata TEXT DEFAULT '{}',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_route_decisions_user_created
+                ON route_decisions(user_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_route_decisions_packet_kind
+                ON route_decisions(packet_kind, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_route_decisions_route
+                ON route_decisions(route, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_route_decisions_source_path
+                ON route_decisions(source_path);
+            """
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version) VALUES ('v4_route_decisions')"
+        )
+
+    def _thread_state_row_to_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
+        data = dict(row)
+        data["metadata"] = self._parse_json_value(data.get("metadata"), {})
+        return data
+
+    def _stream_cursor_row_to_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
+        data = dict(row)
+        data["metadata"] = self._parse_json_value(data.get("metadata"), {})
+        return data
+
+    def get_harness_stream_cursor(
+        self,
+        *,
+        user_id: str = "default",
+        harness: str,
+        stream_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            self._ensure_harness_stream_tables(conn)
+            row = conn.execute(
+                """
+                SELECT *
+                FROM harness_stream_cursors
+                WHERE user_id = ? AND harness = ? AND stream_id = ?
+                LIMIT 1
+                """,
+                (user_id, harness, stream_id),
+            ).fetchone()
+        if not row:
+            return None
+        return self._stream_cursor_row_to_dict(row)
+
+    def upsert_harness_stream_cursor(self, cursor: Dict[str, Any]) -> Dict[str, Any]:
+        user_id = str(cursor.get("user_id") or "default")
+        harness = str(cursor.get("harness") or "").strip()
+        stream_id = str(cursor.get("stream_id") or "").strip()
+        if not harness:
+            raise ValueError("harness is required")
+        if not stream_id:
+            raise ValueError("stream_id is required")
+        try:
+            byte_offset = max(0, int(cursor.get("byte_offset", 0)))
+        except (TypeError, ValueError):
+            byte_offset = 0
+        metadata = json.dumps(cursor.get("metadata") or {})
+        now = _utcnow_iso()
+
+        with self._get_connection() as conn:
+            self._ensure_harness_stream_tables(conn)
+            existing = conn.execute(
+                """
+                SELECT id, created_at
+                FROM harness_stream_cursors
+                WHERE user_id = ? AND harness = ? AND stream_id = ?
+                LIMIT 1
+                """,
+                (user_id, harness, stream_id),
+            ).fetchone()
+            if existing:
+                cursor_id = str(existing["id"])
+                conn.execute(
+                    """
+                    UPDATE harness_stream_cursors
+                    SET byte_offset = ?, metadata = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (byte_offset, metadata, now, cursor_id),
+                )
+            else:
+                cursor_id = str(cursor.get("id") or uuid.uuid4())
+                conn.execute(
+                    """
+                    INSERT INTO harness_stream_cursors (
+                        id, user_id, harness, stream_id, byte_offset,
+                        metadata, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        cursor_id,
+                        user_id,
+                        harness,
+                        stream_id,
+                        byte_offset,
+                        metadata,
+                        now,
+                        now,
+                    ),
+                )
+        return self.get_harness_stream_cursor(
+            user_id=user_id,
+            harness=harness,
+            stream_id=stream_id,
+        ) or {}
+
+    def upsert_thread_state(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Create or update a live thread continuity state."""
+        user_id = str(state.get("user_id") or "default")
+        thread_id = str(state.get("thread_id") or "").strip()
+        if not thread_id:
+            raise ValueError("thread_id is required")
+        now = _utcnow_iso()
+        metadata = json.dumps(state.get("metadata") or {})
+
+        with self._get_connection() as conn:
+            self._ensure_thread_state_table(conn)
+            existing = conn.execute(
+                """
+                SELECT id, created_at FROM thread_states
+                WHERE user_id = ? AND thread_id = ?
+                LIMIT 1
+                """,
+                (user_id, thread_id),
+            ).fetchone()
+
+            state_id = str(state.get("id") or (existing["id"] if existing else uuid.uuid4()))
+            created_at = str(state.get("created_at") or (existing["created_at"] if existing else now))
+            if existing:
+                conn.execute(
+                    """
+                    UPDATE thread_states
+                    SET repo = ?, workspace_id = ?, folder_path = ?, status = ?,
+                        summary = ?, current_goal = ?, current_step = ?,
+                        session_id = ?, handoff_session_id = ?, metadata = ?,
+                        updated_at = ?
+                    WHERE user_id = ? AND thread_id = ?
+                    """,
+                    (
+                        state.get("repo"),
+                        state.get("workspace_id"),
+                        state.get("folder_path"),
+                        state.get("status", "active"),
+                        state.get("summary"),
+                        state.get("current_goal"),
+                        state.get("current_step"),
+                        state.get("session_id"),
+                        state.get("handoff_session_id"),
+                        metadata,
+                        now,
+                        user_id,
+                        thread_id,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO thread_states (
+                        id, user_id, thread_id, repo, workspace_id, folder_path,
+                        status, summary, current_goal, current_step,
+                        session_id, handoff_session_id, metadata,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        state_id,
+                        user_id,
+                        thread_id,
+                        state.get("repo"),
+                        state.get("workspace_id"),
+                        state.get("folder_path"),
+                        state.get("status", "active"),
+                        state.get("summary"),
+                        state.get("current_goal"),
+                        state.get("current_step"),
+                        state.get("session_id"),
+                        state.get("handoff_session_id"),
+                        metadata,
+                        created_at,
+                        now,
+                    ),
+                )
+        return self.get_thread_state(user_id=user_id, thread_id=thread_id) or {}
+
+    def get_thread_state(
+        self,
+        *,
+        user_id: str = "default",
+        thread_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            self._ensure_thread_state_table(conn)
+            row = conn.execute(
+                """
+                SELECT *
+                FROM thread_states
+                WHERE user_id = ? AND thread_id = ?
+                LIMIT 1
+                """,
+                (user_id, thread_id),
+            ).fetchone()
+        if not row:
+            return None
+        return self._thread_state_row_to_dict(row)
+
+    def list_thread_states(
+        self,
+        *,
+        user_id: str = "default",
+        repo: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        query = "SELECT * FROM thread_states WHERE user_id = ?"
+        params: List[Any] = [user_id]
+        if repo:
+            query += " AND repo = ?"
+            params.append(repo)
+        query += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(max(1, int(limit)))
+        with self._get_connection() as conn:
+            self._ensure_thread_state_table(conn)
+            rows = conn.execute(query, params).fetchall()
+        return [self._thread_state_row_to_dict(row) for row in rows]
+
+    def delete_thread_state(self, *, user_id: str = "default", thread_id: str) -> bool:
+        with self._get_connection() as conn:
+            self._ensure_thread_state_table(conn)
+            cursor = conn.execute(
+                "DELETE FROM thread_states WHERE user_id = ? AND thread_id = ?",
+                (user_id, thread_id),
+            )
+        return bool(cursor.rowcount)
+
+    def _shared_task_row_to_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
+        data = dict(row)
+        data["metadata"] = self._parse_json_value(data.get("metadata"), {})
+        return data
+
+    def _shared_task_result_row_to_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
+        data = dict(row)
+        data["metadata"] = self._parse_json_value(data.get("metadata"), {})
+        return data
+
+    def upsert_shared_task(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        user_id = str(task.get("user_id") or "default")
+        title = str(task.get("title") or "").strip()
+        if not title:
+            raise ValueError("title is required")
+        now = _utcnow_iso()
+        repo = task.get("repo")
+        workspace_id = task.get("workspace_id")
+        status = str(task.get("status") or "active")
+        task_id = str(task.get("id") or "").strip()
+        metadata = json.dumps(task.get("metadata") or {})
+
+        with self._get_connection() as conn:
+            self._ensure_shared_task_tables(conn)
+            existing = None
+            if task_id:
+                existing = conn.execute(
+                    "SELECT * FROM shared_tasks WHERE id = ? AND user_id = ? LIMIT 1",
+                    (task_id, user_id),
+                ).fetchone()
+            if existing is None and status == "active":
+                existing = conn.execute(
+                    """
+                    SELECT * FROM shared_tasks
+                    WHERE user_id = ?
+                      AND COALESCE(repo, '') = COALESCE(?, '')
+                      AND COALESCE(workspace_id, '') = COALESCE(?, '')
+                      AND status = 'active'
+                    LIMIT 1
+                    """,
+                    (user_id, repo, workspace_id),
+                ).fetchone()
+            if existing:
+                task_id = str(existing["id"])
+                conn.execute(
+                    """
+                    UPDATE shared_tasks
+                    SET repo = ?, workspace_id = ?, folder_path = ?, title = ?,
+                        status = ?, created_by = COALESCE(?, created_by),
+                        metadata = ?, updated_at = ?, closed_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        repo,
+                        workspace_id,
+                        task.get("folder_path"),
+                        title,
+                        status,
+                        task.get("created_by"),
+                        metadata,
+                        now,
+                        now if status in {"completed", "closed"} else None,
+                        task_id,
+                    ),
+                )
+            else:
+                task_id = task_id or str(uuid.uuid4())
+                conn.execute(
+                    """
+                    INSERT INTO shared_tasks (
+                        id, user_id, repo, workspace_id, folder_path, title,
+                        status, created_by, metadata, created_at, updated_at, closed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        task_id,
+                        user_id,
+                        repo,
+                        workspace_id,
+                        task.get("folder_path"),
+                        title,
+                        status,
+                        task.get("created_by"),
+                        metadata,
+                        task.get("created_at") or now,
+                        now,
+                        now if status in {"completed", "closed"} else None,
+                    ),
+                )
+        return self.get_shared_task(task_id, user_id=user_id) or {}
+
+    def get_shared_task(
+        self,
+        shared_task_id: str,
+        *,
+        user_id: str = "default",
+    ) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            self._ensure_shared_task_tables(conn)
+            row = conn.execute(
+                """
+                SELECT * FROM shared_tasks
+                WHERE id = ? AND user_id = ?
+                LIMIT 1
+                """,
+                (shared_task_id, user_id),
+            ).fetchone()
+        if not row:
+            return None
+        return self._shared_task_row_to_dict(row)
+
+    def list_shared_tasks(
+        self,
+        *,
+        user_id: str = "default",
+        repo: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        query = "SELECT * FROM shared_tasks WHERE user_id = ?"
+        params: List[Any] = [user_id]
+        if repo:
+            query += " AND repo = ?"
+            params.append(repo)
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        query += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(max(1, int(limit)))
+        with self._get_connection() as conn:
+            self._ensure_shared_task_tables(conn)
+            rows = conn.execute(query, params).fetchall()
+        return [self._shared_task_row_to_dict(row) for row in rows]
+
+    def close_shared_task(
+        self,
+        shared_task_id: str,
+        *,
+        user_id: str = "default",
+        status: str = "completed",
+        prune_results: bool = True,
+    ) -> bool:
+        now = _utcnow_iso()
+        with self._get_connection() as conn:
+            self._ensure_shared_task_tables(conn)
+            cur = conn.execute(
+                """
+                UPDATE shared_tasks
+                SET status = ?, updated_at = ?, closed_at = ?
+                WHERE id = ? AND user_id = ?
+                """,
+                (status, now, now, shared_task_id, user_id),
+            )
+            if prune_results:
+                conn.execute(
+                    "DELETE FROM shared_task_results WHERE shared_task_id = ?",
+                    (shared_task_id,),
+                )
+        return bool(cur.rowcount)
+
+    def save_shared_task_result(self, result: Dict[str, Any]) -> str:
+        shared_task_id = str(result.get("shared_task_id") or "").strip()
+        result_key = str(result.get("result_key") or "").strip()
+        packet_kind = str(result.get("packet_kind") or "").strip()
+        tool_name = str(result.get("tool_name") or "").strip()
+        if not shared_task_id:
+            raise ValueError("shared_task_id is required")
+        if not result_key:
+            raise ValueError("result_key is required")
+        if not packet_kind:
+            raise ValueError("packet_kind is required")
+        if not tool_name:
+            raise ValueError("tool_name is required")
+
+        now = _utcnow_iso()
+        with self._get_connection() as conn:
+            self._ensure_shared_task_tables(conn)
+            existing = conn.execute(
+                """
+                SELECT id FROM shared_task_results
+                WHERE result_key = ?
+                LIMIT 1
+                """,
+                (result_key,),
+            ).fetchone()
+            if existing:
+                result_id = str(existing["id"])
+                conn.execute(
+                    """
+                    UPDATE shared_task_results
+                    SET result_status = ?, source_event_id = ?, source_path = ?,
+                        ptr = ?, artifact_id = ?, digest = ?, metadata = ?,
+                        session_id = ?, thread_id = ?, harness = ?, agent_id = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        result.get("result_status") or "completed",
+                        result.get("source_event_id"),
+                        result.get("source_path"),
+                        result.get("ptr"),
+                        result.get("artifact_id"),
+                        result.get("digest"),
+                        json.dumps(result.get("metadata") or {}),
+                        result.get("session_id"),
+                        result.get("thread_id"),
+                        result.get("harness"),
+                        result.get("agent_id"),
+                        now,
+                        result_id,
+                    ),
+                )
+                return result_id
+
+            result_id = str(result.get("id") or uuid.uuid4())
+            conn.execute(
+                """
+                INSERT INTO shared_task_results (
+                    id, result_key, shared_task_id, user_id, repo, workspace_id,
+                    folder_path, packet_kind, tool_name, result_status,
+                    source_event_id, source_path, ptr, artifact_id, digest,
+                    metadata, session_id, thread_id, harness, agent_id,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    result_id,
+                    result_key,
+                    shared_task_id,
+                    str(result.get("user_id") or "default"),
+                    result.get("repo"),
+                    result.get("workspace_id"),
+                    result.get("folder_path"),
+                    packet_kind,
+                    tool_name,
+                    result.get("result_status") or "completed",
+                    result.get("source_event_id"),
+                    result.get("source_path"),
+                    result.get("ptr"),
+                    result.get("artifact_id"),
+                    result.get("digest"),
+                    json.dumps(result.get("metadata") or {}),
+                    result.get("session_id"),
+                    result.get("thread_id"),
+                    result.get("harness"),
+                    result.get("agent_id"),
+                    now,
+                    now,
+                ),
+            )
+        return result_id
+
+    def get_shared_task_result(self, result_id: str) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            self._ensure_shared_task_tables(conn)
+            row = conn.execute(
+                "SELECT * FROM shared_task_results WHERE id = ? LIMIT 1",
+                (result_id,),
+            ).fetchone()
+        if not row:
+            return None
+        return self._shared_task_result_row_to_dict(row)
+
+    def list_shared_task_results(
+        self,
+        *,
+        shared_task_id: str,
+        limit: int = 20,
+        result_status: Optional[str] = None,
+        packet_kind: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        query = "SELECT * FROM shared_task_results WHERE shared_task_id = ?"
+        params: List[Any] = [shared_task_id]
+        if result_status:
+            query += " AND result_status = ?"
+            params.append(result_status)
+        if packet_kind:
+            query += " AND packet_kind = ?"
+            params.append(packet_kind)
+        query += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(max(1, int(limit)))
+        with self._get_connection() as conn:
+            self._ensure_shared_task_tables(conn)
+            rows = conn.execute(query, params).fetchall()
+        return [self._shared_task_result_row_to_dict(row) for row in rows]
+
     def get_episodic_memories(
         self,
         user_id: str,
@@ -62,6 +734,81 @@ class SQLiteAnalyticsMixin:
                     """,
                     (str(uuid.uuid4()), semantic_memory_id, ep_id, run_id),
                 )
+
+    def get_distillation_sources(
+        self, semantic_memory_id: str
+    ) -> List[Dict[str, Any]]:
+        """Return the episodic memories that were distilled into this semantic one.
+
+        Emits ``{episodic_memory_id, distillation_run_id, created_at}`` per
+        row, ordered oldest-first. Empty list when the semantic memory was
+        not produced by distillation (e.g. written directly by the user).
+        """
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT episodic_memory_id, distillation_run_id, created_at
+                FROM distillation_provenance
+                WHERE semantic_memory_id = ?
+                ORDER BY created_at ASC
+                """,
+                (semantic_memory_id,),
+            ).fetchall()
+            return [
+                {
+                    "episodic_memory_id": r["episodic_memory_id"],
+                    "distillation_run_id": r["distillation_run_id"],
+                    "created_at": r["created_at"],
+                }
+                for r in rows
+            ]
+
+    def get_distillation_derivatives(
+        self, episodic_memory_id: str
+    ) -> List[Dict[str, Any]]:
+        """Return the semantic memories derived from this episodic one."""
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT semantic_memory_id, distillation_run_id, created_at
+                FROM distillation_provenance
+                WHERE episodic_memory_id = ?
+                ORDER BY created_at ASC
+                """,
+                (episodic_memory_id,),
+            ).fetchall()
+            return [
+                {
+                    "semantic_memory_id": r["semantic_memory_id"],
+                    "distillation_run_id": r["distillation_run_id"],
+                    "created_at": r["created_at"],
+                }
+                for r in rows
+            ]
+
+    def get_distillation_source_counts(
+        self, semantic_memory_ids: List[str]
+    ) -> Dict[str, int]:
+        """Bulk count of episodic sources for a batch of semantic memory IDs.
+
+        Used by the search pipeline to annotate distilled memories with
+        ``provenance_source_count`` so the retrieval surface knows which
+        returned rows are synthesis (backed by N episodes) vs. raw writes.
+        """
+        if not semantic_memory_ids:
+            return {}
+        placeholders = ",".join("?" for _ in semantic_memory_ids)
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT semantic_memory_id, COUNT(*) AS n
+                FROM distillation_provenance
+                WHERE semantic_memory_id IN ({placeholders})
+                GROUP BY semantic_memory_id
+                """,
+                tuple(semantic_memory_ids),
+            ).fetchall()
+            return {r["semantic_memory_id"]: int(r["n"]) for r in rows}
 
     def log_distillation_run(
         self,
@@ -629,6 +1376,181 @@ class SQLiteAnalyticsMixin:
             self._ensure_entity_table(conn)
             cursor = conn.execute(
                 "DELETE FROM entity_aggregates WHERE user_id = ?",
+                (user_id,),
+            )
+            return int(cursor.rowcount or 0)
+
+    def _route_decision_row_to_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
+        data = dict(row)
+        data["metadata"] = self._parse_json_value(data.get("metadata"), {})
+        return data
+
+    def record_route_decision(self, decision: Dict[str, Any]) -> str:
+        """Persist a critical-surface routing decision."""
+        packet_kind = str(decision.get("packet_kind") or "").strip()
+        route = str(decision.get("route") or "").strip()
+        if not packet_kind:
+            raise ValueError("packet_kind is required")
+        if not route:
+            raise ValueError("route is required")
+
+        decision_id = str(decision.get("id") or uuid.uuid4())
+        now = str(decision.get("created_at") or _utcnow_iso())
+        with self._get_connection() as conn:
+            self._ensure_route_decision_tables(conn)
+            conn.execute(
+                """
+                INSERT INTO route_decisions (
+                    id, user_id, source_event_id, packet_kind, route,
+                    depth_score, semantic_fit, structural_fit, novelty,
+                    confidence, locality_scope, workspace_id, folder_path,
+                    source_path, token_delta, outcome_alignment, metadata, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    decision_id,
+                    str(decision.get("user_id") or "default"),
+                    decision.get("source_event_id"),
+                    packet_kind,
+                    route,
+                    float(decision.get("depth_score") or 0.0),
+                    float(decision.get("semantic_fit") or 0.0),
+                    float(decision.get("structural_fit") or 0.0),
+                    float(decision.get("novelty") or 0.0),
+                    float(decision.get("confidence") or 0.0),
+                    str(decision.get("locality_scope") or "global"),
+                    decision.get("workspace_id"),
+                    decision.get("folder_path"),
+                    decision.get("source_path"),
+                    int(decision.get("token_delta") or 0),
+                    (
+                        None
+                        if decision.get("outcome_alignment") is None
+                        else float(decision.get("outcome_alignment"))
+                    ),
+                    json.dumps(decision.get("metadata") or {}),
+                    now,
+                ),
+            )
+        return decision_id
+
+    def list_route_decisions(
+        self,
+        *,
+        user_id: str = "default",
+        packet_kind: Optional[str] = None,
+        route: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        query = "SELECT * FROM route_decisions WHERE user_id = ?"
+        params: List[Any] = [user_id]
+        if packet_kind:
+            query += " AND packet_kind = ?"
+            params.append(packet_kind)
+        if route:
+            query += " AND route = ?"
+            params.append(route)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(max(1, int(limit)))
+        with self._get_connection() as conn:
+            self._ensure_route_decision_tables(conn)
+            rows = conn.execute(query, params).fetchall()
+        return [self._route_decision_row_to_dict(row) for row in rows]
+
+    def summarize_route_decisions(
+        self,
+        *,
+        user_id: str = "default",
+        limit: int = 5000,
+    ) -> Dict[str, Any]:
+        rows = self.list_route_decisions(user_id=user_id, limit=limit)
+        if not rows:
+            return {
+                "total_decisions": 0,
+                "by_route": {},
+                "by_packet_kind": {},
+                "by_locality_scope": {},
+                "avg_depth_score": 0.0,
+                "avg_semantic_fit": 0.0,
+                "avg_structural_fit": 0.0,
+                "avg_novelty": 0.0,
+                "avg_confidence": 0.0,
+                "avg_outcome_alignment": None,
+                "total_token_delta": 0,
+                "read_saved_tokens": 0,
+                "bash_saved_tokens": 0,
+                "grep_saved_tokens": 0,
+                "artifact_reuse_saved_tokens": 0,
+            }
+
+        by_route: Dict[str, int] = {}
+        by_packet_kind: Dict[str, int] = {}
+        by_locality_scope: Dict[str, int] = {}
+        depth_total = semantic_total = structural_total = 0.0
+        novelty_total = confidence_total = 0.0
+        outcome_total = 0.0
+        outcome_count = 0
+        token_total = 0
+        read_saved = 0
+        bash_saved = 0
+        grep_saved = 0
+        artifact_reuse_saved = 0
+
+        for row in rows:
+            route = str(row.get("route") or "unknown")
+            packet_kind = str(row.get("packet_kind") or "unknown")
+            locality_scope = str(row.get("locality_scope") or "global")
+            by_route[route] = by_route.get(route, 0) + 1
+            by_packet_kind[packet_kind] = by_packet_kind.get(packet_kind, 0) + 1
+            by_locality_scope[locality_scope] = by_locality_scope.get(locality_scope, 0) + 1
+
+            depth_total += float(row.get("depth_score") or 0.0)
+            semantic_total += float(row.get("semantic_fit") or 0.0)
+            structural_total += float(row.get("structural_fit") or 0.0)
+            novelty_total += float(row.get("novelty") or 0.0)
+            confidence_total += float(row.get("confidence") or 0.0)
+
+            token_delta = int(row.get("token_delta") or 0)
+            token_total += token_delta
+            if packet_kind == "routed_read":
+                read_saved += token_delta
+            elif packet_kind == "routed_bash":
+                bash_saved += token_delta
+            elif packet_kind == "routed_grep":
+                grep_saved += token_delta
+            elif packet_kind == "artifact_reuse":
+                artifact_reuse_saved += token_delta
+
+            if row.get("outcome_alignment") is not None:
+                outcome_total += float(row.get("outcome_alignment"))
+                outcome_count += 1
+
+        count = len(rows)
+        return {
+            "total_decisions": count,
+            "by_route": by_route,
+            "by_packet_kind": by_packet_kind,
+            "by_locality_scope": by_locality_scope,
+            "avg_depth_score": round(depth_total / count, 4),
+            "avg_semantic_fit": round(semantic_total / count, 4),
+            "avg_structural_fit": round(structural_total / count, 4),
+            "avg_novelty": round(novelty_total / count, 4),
+            "avg_confidence": round(confidence_total / count, 4),
+            "avg_outcome_alignment": (
+                round(outcome_total / outcome_count, 4) if outcome_count else None
+            ),
+            "total_token_delta": token_total,
+            "read_saved_tokens": read_saved,
+            "bash_saved_tokens": bash_saved,
+            "grep_saved_tokens": grep_saved,
+            "artifact_reuse_saved_tokens": artifact_reuse_saved,
+        }
+
+    def delete_route_decisions_for_user(self, user_id: str) -> int:
+        with self._get_connection() as conn:
+            self._ensure_route_decision_tables(conn)
+            cursor = conn.execute(
+                "DELETE FROM route_decisions WHERE user_id = ?",
                 (user_id,),
             )
             return int(cursor.rowcount or 0)

@@ -527,6 +527,117 @@ class SamskaraCollector:
             "total_samskaras": self._total_samskaras,
         }
 
+    def export_replay_corpus(
+        self,
+        output_dir: str,
+        *,
+        shard_name: Optional[str] = None,
+        include_accepted: bool = True,
+        include_corrected: bool = True,
+        max_records: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Derive a replay-gate corpus from the durable samskara log.
+
+        Reads ``<log_dir>/samskaras.jsonl`` and emits one JSONL line per
+        usable record into ``<output_dir>/<shard_name>``. Only
+        ANSWER_ACCEPTED (prompt+output is known-good) and
+        ANSWER_CORRECTED (prompt → corrected_text is ground truth)
+        records produce corpus entries.
+
+        Output shape matches what ``dhee.mini.replay_gate.ReplayGate``
+        consumes::
+
+            {"prompt": str, "expected": str, "metadata": {...}}
+
+        Returns a structured summary; never raises on missing log or
+        empty corpus (callers get ``record_count=0`` and can act on it).
+        """
+        summary: Dict[str, Any] = {
+            "path": None,
+            "record_count": 0,
+            "accepted_count": 0,
+            "corrected_count": 0,
+            "skipped_count": 0,
+            "source_log": os.path.join(self.log_dir, "samskaras.jsonl"),
+        }
+
+        os.makedirs(output_dir, exist_ok=True)
+        shard = shard_name or f"replay-{int(time.time())}.jsonl"
+        out_path = os.path.join(output_dir, shard)
+
+        log_path = summary["source_log"]
+        if not os.path.exists(log_path):
+            return summary
+
+        records: List[Dict[str, Any]] = []
+        try:
+            with open(log_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        summary["skipped_count"] += 1
+                        continue
+
+                    rtype = rec.get("type")
+                    prompt = str(rec.get("input_text") or rec.get("query") or "")
+                    if not prompt:
+                        summary["skipped_count"] += 1
+                        continue
+
+                    expected: Optional[str] = None
+                    source_kind: Optional[str] = None
+                    if rtype == SamskaraType.ANSWER_CORRECTED.value \
+                            and include_corrected:
+                        expected = str(rec.get("corrected_text") or "")
+                        source_kind = "corrected"
+                    elif rtype == SamskaraType.ANSWER_ACCEPTED.value \
+                            and include_accepted:
+                        expected = str(rec.get("output_text") or "")
+                        source_kind = "accepted"
+
+                    if not expected or not source_kind:
+                        continue
+
+                    records.append({
+                        "prompt": prompt,
+                        "expected": expected,
+                        "metadata": {
+                            "source": source_kind,
+                            "timestamp": rec.get("timestamp"),
+                            "user_id": rec.get("user_id", "default"),
+                            "valence": rec.get("valence"),
+                        },
+                    })
+
+                    if source_kind == "corrected":
+                        summary["corrected_count"] += 1
+                    else:
+                        summary["accepted_count"] += 1
+        except OSError as exc:
+            logger.debug("Failed to read samskara log: %s", exc)
+            return summary
+
+        if max_records is not None and len(records) > max_records:
+            # Keep the most recent N records — replay should reflect
+            # current behaviour, not ancient history.
+            records = records[-int(max_records):]
+
+        try:
+            with open(out_path, "w", encoding="utf-8") as f:
+                for rec in records:
+                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except OSError as exc:
+            logger.debug("Failed to write replay corpus: %s", exc)
+            return summary
+
+        summary["path"] = out_path
+        summary["record_count"] = len(records)
+        return summary
+
     def flush(self) -> None:
         """Persist current state. Call periodically or on shutdown."""
         self._save_state()

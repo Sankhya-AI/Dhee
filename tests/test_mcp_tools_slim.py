@@ -29,9 +29,18 @@ EXPECTED_TOOL_NAMES = {
     "record_outcome",
     "reflect",
     "store_intention",
+    "dhee_list_assets",
+    "dhee_get_asset",
+    "dhee_sync_codex_artifacts",
+    "dhee_why",
+    "dhee_thread_state",
+    "dhee_shared_task",
+    "dhee_shared_task_results",
+    "dhee_handoff",
     # Router tools (digest-at-source wrappers)
     "dhee_read",
     "dhee_bash",
+    "dhee_grep",
     "dhee_agent",
     "dhee_expand_result",
 }

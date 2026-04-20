@@ -215,7 +215,7 @@ def _search_doc_chunks(
         meta = r.get("metadata") or {}
         if not isinstance(meta, dict):
             continue
-        if meta.get("kind") != "doc_chunk":
+        if meta.get("kind") not in {"doc_chunk", "artifact_chunk"}:
             continue
         score = float(r.get("composite_score", r.get("score", 0.0)))
         if score < score_threshold:

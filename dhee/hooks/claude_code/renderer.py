@@ -36,6 +36,8 @@ def render_context(
     max_intentions: int = 3,
     doc_matches: list | None = None,
     edits_block: str | None = None,
+    shared_task: dict[str, Any] | None = None,
+    shared_task_results: list[dict[str, Any]] | None = None,
 ) -> str:
     """Render Dhee context dict as flat XML for Claude Code injection.
 
@@ -45,6 +47,7 @@ def render_context(
         (120, _router_block()),
         (115, _edits_section(edits_block)),
         (110, _docs_block(doc_matches)),
+        (105, _shared_task_block(shared_task, shared_task_results)),
         (100, _session_block(ctx.get("last_session"))),
         (90, _performance_block(ctx.get("performance", []))),
         (80, _insights_block(ctx.get("insights", []), max_insights)),
@@ -135,6 +138,28 @@ def _docs_block(doc_matches: list | None) -> list[str]:
         a = f"{attrs} {score_attr}" if attrs else score_attr
         items.append(_tag("doc", a, text))
     return items
+
+
+def _shared_task_block(
+    shared_task: dict[str, Any] | None,
+    shared_task_results: list[dict[str, Any]] | None,
+) -> list[str]:
+    if not shared_task:
+        return []
+    title = str(shared_task.get("title") or "").strip()
+    status = str(shared_task.get("status") or "").strip()
+    attrs = _attrs(title=title, status=status)
+    lines = [f"<shared {attrs}>"]
+    for row in (shared_task_results or [])[:3]:
+        digest = str(row.get("digest") or "").strip()
+        if not digest:
+            continue
+        tool_name = str(row.get("tool_name") or row.get("packet_kind") or "")
+        source = str(row.get("source_path") or row.get("artifact_id") or "")
+        a = _attrs(tool=tool_name, src=source, st=str(row.get("result_status") or ""))
+        lines.append(_tag("share", a, digest[:240]))
+    lines.append("</shared>")
+    return lines
 
 
 def _edits_section(edits_block: str | None) -> list[str]:

@@ -16,14 +16,17 @@ Mapping from DGM-H → Dhee:
 
 The key API contract:
   Agent calls `hyper_context(task_description)` at session start →
-  Dhee returns EVERYTHING the agent needs to be a HyperAgent:
-    - Performance history for this task type
+  Dhee assembles a HyperContext bundle from the cognition kernel:
+    - Performance history for this task type (when present in Samskara)
     - Synthesized insights from prior runs (not raw memories)
-    - Relevant skills/strategies with confidence scores
-    - Proactive warnings (known pitfalls, regressions)
+    - Relevant skills/policies with Wilson-score confidence
+    - Proactive warnings surfaced from recorded pitfalls
     - Pending intentions (stored future triggers)
 
-Zero LLM calls for the hot path. Pure pattern matching + statistics.
+Zero LLM calls on the hot path — pure pattern matching + statistics.
+Stale-fact annotation + the Epistemic Control Loop (verify-before-recommend)
+land in Movement 3; today's bundle does not yet emit ``epistemic_check``
+steps.
 """
 
 from __future__ import annotations
@@ -195,12 +198,20 @@ class HyperContext:
     contradictions: List[Dict[str, Any]] = field(default_factory=list)
     action_items: List[str] = field(default_factory=list)
     state_errors: List[str] = field(default_factory=list)
+    thread_state: Optional[Dict[str, Any]] = None
+
+    # Epistemic Control Loop (M3.4): facts whose last_verified_at is past TTL.
+    # Each entry: {fact_id, subject, predicate, value, tier, staleness_days,
+    #              reason}. Agents should reconfirm before acting on load-bearing
+    # use of these facts.
+    epistemic_checks: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "user_id": self.user_id,
             "session_id": self.session_id,
             "last_session": self.last_session,
+            "thread_state": self.thread_state,
             "performance": [p.to_dict() for p in self.performance],
             "insights": [i.to_dict() for i in self.insights],
             "skills": self.skills[:5],
@@ -223,6 +234,7 @@ class HyperContext:
             "contradictions": self.contradictions[:5],
             "action_items": self.action_items[:10],
             "state_errors": self.state_errors[:10],
+            "epistemic_checks": self.epistemic_checks[:5],
             "meta": {
                 "n_insights": len(self.insights),
                 "n_active_intentions": len(self.intentions),
@@ -238,6 +250,7 @@ class HyperContext:
                 "n_critical_blockers": len(self.critical_blockers),
                 "performance_tracked": len(self.performance) > 0,
                 "n_state_errors": len(self.state_errors),
+                "n_epistemic_checks": len(self.epistemic_checks),
             },
         }
 
@@ -262,6 +275,8 @@ class HyperContext:
             result["contradictions"] = self.contradictions[:3]
         if self.state_errors:
             result["state_errors"] = self.state_errors[:3]
+        if self.epistemic_checks:
+            result["epistemic_checks"] = self.epistemic_checks[:3]
         return result
 
 
@@ -385,6 +400,8 @@ class Buddhi:
         user_id: str = "default",
         task_description: Optional[str] = None,
         memory=None,
+        thread_id: Optional[str] = None,
+        repo: Optional[str] = None,
     ) -> HyperContext:
         """The single call that turns any agent into a HyperAgent.
 
@@ -395,14 +412,31 @@ class Buddhi:
 
         # 1. Last session (via kernel handoff, not memory object)
         last_session = None
+        thread_state = None
         try:
-            from dhee.core.kernel import get_last_session
-            last_session = get_last_session()
+            kernel_db = getattr(self._kernel, "db", None)
+            if kernel_db is not None:
+                from dhee.core.thread_state import resolve_continuity
+
+                continuity = resolve_continuity(
+                    kernel_db,
+                    user_id=user_id,
+                    repo=repo,
+                    thread_id=thread_id,
+                    fallback_log_recovery=True,
+                    requester_agent_id="buddhi",
+                )
+                last_session = continuity.get("last_session")
+                thread_state = continuity.get("thread_state")
+            else:
+                from dhee.core.kernel import get_last_session
+
+                last_session = get_last_session()
         except Exception as exc:
             self._record_context_degradation(
                 context_errors,
                 [],
-                component="handoff.get_last_session",
+                component="continuity.resolve",
                 exc=exc,
             )
 
@@ -580,6 +614,11 @@ class Buddhi:
             action_items.append(f"[INTENTION] {intention.action_payload}")
         if active_step_desc:
             action_items.append(f"[NEXT STEP] {active_step_desc}")
+        if thread_state:
+            if thread_state.get("current_goal"):
+                action_items.append(f"[THREAD GOAL] {thread_state['current_goal']}")
+            if thread_state.get("current_step"):
+                action_items.append(f"[THREAD STEP] {thread_state['current_step']}")
         for sp in step_policies_list[:3]:
             action_items.append(f"[CORRECTION] {sp.get('do', '')[:100]}")
             avoid = sp.get("avoid")
@@ -589,6 +628,52 @@ class Buddhi:
                     action_items.append(f"[AVOID] {a[:100]}")
         for blocker in critical_blockers[:3]:
             action_items.append(f"[BLOCKER] Resolve: {blocker}")
+
+        # Epistemic Control Loop (M3.4 primitives → HyperContext wiring).
+        # Surface facts whose last_verified_at is past TTL so downstream
+        # agents reconfirm before acting. Canonical rows are excluded on
+        # non-load-bearing paths by pending_epistemic_checks.
+        epistemic_checks: List[Dict[str, Any]] = []
+        try:
+            kernel_db = getattr(self._kernel, "db", None)
+            if kernel_db is not None:
+                from dhee.core.engram_verification import pending_epistemic_checks
+
+                raw_checks = pending_epistemic_checks(
+                    kernel_db,
+                    user_id=user_id,
+                    limit=5,
+                    load_bearing=False,
+                )
+                for row in raw_checks:
+                    days = row.get("staleness_days")
+                    reason = (
+                        f"last verified {days:.0f}d ago"
+                        if isinstance(days, (int, float))
+                        else "never verified"
+                    )
+                    epistemic_checks.append({
+                        "fact_id": row.get("id"),
+                        "subject": row.get("subject"),
+                        "predicate": row.get("predicate"),
+                        "value": row.get("value"),
+                        "tier": row.get("tier") or "medium",
+                        "staleness_days": round(days, 1) if isinstance(days, (int, float)) else None,
+                        "reason": reason,
+                    })
+        except Exception as exc:
+            self._record_context_degradation(
+                context_errors,
+                warnings,
+                component="engram_verification.pending_epistemic_checks",
+                exc=exc,
+            )
+
+        for chk in epistemic_checks[:3]:
+            action_items.append(
+                f"[EPISTEMIC] Reverify {chk['subject']} {chk['predicate']}="
+                f"{chk['value']} ({chk['reason']})"
+            )
 
         return HyperContext(
             user_id=user_id,
@@ -612,6 +697,8 @@ class Buddhi:
             contradictions=contradictions_list,
             action_items=action_items,
             state_errors=state_error_messages,
+            thread_state=thread_state,
+            epistemic_checks=epistemic_checks,
         )
 
     # ------------------------------------------------------------------

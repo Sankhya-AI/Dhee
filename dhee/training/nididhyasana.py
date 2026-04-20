@@ -1,22 +1,35 @@
 """निदिध्यासन (Nididhyasana) — Auto-evolution loop for DheeModel.
 
-Vedantic learning has three stages:
+Native to Dhee (no opt-in flag). Today the module:
+
+  - Exposes ``should_evolve()`` — the samskara-count + degradation
+    threshold logic that decides when retraining is justified.
+  - Owns the training-cycle scaffolding (data curation, karma-vector
+    evaluation, GGUF export, hot-swap helpers).
+
+What closes the loop in the next release (Movement 4 of the public plan):
+
+  - A scheduler that calls ``should_evolve()`` on live session boundaries
+    (PreCompact / SessionEnd) instead of requiring an external driver.
+  - Replay-based assessment so a new GGUF is only hot-swapped in when it
+    beats the incumbent on recorded sessions.
+
+Vedantic framing — the three stages of integration:
   1. Shravana (listening) — teacher logging captures knowledge
   2. Manana (reflection) — samskara collector identifies weaknesses
   3. Nididhyasana (deep integration) — retraining embeds the learning
 
-This module implements stage 3: when accumulated samskaras reach
-critical mass (prakrity-apurat), it automatically:
-  1. Collects training signals (DPO pairs, teacher logs, re-extraction data)
-  2. Curates data weighted by viveka assessments and vasana degradation
-  3. Runs a samsara training cycle (with multi-trace adapters from smrti.py)
-  4. Evaluates with karma vector
-  5. Exports new GGUF model
-  6. Hot-swaps the running model without restart
+Intended stage-3 pipeline:
+  1. Collect training signals (DPO pairs, teacher logs, re-extraction data)
+  2. Curate data weighted by viveka assessments and vasana degradation
+  3. Run a samsara training cycle (with multi-trace adapters from smrti.py)
+  4. Evaluate with karma vector
+  5. Export new GGUF model
+  6. Hot-swap the running model without restart
 
-Yoga Sutra 4.2: "jaty-antara-parinamah prakrity-apurat"
-Transformation happens when natural potential overflows.
-The system doesn't retrain on schedule — it retrains when it NEEDS to.
+Yoga Sutra 4.2: "jaty-antara-parinamah prakrity-apurat" — transformation
+happens when natural potential overflows. The system retrains on need,
+not schedule.
 """
 
 from __future__ import annotations

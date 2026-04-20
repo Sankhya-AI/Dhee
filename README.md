@@ -4,7 +4,11 @@
 
 <h1 align="center">Dhee — Self-Evolving Memory & Context Router for AI Agents</h1>
 
-<h3 align="center">Cut LLM tokens by 90%. Perfect recall, even years in. Works with Claude Code, Cursor, Codex, Gemini CLI, Aider, Cline, and any MCP client.</h3>
+<h3 align="center">A measurable context router + self-evolving memory layer for AI agents. Works with Claude Code, Cursor, Codex, Gemini CLI, Aider, Cline, and any MCP client.</h3>
+
+<p align="center"><sub>
+Savings numbers are projections from router replay on real sessions (run <code>dhee router report</code> to reproduce on yours). A fully sanitized public replay corpus lands with the next release — until then, every "savings %" in this README is cited against the command that produced it, not a marketing slide.
+</sub></p>
 
 <p align="center">
   Open-source agent memory layer and tool-output router for LLM apps.<br>
@@ -41,11 +45,11 @@
 
 **Dhee is an open-source, self-evolving memory and context-router for LLM-powered AI agents.** It sits between your agent (Claude Code, Cursor, Codex, Gemini CLI, Aider, Cline, Goose, or any MCP-compatible client) and the model, and does three things so your CLAUDE.md, AGENTS.md, skills library, and tool output stop costing you tokens:
 
-1. **Reduces tokens.** The agent only sees the slice of context it needs this turn. Your 2,000-line CLAUDE.md becomes ~300 tokens. A 10 MB tool-result becomes a 40-token digest with a pointer. Over a session, that's a 90%+ token reduction with zero information loss.
+1. **Reduces tokens.** The agent only sees the slice of context it needs this turn. A fat CLAUDE.md is injected as heading-scoped chunks, not in full. A large tool-result is replaced with a digest + pointer; the model expands the pointer only when the digest isn't enough. The exact per-session savings are visible in `dhee router report` — it's your sessions, your numbers, not a marketing claim.
 
-2. **Remembers everything — forever.** Doc chunks, session outcomes, failures, decisions, user preferences. Ebbinghaus decay pushes unused knowledge out of the hot path. Frequently-referenced memories are promoted. After five years you have 50,000 memories and the per-turn injection is still ~300 tokens.
+2. **Remembers — and keeps doing so as the store grows.** Doc chunks, session outcomes, failures, decisions, user preferences. Tier-based retention is live: supersede chains with lineage, canonical write-once facts that never evict, reaffirmation-driven promotion (medium → high → canonical), and cold-archive forgetting of stale avoid-tier rows. Run `dhee why <memory_id>` to read the lineage of any fact.
 
-3. **Self-evolves.** Dhee watches which memories the model actually expands, which digests are deep enough, which rules it ignores. It tunes its own retrieval depth per tool, per intent, per file type. No config file to hand-maintain. The longer you use it, the better it gets.
+3. **Self-evolves — one product, one code path.** At the router layer, `dhee router tune` reads the expansion ledger and atomically rewrites `~/.dhee/router_policy.json`: deeper digests for classes the model keeps expanding, shallower for classes it never does. At the cognition layer, MetaBuddhi runs a full propose → assess → commit / rollback loop online with per-task-type group-relative confidence and a catastrophic-group guardrail that rolls back any strategy whose single-group regression crosses threshold even when the aggregate is positive. Nididhyasana gates training at session boundaries; a replay-based RL gate only promotes a candidate when it beats the incumbent by ≥ 0.02 on a held-out corpus. All native, no opt-in flag.
 
 ### Who it's for
 
@@ -63,7 +67,7 @@
 curl -fsSL https://raw.githubusercontent.com/Sankhya-AI/Dhee/main/install.sh | sh
 ```
 
-The installer creates `~/.dhee`, installs the `dhee` package, and auto-wires Claude Code hooks. Next time you open Claude Code in any project, cognition is on.
+The installer creates `~/.dhee`, installs the `dhee` package, and configures Dhee as the native memory/router layer for both Claude Code and Codex. Both harnesses point at the same kernel, so memory, artifacts, shared-task results, and portability packs all compound in one place.
 
 <details>
 <summary><b>Other install options</b></summary>
@@ -71,7 +75,7 @@ The installer creates `~/.dhee`, installs the `dhee` package, and auto-wires Cla
 **Via pip:**
 ```bash
 pip install dhee
-dhee install       # configure Claude Code hooks
+dhee install --harness all   # configure Claude Code + Codex
 ```
 
 **From source:**
@@ -80,7 +84,7 @@ git clone https://github.com/Sankhya-AI/Dhee.git
 cd Dhee
 ./scripts/bootstrap_dev_env.sh
 source .venv-dhee/bin/activate
-dhee install
+dhee install --harness all
 ```
 
 **Via Docker:**
@@ -89,7 +93,12 @@ docker compose up -d   # uses OPENAI_API_KEY from env
 ```
 </details>
 
-After install, Dhee auto-ingests project docs (CLAUDE.md, AGENTS.md, SKILL.md, etc.) on the first session. Run `dhee ingest` manually any time to re-chunk.
+After install:
+- Claude Code uses native hooks for routing, memory updates, and shared-task context injection.
+- Codex uses native `config.toml` + Dhee-managed instructions + incremental event-stream sync, so post-tool results and uploaded artifacts become shared reusable context without manual re-sync.
+- `dhee harness status` shows the live state and `dhee harness disable --harness codex` turns a harness off cleanly.
+
+Project docs (CLAUDE.md, AGENTS.md, SKILL.md, etc.) still auto-ingest on first use. Run `dhee ingest` manually any time to re-chunk.
 
 ---
 
@@ -167,7 +176,7 @@ And on the tool-use side, the **router** digests raw output at source — a 10 M
 
 | | **Dhee** | CLAUDE.md | Mem0 | Letta | MemPalace | agentmemory |
 |:--|:-:|:-:|:-:|:-:|:-:|:-:|
-| **Token cost per turn** | **~300** | 2,000+ | varies | ~1K+ | varies | ~1,900 |
+| **Token cost per turn** | **router-replay projected¹** | 2,000+ | varies | ~1K+ | varies | ~1,900 |
 | **LongMemEval R@5** | **99.4%** | N/A | N/A | N/A | 96.6% | 95.2% |
 | **Self-evolving retrieval policy** | **Yes** | No | No | No | No | No |
 | **Auto-digest tool output** | **Yes (router)** | No | No | No | No | No |
@@ -177,7 +186,9 @@ And on the tool-use side, the **router** digests raw output at source — a 10 M
 | **External DB required** | No (SQLite) | No | Qdrant/pgvector | Postgres+vector | No | No |
 | **License** | MIT | — | Apache-2 | Apache-2 | MIT | MIT |
 
-Dhee is the only one that **reduces tokens *and* self-evolves its own retrieval policy *and* leads on recall.**
+Dhee is the only one that **routes tool output at source *and* self-evolves its retrieval policy from an expansion ledger *and* leads on LongMemEval recall.**
+
+<sub>¹ Run `dhee router report` to see the actual per-turn token curve on your sessions. The replay corpus is already built from your real activity — `dhee replay-corpus export` derives it from the durable samskara log, no synthetic data. A redacted public corpus with reproducible numbers lands in the next release.</sub>
 
 ---
 
@@ -209,7 +220,7 @@ Dhee turns that library into searchable, decay-aware, self-promoting memory:
 | **Insight synthesis** | What-worked / what-failed from session checkpoints becomes transferable learnings. |
 | **Prospective** | `"Remember to run auth tests after login.py changes"` fires when the trigger matches — days, weeks, or months later. |
 
-**Result:** after a year, you have 50 doc files, 10,000 memories, and 200 insights. The per-turn injection is still ~300 tokens of the *right* stuff. The 500-line CLAUDE.md your team grew into is an asset, not a liability.
+**Target shape:** after a year of accumulation the per-turn injection stays bounded by token budget — *only* the matching slice of docs, insights, and policies above threshold reaches the model. The full canonical-tier retention guarantee (100% canonical survival across supersede chains on a decades-replay corpus) lands with movements 2–3 of the public plan. The substrate (propositional facts, supersede-ready schema, decay/promotion) ships today.
 
 ---
 
@@ -252,7 +263,7 @@ d.checkpoint("Fixed auth bug", what_worked="git blame first", outcome_score=1.0)
 | `checkpoint` | 1 per ~10 memories | ~$0.001 |
 | **Typical 20-turn Opus session** | **1** | **~$0.004** |
 
-Dhee overhead: ~$0.004 per session. Token savings on a 20-turn Opus session: **~$0.50+**. That's a **>100× ROI**.
+Dhee's own LLM overhead is ~$0.004 per session (one checkpoint call per ~10 memories). Token savings per session depend entirely on your tool-output footprint — `dhee router report` prints the delta for your real sessions.
 
 ### The router — digest at source
 
@@ -265,7 +276,7 @@ Four MCP tools replace `Read`/`Bash`/`Agent` on heavy calls:
 - `mcp__dhee__dhee_agent(text)` — digests any long subagent return: file refs, headings, bullets, error signals, head/tail.
 - `mcp__dhee__dhee_expand_result(ptr)` — only called when the digest genuinely isn't enough. Raw re-enters context on demand.
 
-A 10 MB `git log --oneline -50000` becomes a ~200-token digest. Nothing else gets into context. This is where the serious savings live.
+A huge `git log --oneline` becomes a short digest + pointer. Raw content is stored in the pointer store and only re-enters the context window when the model calls `dhee_expand_result(ptr)`. `dhee router report` shows the exact per-tool byte/token delta on your sessions.
 
 ### The cognition engine
 
@@ -286,11 +297,21 @@ Parallel intelligence layer — zero LLM calls on the hot path.
 
 ```bash
 pip install dhee
-dhee install    # installs lifecycle hooks
+dhee install --harness all
 dhee ingest     # chunks project docs into memory
 ```
 
-Six hooks fire at the right moments. No SKILL.md, no plugin directory. The agent doesn't even know Dhee is there — it just gets better context.
+Claude gets native lifecycle hooks, router enforcement, and shared-task context injection. No SKILL.md, no plugin directory, no manual `settings.json` editing.
+
+### Codex — Native Config + Stream Sync
+
+```bash
+pip install dhee
+dhee install --harness all
+dhee harness status
+```
+
+Codex is wired natively through `~/.codex/config.toml` and a Dhee-managed instructions file. Dhee tails Codex's persisted event stream incrementally, so post-tool results, shared-task work, and host-parsed artifacts become reusable context without a manual sync step.
 
 ### MCP Server (Claude Code, Cursor, Codex, Gemini CLI, Cline, Goose, any MCP client)
 
@@ -338,13 +359,13 @@ Large AI-agent projects accumulate a fat `CLAUDE.md`, `AGENTS.md`, skills librar
 Dhee is the only agent memory layer that (a) leads on the [LongMemEval](https://github.com/xiaowu0162/LongMemEval) retrieval benchmark at R@5 99.4% on the full 500-question set, (b) self-evolves its retrieval policy per tool and per intent, and (c) ships a **context router** that digests `Read`, `Bash`, and subagent output at source instead of dumping raw into context. See the [comparison table](#vs-alternatives).
 
 ### Does Dhee work with Claude Code, Cursor, Codex, Gemini CLI, or Aider?
-Yes. Dhee ships native Claude Code hooks, an MCP server that plugs into Cursor, Codex, Gemini CLI, Cline, Goose, and any MCP client, plus a Python SDK and CLI. One install, every host.
+Yes. Dhee now has first-class native integrations for Claude Code and Codex on one shared kernel. It also exposes an MCP server for Cursor, Gemini CLI, Cline, Goose, and other MCP clients.
 
 ### How does Dhee reduce Claude Code token usage?
-Two ways: (1) it replaces a 500-line `CLAUDE.md` that normally re-loads every turn with a vector-indexed memory that injects only matching rules (~240 tokens instead of 5,700); (2) its router wraps `Read` and `Bash` so a 10 MB `git log` becomes a ~40-token digest with a pointer — raw content only re-enters context if the model explicitly expands the pointer.
+Two ways: (1) it replaces a large `CLAUDE.md` that normally re-loads every turn with a heading-scoped, vector-indexed memory that injects only matching rules above threshold; (2) its router wraps `Read`/`Bash`/`Agent` so heavy tool output becomes a digest with a pointer — raw content only re-enters context if the model explicitly calls `dhee_expand_result(ptr)`. Exact per-turn savings on your own sessions are printed by `dhee router report`.
 
 ### Is Dhee production-ready? What storage does it use?
-Dhee runs on SQLite by default — no Postgres, no Qdrant, no pgvector, no extra infra. It has 1000+ tests, reproducible benchmarks in-tree, an MIT license, and works offline with Ollama embeddings or online with OpenAI, NVIDIA NIM, or Gemini.
+Dhee runs on SQLite by default — no Postgres, no Qdrant, no pgvector, no extra infra. It ships 1,170+ tests, reproducible benchmarks in-tree, an MIT license, and works offline with Ollama embeddings or online with OpenAI, NVIDIA NIM, or Gemini.
 
 ### How does Dhee's self-evolution actually work?
 Every time the model calls `dhee_expand_result(ptr)` to see the raw output behind a digest, Dhee logs (tool, intent, depth). `dhee router tune` reads that ledger and atomically rewrites `~/.dhee/router_policy.json` — deeper digests for file types the model keeps expanding, shallower ones it never does. No config to hand-maintain. The longer you use it, the better it fits your workflow.
@@ -361,7 +382,7 @@ git clone https://github.com/Sankhya-AI/Dhee.git
 cd Dhee
 ./scripts/bootstrap_dev_env.sh
 source .venv-dhee/bin/activate
-pytest    # 1098 tests, 10 skipped
+pytest    # 1180+ test functions across the suite
 ```
 
 Benchmarks are reproducible from [`benchmarks/longmemeval/`](benchmarks/longmemeval/). Any improvement to R@k with full per-question output is welcome.

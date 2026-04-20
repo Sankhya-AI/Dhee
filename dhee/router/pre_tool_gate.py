@@ -97,6 +97,35 @@ def evaluate(payload: dict[str, Any]) -> dict[str, Any]:
         return _evaluate_read(tool_input)
     if tool == "Bash":
         return _evaluate_bash(tool_input)
+    if tool == "Grep":
+        return _evaluate_grep(tool_input)
+    return {}
+
+
+def _evaluate_grep(inp: dict[str, Any]) -> dict[str, Any]:
+    """Steer native Grep onto dhee_grep.
+
+    Native Grep defaults to ``files_with_matches`` which already has a
+    small footprint, but ``output_mode="content"`` or wide searches
+    across the repo can dump hundreds of lines. Deny whenever the caller
+    asks for content (the expensive mode) or clearly scans a whole tree.
+    """
+    pattern = inp.get("pattern")
+    if not isinstance(pattern, str) or not pattern:
+        return {}
+    output_mode = inp.get("output_mode")
+    path = inp.get("path") or "."
+    if output_mode == "content" or (output_mode is None and inp.get("-C")):
+        reason = (
+            "Router enforcement: Grep output_mode=content dumps raw lines "
+            "into context."
+        )
+        steer = (
+            f"Call mcp__dhee__dhee_grep(pattern={pattern!r}, path={path!r}) "
+            "instead. You get match count + top file:line hits + per-file "
+            "density; full hit list stays behind a ptr."
+        )
+        return _deny(reason, steer)
     return {}
 
 

@@ -139,6 +139,28 @@ class TestRenderer:
         xml = render_context(ctx, task_description="fix auth")
         assert 'task="fix auth"' in xml
 
+    def test_shared_task_block_renders_compact_results(self):
+        xml = render_context(
+            {},
+            shared_task={"title": "Repo collaboration", "status": "active"},
+            shared_task_results=[
+                {
+                    "tool_name": "Bash",
+                    "source_path": "/tmp/repo",
+                    "result_status": "completed",
+                    "digest": "pytest failures narrowed to one module",
+                }
+            ],
+        )
+        root = _extract_xml(xml)
+        shared = root.find("shared")
+        assert shared is not None
+        assert shared.get("title") == "Repo collaboration"
+        item = shared.find("share")
+        assert item is not None
+        assert item.get("tool") == "Bash"
+        assert "pytest failures" in (item.text or "")
+
     def test_memories_sorted_by_score_descending(self):
         ctx = {
             "insights": [{"content": "pin anchor section"}],
@@ -461,7 +483,7 @@ class TestInstaller:
         with patch("dhee.hooks.claude_code.install._settings_path", return_value=fake):
             install_hooks()
             settings = json.loads(fake.read_text())
-            assert settings["hooks"]["PostToolUse"][0]["matcher"] == "Edit|Write|MultiEdit|Bash"
+            assert settings["hooks"]["PostToolUse"][0]["matcher"] == "Read|Edit|Write|MultiEdit|Bash"
 
     def test_uninstall_removes_dhee_hooks(self, tmp_path):
         fake = self._fake_settings(tmp_path)
@@ -538,13 +560,21 @@ class TestDispatchHandlers:
             call_args = mock.return_value.remember.call_args
             assert "/src/auth.py" in call_args.kwargs.get("content", "")
 
-    def test_post_tool_ignores_read_tools(self):
+    def test_post_tool_read_captures_artifact_without_raw_memory(self):
         from dhee.hooks.claude_code.__main__ import handle_post_tool
 
-        with patch("dhee.hooks.claude_code.__main__._get_dhee") as mock:
-            result = handle_post_tool({"tool_name": "Read", "tool_input": {}, "success": True})
+        with patch("dhee.hooks.claude_code.__main__._get_dhee") as mock_dhee, \
+             patch("dhee.hooks.claude_code.__main__._artifact_manager") as mock_artifacts:
+            mock_artifacts.return_value.capture_host_parse.return_value = {"artifact_id": "a1"}
+            result = handle_post_tool({
+                "tool_name": "Read",
+                "tool_input": {"file_path": "/tmp/paper.pdf"},
+                "tool_response": "Extracted paper text",
+                "success": True,
+            })
             assert result == {}
-            mock.return_value.remember.assert_not_called()
+            mock_dhee.return_value.remember.assert_not_called()
+            mock_artifacts.return_value.capture_host_parse.assert_called_once()
 
     def test_post_tool_skips_bash_success(self):
         """The core v3.3.1 fix: successful shell commands are not stored."""

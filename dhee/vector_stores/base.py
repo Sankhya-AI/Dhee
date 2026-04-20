@@ -59,3 +59,15 @@ class VectorStoreBase(ABC):
     def close(self) -> None:
         """Release resources. Override in subclasses that hold connections."""
         pass
+
+    def export_entries(
+        self,
+        filters: Optional[Dict[str, Any]] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Export raw vector entries for portable snapshotting."""
+        raise NotImplementedError(f"{type(self).__name__} does not support export_entries()")
+
+    def import_entries(self, entries: List[Dict[str, Any]]) -> int:
+        """Import raw vector entries previously exported by export_entries()."""
+        raise NotImplementedError(f"{type(self).__name__} does not support import_entries()")

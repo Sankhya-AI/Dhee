@@ -37,7 +37,7 @@ HOOK_EVENTS: tuple[str, ...] = (
 LEGACY_EVENTS: tuple[str, ...] = ()
 
 TOOL_MATCHERS: dict[str, str] = {
-    "PostToolUse": "Edit|Write|MultiEdit|Bash",
+    "PostToolUse": "Read|Edit|Write|MultiEdit|Bash",
     "PreToolUse": "Read|Bash",
 }
 

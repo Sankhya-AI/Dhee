@@ -1,4 +1,4 @@
-"""Dhee MCP Server — 24 tools, minimal boilerplate.
+"""Dhee MCP Server — artifact-aware context-memory tools, minimal boilerplate.
 
 Tools:
  1. remember             — Quick-save (content → memory, infer=False)
@@ -25,6 +25,11 @@ Tools:
 22. record_outcome       — Report task outcome for performance tracking
 23. reflect              — Agent-triggered insight synthesis
 24. store_intention      — Store a future trigger (prospective memory)
+25. dhee_list_assets     — List stored host-parsed artifacts
+26. dhee_get_asset       — Inspect a stored artifact and its bindings/chunks
+27. dhee_sync_codex_artifacts — Ingest Codex session logs into the artifact store
+28. dhee_why              — Explain memory/artifact provenance and lineage
+29. dhee_handoff          — Emit a structured resume snapshot for a new harness
 """
 
 import json
@@ -70,6 +75,37 @@ def _default_source_app(args: Dict[str, Any]) -> str:
         or os.environ.get("DHEE_SOURCE_APP")
         or _default_agent_id(args)
     )
+
+
+def _maybe_sync_codex_runtime(arguments: Dict[str, Any]) -> Dict[str, Any] | None:
+    """Best-effort incremental Codex sync before collaboration reads.
+
+    Codex lacks Claude-style live hooks. When the active harness is Codex,
+    Dhee opportunistically tails the persisted event stream before serving
+    collaboration / handoff / artifact queries so the next MCP round sees
+    post-tool results without a manual sync step.
+    """
+    harness = str(
+        arguments.get("harness")
+        or os.environ.get("DHEE_HARNESS")
+        or os.environ.get("DHEE_AGENT_ID")
+        or ""
+    ).strip().lower()
+    if harness != "codex":
+        return None
+    try:
+        from dhee.core.artifacts import ArtifactManager
+        from dhee.core.codex_stream import sync_latest_codex_stream
+
+        return sync_latest_codex_stream(
+            ArtifactManager(get_db()),
+            get_db(),
+            user_id=_default_user_id(arguments),
+            sessions_root=os.environ.get("DHEE_CODEX_SESSIONS_ROOT"),
+            log_path=str(arguments.get("log_path") or "").strip() or None,
+        )
+    except Exception:
+        return None
 
 
 def _get_embedding_dims_for_model(model: str, provider: str) -> int:
@@ -207,6 +243,7 @@ def get_memory_instance() -> FullMemory:
 
 # Global instances (lazy)
 _memory: Optional[FullMemory] = None
+_db = None  # type: ignore
 _buddhi = None  # type: ignore
 
 
@@ -215,6 +252,17 @@ def get_memory() -> FullMemory:
     if _memory is None:
         _memory = get_memory_instance()
     return _memory
+
+
+def get_db():
+    """Lazy singleton for direct SQLite access without model setup."""
+    global _db
+    if _db is None:
+        from dhee.configs.base import _dhee_data_dir
+        from dhee.db.sqlite import SQLiteManager
+
+        _db = SQLiteManager(os.path.join(_dhee_data_dir(), "history.db"))
+    return _db
 
 
 def get_buddhi():
@@ -231,7 +279,7 @@ def get_buddhi():
 
 server = Server("dhee")
 
-# Tool definitions — 24 tools
+# Tool definitions — growing contract, keep tests in sync
 TOOLS = [
     Tool(
         name="remember",
@@ -600,6 +648,181 @@ TOOLS = [
         },
     ),
     Tool(
+        name="dhee_list_assets",
+        description=(
+            "List host-parsed artifacts stored by Dhee. Returns compact "
+            "summaries: filename, lifecycle state, bindings, extraction count, "
+            "and latest extraction time. Use this to discover what uploaded "
+            "files are already reusable before re-uploading or re-reading."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "user_id": {"type": "string", "description": "User identifier (default: 'default')"},
+                "workspace_id": {"type": "string", "description": "Optional absolute workspace root filter"},
+                "folder_path": {"type": "string", "description": "Optional folder-local filter within a workspace"},
+                "limit": {"type": "integer", "description": "Maximum results to return (default 20, max 200)"},
+            },
+        },
+    ),
+    Tool(
+        name="dhee_get_asset",
+        description=(
+            "Inspect a stored artifact by `artifact_id` or `source_path`. "
+            "Returns summary metadata, bindings, and extraction/chunk summaries. "
+            "Chunk and extraction bodies are omitted by default to keep context "
+            "small; opt in explicitly when you genuinely need the raw extracted content."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "artifact_id": {"type": "string", "description": "Artifact identifier returned by dhee_list_assets"},
+                "source_path": {"type": "string", "description": "Original absolute source path to resolve an artifact when id is unknown"},
+                "workspace_id": {"type": "string", "description": "Optional workspace scope when resolving by source_path"},
+                "user_id": {"type": "string", "description": "User identifier (default: 'default')"},
+                "include_extraction_text": {"type": "boolean", "description": "Include extracted text in the response (default false)"},
+                "include_chunks": {"type": "boolean", "description": "Include chunk records in the response (default false)"},
+                "chunk_limit": {"type": "integer", "description": "Maximum number of chunks to include when include_chunks=true (default 5, max 50)"},
+                "max_text_chars": {"type": "integer", "description": "Per extraction/chunk text cap when bodies are included (default 1200, max 12000)"},
+            },
+        },
+    ),
+    Tool(
+        name="dhee_sync_codex_artifacts",
+        description=(
+            "Ingest Codex session logs into Dhee's artifact store using the "
+            "first successful host parse contract. Bare file references become "
+            "`attached`; successful read/parse tool outputs become durable "
+            "artifact extractions and chunks."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "log_path": {"type": "string", "description": "Optional absolute path to a Codex session .jsonl log (defaults to latest)"},
+                "user_id": {"type": "string", "description": "User identifier (default: 'default')"},
+            },
+        },
+    ),
+    Tool(
+        name="dhee_why",
+        description=(
+            "Explain why a memory or artifact exists using stored history, "
+            "artifact provenance, and distillation lineage. Read-only and "
+            "no-LLM: this is for inspectability, debugging, and portability audits."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "identifier": {"type": "string", "description": "Memory ID or artifact ID to explain"},
+                "history_limit": {"type": "integer", "description": "Maximum memory_history rows to include (default 10, max 50)"},
+                "include_extraction_text": {"type": "boolean", "description": "For artifact IDs, include extracted text bodies (default false)"},
+                "include_chunks": {"type": "boolean", "description": "For artifact IDs, include chunk bodies (default false)"},
+                "chunk_limit": {"type": "integer", "description": "Maximum artifact chunks to include when include_chunks=true (default 5, max 50)"},
+                "max_text_chars": {"type": "integer", "description": "Per extraction/chunk text cap (default 1200, max 12000)"},
+            },
+            "required": ["identifier"],
+        },
+    ),
+    Tool(
+        name="dhee_thread_state",
+        description=(
+            "Read, update, or clear the lightweight live continuity state for a "
+            "single harness/app thread. This is the cheap per-thread bootstrap "
+            "layer Dhee should prefer before falling back to `get_last_session`."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "thread_id": {"type": "string", "description": "Harness or app thread identifier"},
+                "user_id": {"type": "string", "description": "User identifier (default: 'default')"},
+                "repo": {"type": "string", "description": "Optional repo/workspace root"},
+                "workspace_id": {"type": "string", "description": "Optional workspace scope override"},
+                "folder_path": {"type": "string", "description": "Optional folder-local scope"},
+                "status": {"type": "string", "description": "Thread status such as active or paused"},
+                "summary": {"type": "string", "description": "Compact thread summary"},
+                "current_goal": {"type": "string", "description": "Current thread goal"},
+                "current_step": {"type": "string", "description": "Current next step"},
+                "session_id": {"type": "string", "description": "Optional harness session identifier"},
+                "handoff_session_id": {"type": "string", "description": "Optional linked cross-agent handoff session id"},
+                "metadata": {"type": "object", "description": "Optional arbitrary JSON metadata"},
+                "clear": {"type": "boolean", "description": "Delete the thread state instead of reading/updating"},
+            },
+            "required": ["thread_id"],
+        },
+    ),
+    Tool(
+        name="dhee_shared_task",
+        description=(
+            "Create, inspect, list, or close the active shared collaboration task "
+            "for a repo/workspace. Shared tasks scope the ephemeral cross-agent "
+            "tool-result feed: one active shared task per repo/workspace, transient "
+            "results during the task, durable memory/artifacts promoted separately."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["create", "show", "list", "close"],
+                    "description": "Operation to perform (default: show)",
+                },
+                "shared_task_id": {"type": "string", "description": "Explicit shared task identifier"},
+                "title": {"type": "string", "description": "Task title for action=create"},
+                "repo": {"type": "string", "description": "Optional repo/workspace root used to resolve the active task"},
+                "workspace_id": {"type": "string", "description": "Optional workspace scope override"},
+                "folder_path": {"type": "string", "description": "Optional folder-local scope"},
+                "metadata": {"type": "object", "description": "Optional JSON metadata"},
+                "keep_results": {"type": "boolean", "description": "For action=close, keep ephemeral results instead of pruning them"},
+                "limit": {"type": "integer", "description": "For action=list, maximum tasks to return (default 20, max 100)"},
+                "user_id": {"type": "string", "description": "User identifier (default: 'default')"},
+            },
+        },
+    ),
+    Tool(
+        name="dhee_shared_task_results",
+        description=(
+            "Inspect the ephemeral cross-agent tool-result feed for a shared repo "
+            "task. This is the live collaboration window: in-flight claims plus "
+            "completed digests/pointers, not durable memory."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "shared_task_id": {"type": "string", "description": "Explicit shared task identifier"},
+                "repo": {"type": "string", "description": "Optional repo/workspace root used to resolve the active task"},
+                "limit": {"type": "integer", "description": "Maximum results to return (default 10, max 100)"},
+                "result_status": {
+                    "type": "string",
+                    "enum": ["in_flight", "completed", "abandoned"],
+                    "description": "Optional status filter",
+                },
+                "packet_kind": {"type": "string", "description": "Optional packet-kind filter"},
+                "user_id": {"type": "string", "description": "User identifier (default: 'default')"},
+            },
+        },
+    ),
+    Tool(
+        name="dhee_handoff",
+        description=(
+            "Emit a structured handoff snapshot for cross-harness or cross-machine "
+            "resume. Prefers live thread state when `thread_id` is provided; "
+            "otherwise falls back to the latest session digest plus active "
+            "tasks/intentions, recent memories, and recent artifacts. Read-only and no-LLM."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "user_id": {"type": "string", "description": "User identifier (default: 'default')"},
+                "repo": {"type": "string", "description": "Optional repo/workspace root to scope session + artifact hints"},
+                "thread_id": {"type": "string", "description": "Optional live thread identifier to prefer thread-native continuity"},
+                "memory_limit": {"type": "integer", "description": "Recent memories to include (default 5, max 20)"},
+                "artifact_limit": {"type": "integer", "description": "Recent artifacts to include (default 5, max 20)"},
+                "task_limit": {"type": "integer", "description": "Recent tasks to include (default 5, max 20)"},
+                "intention_limit": {"type": "integer", "description": "Active intentions to include (default 5, max 20)"},
+            },
+        },
+    ),
+    Tool(
         name="dhee_read",
         description=(
             "Router wrapper for Read. Opens a file, extracts a factual digest "
@@ -663,6 +886,29 @@ TOOLS = [
         },
     ),
     Tool(
+        name="dhee_grep",
+        description=(
+            "Router wrapper for pattern search. Runs ripgrep (or a Python "
+            "fallback) over `path`, returns a digest: match count + top "
+            "file:line hits + per-file density. Full hit list stays behind "
+            "`ptr` for expansion. Use INSTEAD OF native `Grep` or "
+            "`rg`/`grep -r` under `dhee_bash` for large codebase searches."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "Regex (or literal if fixed_string=true) to search for"},
+                "path": {"type": "string", "description": "File or directory root (default '.')"},
+                "glob": {"type": "string", "description": "Optional glob filter, e.g. '*.py'"},
+                "case_insensitive": {"type": "boolean", "description": "Case-insensitive search (rg -i)"},
+                "fixed_string": {"type": "boolean", "description": "Treat pattern as a literal string, not regex"},
+                "multiline": {"type": "boolean", "description": "Enable multiline matching (rg -U)"},
+                "context": {"type": "integer", "description": "Lines of surrounding context (rg -C)"},
+            },
+            "required": ["pattern"],
+        },
+    ),
+    Tool(
         name="dhee_expand_result",
         description=(
             "Retrieve the full raw content previously stored by a dhee_* "
@@ -696,6 +942,7 @@ def _handle_remember(memory, args):
 
 
 def _handle_search_memory(memory, args):
+    _maybe_sync_codex_runtime(args)
     try:
         limit = max(1, min(1000, int(args.get("limit", 10))))
     except (ValueError, TypeError):
@@ -789,6 +1036,7 @@ def _handle_dhee_context(memory, args):
     Returns performance trends, synthesized insights, relevant skills,
     pending intentions, proactive warnings, and top memories.
     """
+    _maybe_sync_codex_runtime(args)
     user_id = args.get("user_id", "default")
     task_description = args.get("task_description")
     buddhi = get_buddhi()
@@ -1069,6 +1317,376 @@ def _handle_store_intention(_memory, arguments: Dict[str, Any]) -> Dict[str, Any
     return {"stored": True, "intention": intention.to_dict()}
 
 
+def _handle_dhee_list_assets(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    _maybe_sync_codex_runtime(arguments)
+    db = get_db()
+    try:
+        limit = max(1, min(200, int(arguments.get("limit", 20))))
+    except (ValueError, TypeError):
+        limit = 20
+
+    rows = db.list_artifacts(
+        user_id=_default_user_id(arguments),
+        workspace_id=arguments.get("workspace_id"),
+        folder_path=arguments.get("folder_path"),
+        limit=limit,
+    )
+    return {
+        "results": [
+            {
+                "artifact_id": row.get("artifact_id"),
+                "filename": row.get("filename"),
+                "mime_type": row.get("mime_type"),
+                "byte_size": row.get("byte_size"),
+                "lifecycle_state": row.get("lifecycle_state"),
+                "binding_count": row.get("binding_count", 0),
+                "extraction_count": row.get("extraction_count", 0),
+                "last_extraction_at": row.get("last_extraction_at"),
+                "content_hash": row.get("content_hash"),
+            }
+            for row in rows
+        ],
+        "count": len(rows),
+    }
+
+
+def _handle_dhee_get_asset(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    _maybe_sync_codex_runtime(arguments)
+    db = get_db()
+    artifact_id = str(arguments.get("artifact_id") or "").strip()
+    if not artifact_id:
+        source_path = str(arguments.get("source_path") or "").strip()
+        if not source_path:
+            return {"error": "artifact_id or source_path is required"}
+        artifact = db.find_artifact_by_source_path(
+            source_path,
+            user_id=_default_user_id(arguments),
+            workspace_id=arguments.get("workspace_id"),
+        )
+        if artifact is None:
+            return {"error": "Artifact not found"}
+        artifact_id = str(artifact.get("artifact_id") or "")
+
+    artifact = db.get_artifact(artifact_id)
+    if artifact is None:
+        return {"error": "Artifact not found"}
+
+    include_extraction_text = bool(arguments.get("include_extraction_text", False))
+    include_chunks = bool(arguments.get("include_chunks", False))
+    try:
+        chunk_limit = max(1, min(50, int(arguments.get("chunk_limit", 5))))
+    except (ValueError, TypeError):
+        chunk_limit = 5
+    try:
+        max_text_chars = max(100, min(12000, int(arguments.get("max_text_chars", 1200))))
+    except (ValueError, TypeError):
+        max_text_chars = 1200
+
+    extractions = []
+    for row in artifact.get("extractions", []) or []:
+        item = {
+            "id": row.get("id"),
+            "extraction_source": row.get("extraction_source"),
+            "extraction_version": row.get("extraction_version"),
+            "extraction_timestamp": row.get("extraction_timestamp"),
+            "extracted_text_hash": row.get("extracted_text_hash"),
+            "metadata": row.get("metadata", {}),
+        }
+        if include_extraction_text:
+            item["extracted_text"] = str(row.get("extracted_text", ""))[:max_text_chars]
+        extractions.append(item)
+
+    chunks = []
+    if include_chunks:
+        for row in (artifact.get("chunks", []) or [])[:chunk_limit]:
+            chunks.append(
+                {
+                    "id": row.get("id"),
+                    "chunk_index": row.get("chunk_index"),
+                    "start_offset": row.get("start_offset"),
+                    "end_offset": row.get("end_offset"),
+                    "content_hash": row.get("content_hash"),
+                    "metadata": row.get("metadata", {}),
+                    "content": str(row.get("content", ""))[:max_text_chars],
+                }
+            )
+
+    return {
+        "artifact_id": artifact.get("artifact_id"),
+        "filename": artifact.get("filename"),
+        "mime_type": artifact.get("mime_type"),
+        "byte_size": artifact.get("byte_size"),
+        "content_hash": artifact.get("content_hash"),
+        "lifecycle_state": artifact.get("lifecycle_state"),
+        "attached_at": artifact.get("attached_at"),
+        "parsed_at": artifact.get("parsed_at"),
+        "indexed_at": artifact.get("indexed_at"),
+        "portable_at": artifact.get("portable_at"),
+        "bindings": artifact.get("bindings", []),
+        "extractions": extractions,
+        "chunk_count": len(artifact.get("chunks", []) or []),
+        "chunks": chunks,
+    }
+
+
+def _handle_dhee_sync_codex_artifacts(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee.core.artifacts import ArtifactManager
+    from dhee.core.codex_stream import sync_latest_codex_stream
+
+    stats = sync_latest_codex_stream(
+        ArtifactManager(get_db()),
+        get_db(),
+        user_id=_default_user_id(arguments),
+        sessions_root=os.environ.get("DHEE_CODEX_SESSIONS_ROOT"),
+        log_path=str(arguments.get("log_path") or "").strip() or None,
+    )
+    if stats.get("status") in {"no_log", "missing_log"}:
+        return {"error": "No Codex session log found", **stats}
+    return stats
+
+
+def _handle_dhee_why(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    _maybe_sync_codex_runtime(arguments)
+    from dhee.core.provenance import explain_identifier
+
+    try:
+        history_limit = max(1, min(50, int(arguments.get("history_limit", 10))))
+    except (ValueError, TypeError):
+        history_limit = 10
+    try:
+        chunk_limit = max(1, min(50, int(arguments.get("chunk_limit", 5))))
+    except (ValueError, TypeError):
+        chunk_limit = 5
+    try:
+        max_text_chars = max(100, min(12000, int(arguments.get("max_text_chars", 1200))))
+    except (ValueError, TypeError):
+        max_text_chars = 1200
+
+    return explain_identifier(
+        get_db(),
+        str(arguments.get("identifier") or ""),
+        history_limit=history_limit,
+        include_extraction_text=bool(arguments.get("include_extraction_text", False)),
+        include_chunks=bool(arguments.get("include_chunks", False)),
+        chunk_limit=chunk_limit,
+        max_text_chars=max_text_chars,
+    )
+
+
+def _handle_dhee_handoff(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    _maybe_sync_codex_runtime(arguments)
+    from dhee.core.handoff_snapshot import build_handoff_snapshot
+
+    def _bounded_int(name: str, default: int) -> int:
+        try:
+            return max(1, min(20, int(arguments.get(name, default))))
+        except (ValueError, TypeError):
+            return default
+
+    repo = arguments.get("repo")
+    if repo:
+        repo = os.path.abspath(str(repo))
+
+    return build_handoff_snapshot(
+        get_db(),
+        user_id=_default_user_id(arguments),
+        repo=repo,
+        workspace_id=repo,
+        thread_id=str(arguments.get("thread_id") or "").strip() or None,
+        memory_limit=_bounded_int("memory_limit", 5),
+        artifact_limit=_bounded_int("artifact_limit", 5),
+        task_limit=_bounded_int("task_limit", 5),
+        intention_limit=_bounded_int("intention_limit", 5),
+    )
+
+
+def _handle_dhee_thread_state(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    _maybe_sync_codex_runtime(arguments)
+    db = get_db()
+    user_id = _default_user_id(arguments)
+    thread_id = str(arguments.get("thread_id") or "").strip()
+    if not thread_id:
+        return {"error": "thread_id is required"}
+
+    if bool(arguments.get("clear")):
+        deleted = db.delete_thread_state(user_id=user_id, thread_id=thread_id)
+        return {"thread_id": thread_id, "deleted": bool(deleted)}
+
+    metadata = arguments.get("metadata")
+    if metadata is not None and not isinstance(metadata, dict):
+        return {"error": "metadata must be an object"}
+
+    repo = arguments.get("repo")
+    if repo:
+        repo = os.path.abspath(str(repo))
+
+    update_keys = (
+        "repo",
+        "workspace_id",
+        "folder_path",
+        "status",
+        "summary",
+        "current_goal",
+        "current_step",
+        "session_id",
+        "handoff_session_id",
+        "metadata",
+    )
+    should_update = any(arguments.get(key) is not None for key in update_keys)
+    if not should_update:
+        state = db.get_thread_state(user_id=user_id, thread_id=thread_id)
+        if state is None:
+            return {"status": "not_found", "thread_id": thread_id}
+        return state
+
+    return db.upsert_thread_state(
+        {
+            "user_id": user_id,
+            "thread_id": thread_id,
+            "repo": repo,
+            "workspace_id": arguments.get("workspace_id") or repo,
+            "folder_path": arguments.get("folder_path"),
+            "status": arguments.get("status") or "active",
+            "summary": arguments.get("summary"),
+            "current_goal": arguments.get("current_goal"),
+            "current_step": arguments.get("current_step"),
+            "session_id": arguments.get("session_id"),
+            "handoff_session_id": arguments.get("handoff_session_id"),
+            "metadata": metadata or {},
+        }
+    )
+
+
+def _handle_dhee_shared_task(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    _maybe_sync_codex_runtime(arguments)
+    from dhee.core.shared_tasks import resolve_active_shared_task
+
+    db = get_db()
+    user_id = _default_user_id(arguments)
+    action = str(arguments.get("action") or "show").strip().lower()
+    repo = arguments.get("repo")
+    if repo:
+        repo = os.path.abspath(str(repo))
+    metadata = arguments.get("metadata")
+    if metadata is not None and not isinstance(metadata, dict):
+        return {"error": "metadata must be an object"}
+
+    if action == "create":
+        title = str(arguments.get("title") or "").strip()
+        if not title:
+            return {"error": "title is required for action=create"}
+        task = db.upsert_shared_task(
+            {
+                "id": arguments.get("shared_task_id"),
+                "user_id": user_id,
+                "repo": repo or os.getcwd(),
+                "workspace_id": arguments.get("workspace_id") or repo or os.getcwd(),
+                "folder_path": arguments.get("folder_path"),
+                "title": title,
+                "status": "active",
+                "created_by": _default_agent_id(arguments),
+                "metadata": metadata or {},
+            }
+        )
+        return task
+
+    if action == "list":
+        try:
+            limit = max(1, min(100, int(arguments.get("limit", 20))))
+        except (TypeError, ValueError):
+            limit = 20
+        rows = db.list_shared_tasks(user_id=user_id, repo=repo, limit=limit)
+        return {"count": len(rows), "results": rows}
+
+    task = resolve_active_shared_task(
+        db,
+        user_id=user_id,
+        shared_task_id=str(arguments.get("shared_task_id") or "").strip() or None,
+        repo=repo,
+        cwd=repo,
+    )
+    if not task:
+        return {"status": "not_found"}
+
+    if action == "close":
+        keep_results = bool(arguments.get("keep_results"))
+        closed = db.close_shared_task(
+            str(task["id"]),
+            user_id=user_id,
+            status="completed",
+            prune_results=not keep_results,
+        )
+        return {
+            "shared_task_id": task["id"],
+            "closed": bool(closed),
+            "kept_results": keep_results,
+        }
+
+    return task
+
+
+def _handle_dhee_shared_task_results(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    _maybe_sync_codex_runtime(arguments)
+    from dhee.core.shared_tasks import resolve_active_shared_task
+
+    db = get_db()
+    user_id = _default_user_id(arguments)
+    repo = arguments.get("repo")
+    if repo:
+        repo = os.path.abspath(str(repo))
+    task = resolve_active_shared_task(
+        db,
+        user_id=user_id,
+        shared_task_id=str(arguments.get("shared_task_id") or "").strip() or None,
+        repo=repo,
+        cwd=repo,
+    )
+    if not task:
+        return {"status": "not_found", "results": []}
+    try:
+        limit = max(1, min(100, int(arguments.get("limit", 10))))
+    except (TypeError, ValueError):
+        limit = 10
+    rows = db.list_shared_task_results(
+        shared_task_id=str(task["id"]),
+        limit=limit,
+        result_status=arguments.get("result_status"),
+        packet_kind=arguments.get("packet_kind"),
+    )
+    compact = []
+    for row in rows:
+        compact.append(
+            {
+                "id": row.get("id"),
+                "packet_kind": row.get("packet_kind"),
+                "tool_name": row.get("tool_name"),
+                "result_status": row.get("result_status"),
+                "source_path": row.get("source_path"),
+                "ptr": row.get("ptr"),
+                "artifact_id": row.get("artifact_id"),
+                "digest": row.get("digest"),
+                "harness": row.get("harness"),
+                "agent_id": row.get("agent_id"),
+                "created_at": row.get("created_at"),
+                "updated_at": row.get("updated_at"),
+                "metadata": row.get("metadata") or {},
+            }
+        )
+    return {
+        "shared_task": {
+            "id": task.get("id"),
+            "title": task.get("title"),
+            "status": task.get("status"),
+            "repo": task.get("repo"),
+            "workspace_id": task.get("workspace_id"),
+            "folder_path": task.get("folder_path"),
+            "updated_at": task.get("updated_at"),
+        },
+        "count": len(compact),
+        "results": compact,
+    }
+
+
 def _handle_dhee_read(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
     from dhee.router.handlers import handle_dhee_read
     return handle_dhee_read(arguments)
@@ -1082,6 +1700,11 @@ def _handle_dhee_bash(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
 def _handle_dhee_agent(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
     from dhee.router.handlers import handle_dhee_agent
     return handle_dhee_agent(arguments)
+
+
+def _handle_dhee_grep(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee.router.handlers import handle_dhee_grep
+    return handle_dhee_grep(arguments)
 
 
 def _handle_dhee_expand_result(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -1114,16 +1737,26 @@ HANDLERS = {
     "record_outcome": _handle_record_outcome,
     "reflect": _handle_reflect,
     "store_intention": _handle_store_intention,
+    "dhee_list_assets": _handle_dhee_list_assets,
+    "dhee_get_asset": _handle_dhee_get_asset,
+    "dhee_sync_codex_artifacts": _handle_dhee_sync_codex_artifacts,
+    "dhee_why": _handle_dhee_why,
+    "dhee_thread_state": _handle_dhee_thread_state,
+    "dhee_shared_task": _handle_dhee_shared_task,
+    "dhee_shared_task_results": _handle_dhee_shared_task_results,
+    "dhee_handoff": _handle_dhee_handoff,
     "dhee_read": _handle_dhee_read,
     "dhee_bash": _handle_dhee_bash,
     "dhee_agent": _handle_dhee_agent,
+    "dhee_grep": _handle_dhee_grep,
     "dhee_expand_result": _handle_dhee_expand_result,
 }
 
 _MEMORY_FREE_TOOLS = {
     "get_last_session", "save_session_digest",
     "record_outcome", "reflect", "store_intention",
-    "dhee_read", "dhee_bash", "dhee_agent", "dhee_expand_result",
+    "dhee_list_assets", "dhee_get_asset", "dhee_sync_codex_artifacts", "dhee_why", "dhee_thread_state", "dhee_shared_task", "dhee_shared_task_results", "dhee_handoff",
+    "dhee_read", "dhee_bash", "dhee_agent", "dhee_grep", "dhee_expand_result",
 }
 
 

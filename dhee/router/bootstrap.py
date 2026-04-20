@@ -5,10 +5,11 @@ Wires up, in the canonical ``~/.claude/settings.json``:
 1. Hooks (SessionStart/PostToolUse/PreCompact/Stop/SessionEnd/UserPromptSubmit)
 2. The ``dhee`` MCP server registration
 3. Router permissions + DHEE_ROUTER=1 env
+4. PreToolUse enforcement flag (``~/.dhee/router_enforce``) — default on
 
 Everything is idempotent, atomic, and reversible. Used by the curl-one-line
-installer and by ``dhee install`` so fresh users get full Dhee with zero
-additional configuration.
+installer and by ``dhee install``. Enforcement steers native Read/Bash/Grep
+onto the router; opt out with ``DHEE_ROUTER_ENFORCE=0`` or ``dhee router disable``.
 """
 
 from __future__ import annotations
@@ -66,6 +67,7 @@ class BootstrapResult:
     hooks_installed: bool = False
     mcp_registered: bool = False
     router_enabled: bool = False
+    enforce_turned_on: bool = False
     backed_up: Path | None = None
     already_complete: bool = False
     details: dict[str, Any] = field(default_factory=dict)
@@ -76,6 +78,7 @@ def bootstrap(
     enable_router: bool = True,
     register_mcp: bool = True,
     install_hooks: bool = True,
+    enforce: bool = True,
 ) -> BootstrapResult:
     """Run the full Claude Code setup in a single atomic write."""
     path = _settings_path()
@@ -163,9 +166,27 @@ def bootstrap(
     if mcp_changed or router_changed:
         _atomic_write(path, settings)
 
+    # PreToolUse enforcement: default on. The flag is a filesystem
+    # sentinel at ``~/.dhee/router_enforce`` so the hook can check it
+    # without loading Dhee's Python. Users opt out by deleting the file
+    # or setting ``DHEE_ROUTER_ENFORCE=0``.
+    enforce_turned_on = False
+    if enforce and enable_router:
+        try:
+            from dhee.router.pre_tool_gate import _flag_file
+
+            flag = _flag_file()
+            flag.parent.mkdir(parents=True, exist_ok=True)
+            if not flag.exists():
+                flag.write_text("1\n", encoding="utf-8")
+                enforce_turned_on = True
+        except Exception:
+            enforce_turned_on = False
+
     already_complete = (
         not mcp_changed
         and not router_changed
+        and not enforce_turned_on
         and (hooks_result is None or hooks_result.already_installed)
     )
 
@@ -174,6 +195,7 @@ def bootstrap(
         hooks_installed=bool(hooks_result and (hooks_result.created or hooks_result.updated)),
         mcp_registered=mcp_changed,
         router_enabled=router_changed,
+        enforce_turned_on=enforce_turned_on,
         backed_up=backed_up,
         already_complete=already_complete,
         details=details,

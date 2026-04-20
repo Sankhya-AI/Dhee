@@ -9,11 +9,67 @@ Integration point: engram/memory/main.py search()
 import json
 import logging
 import re
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+# ── Preference classification (M2.2) ────────────────────────────────
+# Preference-shaped predicates get a parallel row in ``engram_preferences``
+# carrying stance, topic, and lineage. They still land in engram_facts so
+# existing resolvers keep working; retrieval (M2.4) will prefer the
+# preferences row when both exist.
+
+_PREFERENCE_PREDICATES = {
+    "prefers",
+    "likes",
+    "loves",
+    "enjoys",
+    "admires",
+    "favors",
+    "dislikes",
+    "hates",
+    "avoids",
+    "refuses",
+    "switched_to",
+    "switched_away_from",
+    "uses_editor",
+    "uses_language",
+    "subscribes_to",
+}
+_POSITIVE_STANCES = {
+    "prefers", "likes", "loves", "enjoys", "admires", "favors",
+    "switched_to", "uses_editor", "uses_language", "subscribes_to",
+}
+_NEGATIVE_STANCES = {
+    "dislikes", "hates", "avoids", "refuses", "switched_away_from",
+}
+
+
+def _normalize_predicate(pred: str) -> str:
+    return (pred or "").lower().replace(" ", "_")
+
+
+def _classify_preference(pred: str) -> Optional[Tuple[str, str]]:
+    """Return (topic, stance) if this predicate encodes a preference.
+
+    ``topic`` is a normalised form of the predicate (what the preference is
+    about) and ``stance`` is one of ``positive`` / ``negative`` / ``neutral``.
+    Returns None for non-preference predicates.
+    """
+    p = _normalize_predicate(pred)
+    if p.startswith("favorite_") or p.startswith("favourite_"):
+        return p, "positive"
+    if p in _POSITIVE_STANCES:
+        return p, "positive"
+    if p in _NEGATIVE_STANCES:
+        return p, "negative"
+    if p in _PREFERENCE_PREDICATES:
+        return p, "neutral"
+    return None
 
 # ── Query intent classification patterns (zero-LLM, deterministic) ──
 
@@ -149,7 +205,13 @@ class ContextResolver:
             conditions.append(f"f.memory_id IN ({placeholders})")
             params.extend(context_ids)
         if valid_only:
+            # M2 substrate semantics: "valid" now means (a) not temporally
+            # closed via valid_until, (b) not superseded by a newer row, and
+            # (c) not demoted to the 'avoid' tier. These three signals are
+            # substrate-native — no score fusion, no reranker bolt-on.
             conditions.append("f.valid_until IS NULL")
+            conditions.append("(f.superseded_by_id IS NULL)")
+            conditions.append("(f.tier IS NULL OR f.tier != 'avoid')")
 
         from_clause = " FROM engram_facts f JOIN memories m ON m.id = f.memory_id"
         if conditions:
@@ -462,7 +524,22 @@ class ContextResolver:
         user_id: Optional[str] = None,
         context_ids: Optional[List[str]] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Most recent valid fact."""
+        """Most recent valid fact.
+
+        For preference-shaped predicates we try the engram_preferences
+        store first — it is the substrate's first-class home for stance.
+        If no active preference row exists, we fall back to engram_facts
+        so the resolver stays truthful for mixed-history users.
+        """
+        pref = _classify_preference(predicate) if predicate else None
+        if pref is not None and subject:
+            topic, _ = pref
+            pref_row = self.resolve_preference(
+                subject=subject, topic=topic, user_id=user_id
+            )
+            if pref_row is not None:
+                return pref_row
+
         with self.db._get_connection() as conn:
             from_clause, params = self._fact_query_parts(
                 user_id=user_id,
@@ -471,12 +548,63 @@ class ContextResolver:
                 context_ids=context_ids,
                 valid_only=True,
             )
+            # Tier priority ordering: canonical > high > medium > low.
+            # 'avoid' is already filtered out by valid_only. Rows with NULL
+            # tier (legacy) rank alongside 'medium'. Time breaks ties.
+            tier_rank = (
+                "CASE COALESCE(f.tier, 'medium') "
+                "WHEN 'canonical' THEN 0 "
+                "WHEN 'high' THEN 1 "
+                "WHEN 'medium' THEN 2 "
+                "WHEN 'low' THEN 3 "
+                "ELSE 4 END"
+            )
             row = conn.execute(
-                "SELECT f.*" + from_clause + " ORDER BY COALESCE(f.valid_from, f.created_at) DESC LIMIT 1",
+                "SELECT f.*" + from_clause
+                + f" ORDER BY {tier_rank}, "
+                + "COALESCE(f.valid_from, f.created_at) DESC LIMIT 1",
                 params,
             ).fetchone()
             if row:
                 return dict(row)
+            return None
+
+    def resolve_preference(
+        self,
+        subject: str,
+        topic: str,
+        user_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the active preference row for (user, subject, topic).
+
+        Returns the row as a dict in the same shape as a fact row would
+        be, so callers can treat the two sources uniformly. The row's
+        ``predicate`` field is set to ``topic`` for symmetry.
+        """
+        try:
+            with self.db._get_connection() as conn:
+                conditions = ["superseded_by_id IS NULL",
+                              "(tier IS NULL OR tier != 'avoid')",
+                              "subject = ?", "topic = ?"]
+                params: List[Any] = [subject, topic]
+                if user_id:
+                    conditions.append("user_id = ?")
+                    params.append(user_id)
+                sql = (
+                    "SELECT id, memory_id, user_id, subject, topic AS predicate, "
+                    "stance, value, canonical_key, confidence, tier, "
+                    "reaffirmed_count, last_reaffirmed_at, valid_from, "
+                    "valid_until, created_at "
+                    "FROM engram_preferences WHERE "
+                    + " AND ".join(conditions)
+                    + " ORDER BY CASE tier "
+                    "WHEN 'canonical' THEN 0 WHEN 'high' THEN 1 "
+                    "WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END, "
+                    "COALESCE(valid_from, created_at) DESC LIMIT 1"
+                )
+                row = conn.execute(sql, params).fetchone()
+                return dict(row) if row else None
+        except Exception:
             return None
 
     def resolve_set_members(
@@ -883,6 +1011,96 @@ class ContextResolver:
 
     # ── Engram Storage ──
 
+    def _upsert_preference_row(
+        self,
+        conn,
+        *,
+        fact,
+        memory_id: str,
+        user_id: str,
+        canonical: str,
+        now_epoch: float,
+    ) -> None:
+        """Route preference-shaped facts to engram_preferences.
+
+        Same substrate semantics as engram_facts (reaffirm / supersede /
+        tier='medium' on new) but scoped to (user_id, subject, topic). A
+        non-preference predicate returns without side effects.
+        """
+        pref = _classify_preference(fact.predicate)
+        if pref is None:
+            return
+        topic, stance = pref
+        pref_canonical = f"{user_id}|{fact.subject}|{topic}|{fact.value}"
+
+        # Reaffirmation — exact value match on active row.
+        existing = conn.execute(
+            """SELECT id, reaffirmed_count FROM engram_preferences
+            WHERE canonical_key = ?
+              AND superseded_by_id IS NULL
+              AND value = ?
+            ORDER BY created_at ASC LIMIT 1""",
+            (pref_canonical, fact.value),
+        ).fetchone()
+        if existing is not None:
+            prev = int(existing["reaffirmed_count"] or 0)
+            conn.execute(
+                """UPDATE engram_preferences
+                SET reaffirmed_count = ?,
+                    last_reaffirmed_at = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?""",
+                (prev + 1, now_epoch, existing["id"]),
+            )
+            return
+
+        # Supersede — same (user, subject, topic) with different value.
+        new_pref_id = str(uuid.uuid4())
+        try:
+            conn.execute(
+                """UPDATE engram_preferences
+                SET superseded_by_id = ?,
+                    tier = 'avoid',
+                    valid_until = COALESCE(valid_until, ?),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = ? AND subject = ? AND topic = ?
+                  AND value != ?
+                  AND superseded_by_id IS NULL""",
+                (
+                    new_pref_id,
+                    fact.valid_from or fact.time or "superseded",
+                    user_id,
+                    fact.subject,
+                    topic,
+                    fact.value,
+                ),
+            )
+        except Exception:
+            pass
+
+        conn.execute(
+            """INSERT INTO engram_preferences
+            (id, memory_id, user_id, subject, topic, stance, value,
+             canonical_key, confidence, tier, superseded_by_id,
+             reaffirmed_count, last_reaffirmed_at,
+             valid_from, valid_until, schema_v)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'medium', NULL,
+                    0, NULL, ?, ?, 1)""",
+            (
+                new_pref_id,
+                memory_id,
+                user_id,
+                fact.subject,
+                topic,
+                stance,
+                fact.value,
+                pref_canonical,
+                fact.confidence if fact.confidence is not None else 1.0,
+                fact.valid_from,
+                fact.valid_until,
+            ),
+        )
+
     def store_engram(self, engram, memory_id: str) -> None:
         """Store engram structured data into the v3 tables.
 
@@ -936,53 +1154,117 @@ class ContextResolver:
                     ),
                 )
 
-            # Store facts (skip any with NULL required fields)
-            # Knowledge-update tracking: when a NEW fact shares the same
-            # (subject, predicate) as an existing valid fact, supersede the
-            # old one by setting its valid_until.  This enables the LATEST
-            # resolver to always return the most recent value.
+            # Store facts (skip any with NULL required fields).
+            #
+            # M2 substrate semantics:
+            #
+            #   * Reaffirmation — the incoming fact is value-identical to an
+            #     existing active row under the same canonical_key. Increment
+            #     ``reaffirmed_count`` + stamp ``last_reaffirmed_at`` on the
+            #     existing row and do NOT insert a duplicate. This is the
+            #     load-bearing bit for tier promotion in M3.
+            #
+            #   * Supersede — the incoming fact contradicts a single-valued
+            #     predicate (user moved cities, switched editors, etc.). The
+            #     old row is not deleted: we set ``superseded_by_id = new.id``,
+            #     demote its tier to ``'avoid'``, and stamp ``valid_until``.
+            #     The new row lands at ``tier='medium'``. The chain stays
+            #     explorable via ``dhee_why``.
+            #
+            #   * Preference routing — preference-shaped predicates also land
+            #     in ``engram_preferences`` with stance + topic. The fact row
+            #     remains for backwards compatibility; M2.4 teaches retrieval
+            #     to prefer the preferences row when both exist.
+            _user_id_row = conn.execute(
+                "SELECT user_id FROM memories WHERE id = ? LIMIT 1",
+                (memory_id,),
+            ).fetchone()
+            _user_id = (_user_id_row["user_id"] if _user_id_row else None) or "default"
+
+            _SINGLE_VALUED_PREDICATES = {
+                "lives_in", "works_at", "uses_editor", "prefers",
+                "switched_to", "current_status", "has_title",
+                "has_email", "has_phone", "has_address", "has_role",
+                "uses_language", "subscribes_to",
+            }
+
             for fact in engram.facts:
                 if not fact.subject or not fact.predicate or not fact.value:
                     continue
                 canonical = fact.canonical_key or f"{fact.subject}|{fact.predicate}|{fact.value}"
-                fact_id = str(uuid.uuid4())
                 now_iso = fact.valid_from or fact.time or ""
+                now_epoch = time.time()
 
-                # Auto-supersede: if this fact's predicate implies a
-                # single-valued property (lives_in, works_at, uses_editor,
-                # current status, etc.), close previous valid facts.
-                # Heuristic: predicates that start with a state-verb or
-                # match common single-valued patterns get superseded.
-                _SINGLE_VALUED_PREDICATES = {
-                    "lives_in", "works_at", "uses_editor", "prefers",
-                    "switched_to", "current_status", "has_title",
-                    "has_email", "has_phone", "has_address", "has_role",
-                    "uses_language", "subscribes_to",
-                }
-                pred_lower = fact.predicate.lower().replace(" ", "_")
+                # --- Reaffirmation path -------------------------------------
+                reaffirmed = conn.execute(
+                    """SELECT id, reaffirmed_count FROM engram_facts
+                    WHERE canonical_key = ?
+                      AND superseded_by_id IS NULL
+                      AND value = ?
+                    ORDER BY created_at ASC LIMIT 1""",
+                    (canonical, fact.value),
+                ).fetchone()
+                if reaffirmed is not None:
+                    prev = int(reaffirmed["reaffirmed_count"] or 0)
+                    conn.execute(
+                        """UPDATE engram_facts
+                        SET reaffirmed_count = ?, last_reaffirmed_at = ?
+                        WHERE id = ?""",
+                        (prev + 1, now_epoch, reaffirmed["id"]),
+                    )
+                    # Still route preference rows so the preferences store
+                    # sees the reaffirmation too.
+                    self._upsert_preference_row(
+                        conn,
+                        fact=fact,
+                        memory_id=memory_id,
+                        user_id=_user_id,
+                        canonical=canonical,
+                        now_epoch=now_epoch,
+                    )
+                    continue
+
+                # --- Supersede path -----------------------------------------
+                pred_lower = _normalize_predicate(fact.predicate)
                 is_single_valued = (
                     pred_lower in _SINGLE_VALUED_PREDICATES
-                    or fact.valid_from  # explicit valid_from = temporal update
+                    or bool(fact.valid_from)
                 )
+                new_fact_id = str(uuid.uuid4())
                 if is_single_valued and not fact.valid_until:
                     try:
                         conn.execute(
-                            """UPDATE engram_facts SET valid_until = ?
-                            WHERE subject = ? AND predicate = ? AND valid_until IS NULL
-                            AND memory_id != ?""",
-                            (now_iso or "superseded", fact.subject, fact.predicate, memory_id),
+                            """UPDATE engram_facts
+                            SET valid_until = ?,
+                                superseded_by_id = ?,
+                                tier = 'avoid'
+                            WHERE subject = ? AND predicate = ?
+                              AND valid_until IS NULL
+                              AND memory_id != ?
+                              AND value != ?""",
+                            (
+                                now_iso or "superseded",
+                                new_fact_id,
+                                fact.subject,
+                                fact.predicate,
+                                memory_id,
+                                fact.value,
+                            ),
                         )
                     except Exception:
                         pass
 
+                # --- New row insert ----------------------------------------
                 conn.execute(
                     """INSERT INTO engram_facts
                     (id, memory_id, subject, predicate, value,
                      value_numeric, value_unit, time, valid_from, valid_until,
-                     qualifier, canonical_key, confidence, is_derived)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                     qualifier, canonical_key, confidence, is_derived,
+                     tier, reaffirmed_count, last_reaffirmed_at, schema_v)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            'medium', 0, NULL, 1)""",
                     (
-                        fact_id,
+                        new_fact_id,
                         memory_id,
                         fact.subject,
                         fact.predicate,
@@ -997,6 +1279,16 @@ class ContextResolver:
                         fact.confidence,
                         1 if fact.is_derived else 0,
                     ),
+                )
+
+                # --- Preference routing ------------------------------------
+                self._upsert_preference_row(
+                    conn,
+                    fact=fact,
+                    memory_id=memory_id,
+                    user_id=_user_id,
+                    canonical=canonical,
+                    now_epoch=now_epoch,
                 )
 
             # Store entities

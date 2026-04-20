@@ -525,6 +525,12 @@ class FullMemory(SmartMemory, SceneProfileMixin):
                 self._evolution_layer = EvolutionLayer(
                     data_dir=self._runtime_root_dir,
                 )
+                # M4.2: wire the engram DB so answer acceptance can stamp
+                # last_verified_at and bump tiers on downstream success.
+                try:
+                    self._evolution_layer.attach_substrate(self.db)
+                except Exception as exc:
+                    logger.debug("attach_substrate skipped: %s", exc)
             except Exception as e:
                 logger.debug("Evolution layer init skipped: %s", e)
         return self._evolution_layer

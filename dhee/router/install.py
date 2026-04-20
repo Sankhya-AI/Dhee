@@ -33,6 +33,7 @@ ROUTER_TOOLS = (
     "mcp__dhee__dhee_read",
     "mcp__dhee__dhee_bash",
     "mcp__dhee__dhee_agent",
+    "mcp__dhee__dhee_grep",
     "mcp__dhee__dhee_expand_result",
 )
 

@@ -87,6 +87,9 @@ class EvolutionLayer:
 
         if enable_nididhyasana and self._samskara:
             try:
+                # Canonical path after M7.1 relocation. The full evolve() cycle
+                # still depends on ``dhee.mini.progressive_trainer``, which
+                # is not yet restored — that is the remaining M7 training work.
                 from dhee.training.nididhyasana import NididhyasanaLoop
                 self._nididhyasana = NididhyasanaLoop(
                     samskara=self._samskara,
@@ -106,6 +109,11 @@ class EvolutionLayer:
             )
         except Exception as e:
             logger.debug("MetaBuddhi init skipped: %s", e)
+
+        # M4.2: substrate handle for downstream-success tier bumps + last_verified
+        # stamping. Optional — the evolution layer works without it; caller
+        # passes the engram DB via ``attach_substrate(db)``.
+        self._substrate_db = None
 
     # ------------------------------------------------------------------
     # WRITE path hooks
@@ -215,6 +223,7 @@ class EvolutionLayer:
         source_memory_ids: List[str],
         source_texts: Optional[List[str]] = None,
         user_id: str = "default",
+        task_type: Optional[str] = None,
     ) -> None:
         """Called after an answer is synthesized from memories.
 
@@ -255,6 +264,20 @@ class EvolutionLayer:
             except Exception as e:
                 logger.debug("Samskara answer recording failed: %s", e)
 
+        # M4.2: close the MetaBuddhi propose → assess → commit/rollback loop.
+        # An accepted answer is a positive evaluation of the active strategy
+        # (score=1.0). Once _MIN_EVAL_COUNT samples accumulate MetaBuddhi
+        # auto-resolves the pending attempt.
+        # M4.2b: tag the sample with task_type (if the caller supplied one)
+        # so resolution can use group-relative deltas.
+        self._feed_meta_buddhi_signal(1.0, task_type=task_type)
+
+        # M3↔M4 bridge: "world didn't push back" signal. For each cited memory,
+        # mark its active engram_facts as verified and bump their tier (the
+        # downstream-success hook referenced in engram_tiering.py).
+        if source_memory_ids:
+            self._on_facts_grounded(source_memory_ids)
+
     def on_answer_corrected(
         self,
         query: str,
@@ -262,6 +285,7 @@ class EvolutionLayer:
         correct_answer: str,
         memory_ids: List[str],
         user_id: str = "default",
+        task_type: Optional[str] = None,
     ) -> None:
         """Called when a user explicitly corrects an answer.
 
@@ -278,6 +302,144 @@ class EvolutionLayer:
                 )
             except Exception as e:
                 logger.debug("Samskara correction recording failed: %s", e)
+
+        # M4.2: correction = negative evaluation of the active strategy.
+        # Don't bump tiers or mark facts verified on a correction path.
+        self._feed_meta_buddhi_signal(0.0, task_type=task_type)
+
+    # ------------------------------------------------------------------
+    # M4.2 helpers: close the propose → assess → commit/rollback loop.
+    # ------------------------------------------------------------------
+
+    def attach_substrate(self, db) -> None:
+        """Wire the engram DB so tier promotion + verification can run.
+
+        Optional. Without it, answer acceptance still feeds MetaBuddhi but
+        can't stamp ``last_verified_at`` or bump engram_facts tiers.
+        """
+        self._substrate_db = db
+
+    def _feed_meta_buddhi_signal(
+        self, score: float, *, task_type: Optional[str] = None
+    ) -> None:
+        if not self._meta_buddhi:
+            return
+        try:
+            self._meta_buddhi.record_evaluation(score, task_type=task_type)
+        except Exception as exc:
+            logger.debug("MetaBuddhi record_evaluation failed: %s", exc)
+
+    def _on_facts_grounded(self, memory_ids: List[str]) -> None:
+        """Mark active engram_facts verified + bump tier on downstream success.
+
+        "Grounded" means the agent cited these memories *and* the user
+        accepted the resulting answer. That's the strongest real-world
+        signal we have — stronger than raw reaffirmation count — so it
+        flows straight to ``promote_on_downstream_success``.
+        """
+        if not self._substrate_db or not memory_ids:
+            return
+        try:
+            from dhee.core.engram_tiering import promote_on_downstream_success
+            from dhee.core.engram_verification import mark_verified
+
+            placeholders = ",".join(["?"] * len(memory_ids))
+            with self._substrate_db._get_connection() as conn:
+                rows = conn.execute(
+                    f"SELECT id FROM engram_facts "
+                    f"WHERE memory_id IN ({placeholders}) "
+                    f"  AND superseded_by_id IS NULL "
+                    f"  AND COALESCE(tier, 'medium') != 'avoid'",
+                    tuple(memory_ids),
+                ).fetchall()
+            for row in rows:
+                fact_id = row["id"] if hasattr(row, "keys") else row[0]
+                mark_verified(self._substrate_db, fact_id=fact_id)
+                promote_on_downstream_success(
+                    self._substrate_db, fact_id=fact_id
+                )
+        except Exception as exc:
+            logger.debug("on_facts_grounded failed: %s", exc)
+
+    # ------------------------------------------------------------------
+    # M4.3 — session-boundary scheduler for Nididhyasana
+    # ------------------------------------------------------------------
+
+    def on_session_end(
+        self,
+        *,
+        reason: str = "session_end",
+        force_evolve: bool = False,
+    ) -> Dict[str, Any]:
+        """Fire the Nididhyasana readiness gate on a real session boundary.
+
+        Called from harness SessionEnd hooks. Runs ``should_evolve()``
+        (cheap — just samskara counters + cooldown), persists a gate
+        record to ``~/.dhee/nididhyasana/session_gates.jsonl`` with
+        (timestamp, verdict, reason), and returns the decision.
+
+        By design, ``evolve()`` is NOT invoked unless ``force_evolve=True``.
+        The heavy training cycle is gated on a separate operator action
+        until the training-infrastructure relocation (``dhee.training.*``,
+        ``dhee.mini.progressive_trainer``) is reunified in M7. Firing the
+        gate today still gives operators and ``dhee doctor`` an honest
+        signal of when retraining *would* have triggered.
+        """
+        record: Dict[str, Any] = {
+            "ts": __import__("time").time(),
+            "reason": reason,
+            "gate_fired": False,
+            "gate_reason": "nididhyasana not initialized",
+            "evolved": False,
+        }
+        if not self._nididhyasana:
+            self._persist_session_gate(record)
+            return record
+        try:
+            should, why = self._nididhyasana.should_evolve()
+            record["gate_fired"] = bool(should)
+            record["gate_reason"] = why
+            if should and force_evolve:
+                cycle = self._nididhyasana.evolve()
+                if cycle:
+                    record["evolved"] = True
+                    record["cycle_id"] = cycle.cycle_id
+                    record["verdict"] = cycle.verdict
+                    record["error"] = cycle.error
+        except Exception as exc:
+            record["gate_reason"] = f"should_evolve failed: {exc}"
+            logger.debug("on_session_end failed: %s", exc)
+        self._persist_session_gate(record)
+        return record
+
+    def _persist_session_gate(self, record: Dict[str, Any]) -> None:
+        path = os.path.join(self._data_dir, "nididhyasana", "session_gates.jsonl")
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError as exc:
+            logger.debug("session gate persist failed: %s", exc)
+
+    def read_session_gates(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """Tail the session-gate log. Used by ``dhee doctor``."""
+        path = os.path.join(self._data_dir, "nididhyasana", "session_gates.jsonl")
+        if not os.path.exists(path):
+            return []
+        out: List[Dict[str, Any]] = []
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        out.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            return []
+        return out[-max(1, int(limit)):]
 
     # ------------------------------------------------------------------
     # Background: evolution check

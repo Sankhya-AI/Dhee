@@ -88,6 +88,17 @@ class SessionReport:
     digest_tokens: int = 0
     saved_tokens: int = 0
     warnings: list[str] = field(default_factory=list)
+    # Ground-truth usage, read from each assistant record's `usage` field.
+    assistant_turns: int = 0
+    cache_read_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    output_tokens: int = 0
+    # Tool-result share: tokens returned by tool_use blocks that enter
+    # the prompt cache on the next turn.
+    tool_result_tokens: int = 0
+    # Total tokens across every assistant-visible content block on the
+    # user side (approximates total new-input per session).
+    user_block_tokens: int = 0
 
     def add(self, p: CallProjection) -> None:
         self.total_calls += 1
@@ -106,6 +117,19 @@ class SessionReport:
         if self.raw_tokens <= 0:
             return 0.0
         return (self.net_saved / self.raw_tokens) * 100.0
+
+    @property
+    def cache_read_per_turn(self) -> float:
+        if self.assistant_turns <= 0:
+            return 0.0
+        return self.cache_read_input_tokens / self.assistant_turns
+
+    @property
+    def tool_result_share(self) -> float:
+        """Share of cache-read tokens attributable to tool_result blocks."""
+        if self.cache_read_input_tokens <= 0:
+            return 0.0
+        return self.tool_result_tokens / self.cache_read_input_tokens
 
 
 def _project_read(tool_input: dict[str, Any], result_text: str) -> CallProjection:
@@ -199,7 +223,13 @@ _PROJECTORS = {
 
 
 def replay_session(path: Path) -> SessionReport:
-    """Walk a transcript, pairing tool_use records with their tool_result."""
+    """Walk a transcript, pairing tool_use records with their tool_result.
+
+    Also collects ground-truth usage per assistant turn (cache-read,
+    cache-creation, output) and tool_result token counts — these feed
+    the extended quality-report metrics (cache-read/turn, tool_result
+    share).
+    """
     pending: dict[str, dict[str, Any]] = {}
     report = SessionReport(session_id=path.stem)
 
@@ -212,8 +242,24 @@ def replay_session(path: Path) -> SessionReport:
                 rec = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            rec_type = rec.get("type")
             msg = rec.get("message") or rec
-            content = msg.get("content")
+            # Assistant usage (ground-truth API cache/output counts).
+            if rec_type == "assistant" and isinstance(msg, dict):
+                usage = msg.get("usage") or {}
+                if isinstance(usage, dict):
+                    report.assistant_turns += 1
+                    try:
+                        report.cache_read_input_tokens += int(
+                            usage.get("cache_read_input_tokens", 0) or 0
+                        )
+                        report.cache_creation_input_tokens += int(
+                            usage.get("cache_creation_input_tokens", 0) or 0
+                        )
+                        report.output_tokens += int(usage.get("output_tokens", 0) or 0)
+                    except (TypeError, ValueError):
+                        pass
+            content = msg.get("content") if isinstance(msg, dict) else None
             if not isinstance(content, list):
                 continue
             for block in content:
@@ -230,10 +276,14 @@ def replay_session(path: Path) -> SessionReport:
                         }
                 elif btype == "tool_result":
                     tid = block.get("tool_use_id")
+                    text = _flatten_result(block.get("content"))
+                    # Every tool_result contributes to cache-replay load
+                    # on subsequent turns, regardless of whether we
+                    # project a digest for it. Track the raw token mass.
+                    report.tool_result_tokens += _tokens(text)
                     if not tid or tid not in pending:
                         continue
                     entry = pending.pop(tid)
-                    text = _flatten_result(block.get("content"))
                     projector = _PROJECTORS[entry["tool"]]
                     try:
                         p = projector(entry["input"], text)

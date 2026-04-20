@@ -629,8 +629,32 @@ class SearchPipeline:
             except Exception as e:
                 logger.debug("Evolution search hook skipped: %s", e)
 
-        # Buddhi search hook: piggyback proactive signals (intentions, insights)
         final_results = results[:limit]
+
+        # Annotate distilled memories with their provenance source count so
+        # callers (HyperContext, lineage UI, dhee_why) can tell synthesis
+        # from raw writes without a second DB round-trip. Best-effort: a
+        # failure here must never break retrieval.
+        try:
+            db = getattr(self, "db", None) or getattr(self, "_db", None)
+            get_counts = getattr(db, "get_distillation_source_counts", None)
+            if final_results and callable(get_counts):
+                ids = [
+                    str(r.get("id"))
+                    for r in final_results
+                    if r.get("id") is not None
+                ]
+                counts = get_counts(ids) if ids else {}
+                if counts:
+                    for r in final_results:
+                        rid = str(r.get("id"))
+                        n = counts.get(rid)
+                        if n:
+                            r["provenance_source_count"] = n
+        except Exception as e:
+            logger.debug("Provenance annotation skipped: %s", e)
+
+        # Buddhi search hook: piggyback proactive signals (intentions, insights)
         buddhi_layer = self._buddhi_layer_fn()
         if buddhi_layer and final_results:
             try:

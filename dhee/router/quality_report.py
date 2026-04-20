@@ -39,6 +39,7 @@ class QualityReport:
     dhee_version: str = ""
     generated_at: float = 0.0
     router: dict[str, Any] = field(default_factory=dict)
+    critical_surface: dict[str, Any] = field(default_factory=dict)
     replay: dict[str, Any] = field(default_factory=dict)
     edits: dict[str, Any] = field(default_factory=dict)
     hooks: dict[str, Any] = field(default_factory=dict)
@@ -53,6 +54,19 @@ def _router_section() -> dict[str, Any]:
         from dhee.router.stats import compute_stats
 
         return compute_stats().to_dict()
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def _critical_surface_section() -> dict[str, Any]:
+    try:
+        import os
+
+        from dhee.configs.base import _dhee_data_dir
+        from dhee.db.sqlite import SQLiteManager
+
+        db = SQLiteManager(os.path.join(_dhee_data_dir(), "history.db"))
+        return db.summarize_route_decisions(user_id="default")
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}"}
 
@@ -78,6 +92,10 @@ def _replay_section(sessions_dir: Path | None = None, limit: int = 0) -> dict[st
         raw = digest = calls = 0
         by_tool: dict[str, int] = {}
         warnings = 0
+        turns = 0
+        cache_read = 0
+        cache_creation = 0
+        tool_result_tokens = 0
         for p in transcripts:
             r = replay_session(p)
             raw += r.raw_tokens
@@ -86,18 +104,41 @@ def _replay_section(sessions_dir: Path | None = None, limit: int = 0) -> dict[st
             for t, n in r.calls_by_tool.items():
                 by_tool[t] = by_tool.get(t, 0) + n
             warnings += len(r.warnings)
+            turns += r.assistant_turns
+            cache_read += r.cache_read_input_tokens
+            cache_creation += r.cache_creation_input_tokens
+            tool_result_tokens += r.tool_result_tokens
 
         net_saved = raw - digest
         saved_pct = round(net_saved / raw * 100, 2) if raw else 0.0
+        cache_read_per_turn = int(cache_read / turns) if turns else 0
+        projected_cache_read_per_turn = (
+            int((cache_read - net_saved) / turns) if turns and cache_read else 0
+        )
+        tool_result_share = round(tool_result_tokens / cache_read, 3) if cache_read else 0.0
+
+        # Promise #1 gate: target < 30K avg cache-read tokens per turn.
+        cache_read_target = 30_000
+        promise1_met = projected_cache_read_per_turn < cache_read_target if turns else None
+
         return {
             "sessions_dir": str(sdir),
             "sessions": len(transcripts),
+            "assistant_turns": turns,
             "total_calls": calls,
             "calls_by_tool": by_tool,
             "raw_tokens": raw,
             "digest_tokens": digest,
             "net_saved_tokens": net_saved,
             "saved_pct": saved_pct,
+            "cache_read_tokens_total": cache_read,
+            "cache_creation_tokens_total": cache_creation,
+            "cache_read_per_turn": cache_read_per_turn,
+            "projected_cache_read_per_turn": projected_cache_read_per_turn,
+            "cache_read_target_per_turn": cache_read_target,
+            "promise1_met": promise1_met,
+            "tool_result_tokens": tool_result_tokens,
+            "tool_result_share": tool_result_share,
             "warnings_count": warnings,
         }
     except Exception as exc:
@@ -178,6 +219,7 @@ def build_report(sessions_dir: Path | None = None, limit: int = 0) -> QualityRep
         dhee_version=__version__,
         generated_at=time.time(),
         router=_router_section(),
+        critical_surface=_critical_surface_section(),
         replay=_replay_section(sessions_dir=sessions_dir, limit=limit),
         edits=_edits_section(),
         hooks=_hooks_section(),
@@ -194,6 +236,7 @@ def save_report(report: QualityReport, path: Path | None = None) -> Path:
 
 def format_human(report: QualityReport) -> str:
     r = report.router
+    cs = report.critical_surface
     rep = report.replay
     e = report.edits
     s = report.settings
@@ -219,14 +262,40 @@ def format_human(report: QualityReport) -> str:
             lines.append("    → quality signal: digests too shallow (raise depth)")
         else:
             lines.append("    → quality signal: healthy")
+    if cs and not cs.get("error") and cs.get("total_decisions", 0):
+        lines += [
+            "",
+            "[ critical surface ]",
+            f"  decisions:      {cs.get('total_decisions', 0)}",
+            f"  by route:       {cs.get('by_route', {})}",
+            f"  by packet:      {cs.get('by_packet_kind', {})}",
+            f"  saved tokens:   {cs.get('total_token_delta', 0):,}"
+            f"  (reads: {cs.get('read_saved_tokens', 0):,}, artifact reuse: {cs.get('artifact_reuse_saved_tokens', 0):,})",
+            f"  avg fits:       semantic={cs.get('avg_semantic_fit', 0):.2f}"
+            f" structural={cs.get('avg_structural_fit', 0):.2f}"
+            f" confidence={cs.get('avg_confidence', 0):.2f}",
+        ]
     lines += [
         "",
         "[ replay projection (counterfactual) ]",
         f"  sessions:       {rep.get('sessions', 0)}",
+        f"  assistant turns: {rep.get('assistant_turns', 0)}",
         f"  tool calls:     {rep.get('total_calls', 0)}   by tool: {rep.get('calls_by_tool', {})}",
         f"  raw tokens:     {rep.get('raw_tokens', 0):,}",
         f"  digest tokens:  {rep.get('digest_tokens', 0):,}",
         f"  net saved:      {rep.get('net_saved_tokens', 0):,}  ({rep.get('saved_pct', 0):.1f}%)",
+        "",
+        "[ promise 1 — token savings (target < 30K cache-read / turn) ]",
+        f"  cache-read / turn today:     {rep.get('cache_read_per_turn', 0):,}",
+        f"  projected with router:       {rep.get('projected_cache_read_per_turn', 0):,}",
+        f"  tool_result share of cache:  {rep.get('tool_result_share', 0):.1%}",
+    ]
+    pm = rep.get("promise1_met")
+    if pm is True:
+        lines.append("    → promise met: projected cache-read per turn below target")
+    elif pm is False:
+        lines.append("    → promise not yet met: projected cache-read per turn above target")
+    lines += [
         "",
         "[ edits (current session) ]",
         f"  files edited:   {e.get('files', 0)}",
@@ -243,6 +312,7 @@ def format_share(report: QualityReport) -> str:
     description, or a Slack thread.
     """
     r = report.router or {}
+    cs = report.critical_surface or {}
     rep = report.replay or {}
     s = report.settings or {}
     h = report.hooks or {}
@@ -268,16 +338,29 @@ def format_share(report: QualityReport) -> str:
         "## Projected savings (counterfactual replay of real sessions)",
         "",
         f"- sessions replayed: **{rep.get('sessions', 0)}**",
+        f"- assistant turns: **{rep.get('assistant_turns', 0)}**",
         f"- tool calls replayed: **{calls:,}**",
         f"- raw tokens (native flow): **{raw:,}**",
         f"- digest tokens (router flow): **{digest:,}**",
         f"- net saved: **{saved:,}**  (**{saved_pct:.1f}%**)",
+        "",
+        "## Cache-read per turn (promise #1: target < 30K)",
+        "",
+        f"- today (native): **{rep.get('cache_read_per_turn', 0):,}**",
+        f"- projected (router): **{rep.get('projected_cache_read_per_turn', 0):,}**",
+        f"- tool_result share of cache-read: **{rep.get('tool_result_share', 0):.1%}**",
         "",
         "## Quality signal",
         "",
         f"- expansion rate: **{expansion:.1%}**  "
         "(how often the model asked for full raw content behind a digest)",
     ]
+    if cs and not cs.get("error") and cs.get("total_decisions", 0):
+        lines += [
+            f"- critical-surface decisions: **{cs.get('total_decisions', 0)}**",
+            f"- saved tokens from routed reads + artifact reuse: **{cs.get('total_token_delta', 0):,}**",
+            f"- route mix: `{cs.get('by_route', {})}`",
+        ]
     if calls > 0:
         if expansion < 0.05:
             lines.append("- digests are sufficient — no quality regression observed")

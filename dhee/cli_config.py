@@ -48,15 +48,41 @@ def get_default_config() -> Dict[str, Any]:
         "version": "1",
         "provider": "gemini",
         "packages": ["engram-memory"],
+        "identity": {
+            "user_id": "default",
+        },
+        "harnesses": {
+            "claude_code": {
+                "enabled": True,
+                "router": True,
+                "shared_task_context": True,
+            },
+            "codex": {
+                "enabled": True,
+                "shared_task_context": True,
+                "auto_sync": True,
+            },
+        },
     }
+
+
+def _merge_defaults(config: Dict[str, Any], defaults: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(defaults)
+    for key, value in config.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_defaults(value, merged[key])  # type: ignore[arg-type]
+        else:
+            merged[key] = value
+    return merged
 
 
 def load_config() -> Dict[str, Any]:
     """Load config from ~/.dhee/config.json or return defaults."""
+    defaults = get_default_config()
     if os.path.exists(CONFIG_PATH):
         with open(CONFIG_PATH, "r") as f:
-            return json.load(f)
-    return get_default_config()
+            return _merge_defaults(json.load(f), defaults)
+    return defaults
 
 
 def save_config(config: Dict[str, Any]) -> None:
