@@ -750,18 +750,26 @@ def cmd_task(args: argparse.Namespace) -> None:
 
 
 def cmd_install_hooks(args: argparse.Namespace) -> None:
-    """Native Dhee install for Claude Code and/or Codex."""
+    """Native Dhee install for Claude Code, Codex, and/or gstack."""
     from dhee.harness.install import install_harnesses
 
-    harness = getattr(args, "harness", "all")
+    positional = (getattr(args, "target", None) or "").strip().lower()
+    flag_value = getattr(args, "harness", None)
+    if positional:
+        harness = positional
+    elif flag_value:
+        harness = flag_value
+    else:
+        harness = "all"
     enable_router = not getattr(args, "no_router", False)
     results = install_harnesses(
         harness=harness,
         enable_router=enable_router,
     )
 
+    labels = {"claude_code": "Claude Code", "codex": "Codex", "gstack": "gstack"}
     for name, result in results.items():
-        label = "Claude Code" if name == "claude_code" else "Codex"
+        label = labels.get(name, name)
         print(f"  {label}: {result.action}")
         if result.path:
             print(f"    path: {result.path}")
@@ -821,6 +829,59 @@ def cmd_harness(args: argparse.Namespace) -> None:
         print(f"  {name}: {result.action} ({'changed' if result.changed else 'no-op'})")
         if result.path:
             print(f"    path: {result.path}")
+
+
+def cmd_adapters(args: argparse.Namespace) -> None:
+    """Inspect or refresh third-party memory adapters (currently: gstack)."""
+    adapter = str(getattr(args, "adapter", "") or "").strip().lower()
+    action = str(getattr(args, "adapter_action", None) or "status")
+
+    if adapter != "gstack":
+        print(f"Unsupported adapter: {adapter}", file=sys.stderr)
+        sys.exit(2)
+
+    from dhee.adapters import gstack as gstack_adapter
+
+    if action == "status":
+        info = gstack_adapter.status()
+        if args.json:
+            _json_out(info)
+            return
+        detected = info["detected"]
+        print(f"  gstack installed: {detected['installed']}")
+        if detected.get("version"):
+            print(f"    version: {detected['version']}")
+        print(f"    gstack_home: {detected['gstack_home']}")
+        print(f"    projects_detected: {len(detected.get('projects') or [])}")
+        print(f"    projects_tracked:  {len(info.get('projects_tracked') or [])}")
+        print(f"    last_ingest_ts:    {info.get('last_ingest_ts') or '—'}")
+        print(f"    manifest:          {info['manifest_path']}")
+        return
+
+    if action == "reingest":
+        report = gstack_adapter.backfill(reset=bool(getattr(args, "reset", False)))
+        if args.json:
+            _json_out(report)
+            return
+        print(f"  atoms ingested:    {report.get('atoms_total', 0)}")
+        print(f"    learnings:       {report.get('learnings_total', 0)}")
+        print(f"    timeline:        {report.get('timeline_total', 0)}")
+        print(f"    reviews:         {report.get('reviews_total', 0)}")
+        print(f"    checkpoints:     {report.get('checkpoint_sections_total', 0)}")
+        errors = report.get("errors") or []
+        if errors:
+            print(f"    errors:          {len(errors)}")
+            for err in errors[:5]:
+                print(f"      - {err}")
+        return
+
+    if action == "clear":
+        removed = gstack_adapter.clear_manifest()
+        if args.json:
+            _json_out({"manifest_cleared": removed})
+            return
+        print("  gstack manifest cleared." if removed else "  gstack manifest already absent.")
+        return
 
 
 def cmd_purge_legacy_noise(args: argparse.Namespace) -> None:
@@ -1561,13 +1622,22 @@ def build_parser() -> argparse.ArgumentParser:
     # install (native harness bootstrap)
     p_install = sub.add_parser(
         "install",
-        help="Native Dhee install for Claude Code and/or Codex",
+        help="Native Dhee install for Claude Code, Codex, and/or gstack",
+    )
+    p_install.add_argument(
+        "target",
+        nargs="?",
+        default=None,
+        help=(
+            "Optional shortcut: 'claude_code', 'codex', 'gstack', or 'all'. "
+            "Equivalent to --harness. Enables `dhee install gstack`."
+        ),
     )
     p_install.add_argument(
         "--harness",
-        choices=["all", "claude_code", "codex"],
-        default="all",
-        help="Which harnesses to configure",
+        choices=["all", "claude_code", "codex", "gstack"],
+        default=None,
+        help="Which harnesses to configure (default: all if no positional target given)",
     )
     p_install.add_argument(
         "--no-router",
@@ -1589,7 +1659,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_harness.add_argument(
         "--harness",
-        choices=["all", "claude_code", "codex"],
+        choices=["all", "claude_code", "codex", "gstack"],
         default="all",
         help="Harness target",
     )
@@ -1599,6 +1669,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="For `harness enable`: leave Claude Code router disabled",
     )
     p_harness.add_argument("--json", action="store_true", help="JSON output")
+
+    # adapters (third-party memory ingestors)
+    p_adapters = sub.add_parser(
+        "adapters",
+        help="Inspect or refresh third-party memory adapters (e.g. gstack)",
+    )
+    p_adapters.add_argument(
+        "adapter",
+        choices=["gstack"],
+        help="Which adapter",
+    )
+    p_adapters.add_argument(
+        "adapter_action",
+        nargs="?",
+        choices=["status", "reingest", "clear"],
+        default="status",
+        help="Subcommand",
+    )
+    p_adapters.add_argument(
+        "--reset",
+        action="store_true",
+        help="For `reingest`: clear the cursor manifest first and re-ingest everything",
+    )
+    p_adapters.add_argument("--json", action="store_true", help="JSON output")
 
     # purge-legacy-noise
     p_purge = sub.add_parser(
@@ -1764,6 +1858,7 @@ COMMAND_MAP = {
     "decades-eval": cmd_decades_eval,
     "install": cmd_install_hooks,
     "harness": cmd_harness,
+    "adapters": cmd_adapters,
     "uninstall-hooks": cmd_uninstall_hooks,
     "purge-legacy-noise": cmd_purge_legacy_noise,
     "router": cmd_router,

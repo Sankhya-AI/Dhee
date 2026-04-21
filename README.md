@@ -98,6 +98,14 @@ After install:
 - Codex uses native `config.toml` + Dhee-managed instructions + incremental event-stream sync, so post-tool results and uploaded artifacts become shared reusable context without manual re-sync.
 - `dhee harness status` shows the live state and `dhee harness disable --harness codex` turns a harness off cleanly.
 
+### Third-party skill packs: `dhee install gstack`
+
+Running [gstack](https://github.com/garrytan/gstack)? `dhee install gstack`
+wires its siloed `~/.gstack/projects/*` memory into the same Dhee pipeline
+as everything else — semantic search, consolidation, correction, episodic
+recall — without touching any gstack files. See
+[docs/adapters/gstack.md](docs/adapters/gstack.md).
+
 Project docs (CLAUDE.md, AGENTS.md, SKILL.md, etc.) still auto-ingest on first use. Run `dhee ingest` manually any time to re-chunk.
 
 ---
