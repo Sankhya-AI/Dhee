@@ -44,6 +44,32 @@ def _get_dhee():
     )
 
 
+def _maybe_tail_ingest_gstack(dhee: Any) -> None:
+    """Best-effort gstack delta ingest on session start/stop.
+
+    No-op unless the user explicitly ran ``dhee install gstack``. Never
+    raises — runs inside Claude Code hooks.
+    """
+
+    try:
+        from dhee.cli_config import load_config
+
+        config = load_config() or {}
+        harnesses = config.get("harnesses") or {}
+        gstack_cfg = harnesses.get("gstack") or {}
+        if not gstack_cfg.get("enabled"):
+            return
+    except Exception:
+        return
+
+    try:
+        from dhee.adapters import gstack as gstack_adapter
+
+        gstack_adapter.tail_ingest(dhee=dhee)
+    except Exception:
+        return
+
+
 def _render(ctx: dict[str, Any], **kwargs: Any) -> str:
     from dhee.hooks.claude_code.renderer import render_context
 
@@ -114,6 +140,8 @@ def handle_session_start(payload: dict[str, Any]) -> dict[str, Any]:
         auto_ingest_project(dhee)
     except Exception:
         pass
+
+    _maybe_tail_ingest_gstack(dhee)
 
     # Assemble: doc chunks + typed cognition, budgeted.
     assembled = assemble(dhee, query=task_desc, include_cognition=True)
@@ -352,6 +380,8 @@ def handle_pre_compact(payload: dict[str, Any]) -> dict[str, Any]:
 
 def handle_stop(payload: dict[str, Any]) -> dict[str, Any]:
     dhee = _get_dhee()
+
+    _maybe_tail_ingest_gstack(dhee)
 
     summary = "session ended"
     task_type = None
