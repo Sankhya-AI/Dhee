@@ -54,6 +54,14 @@ def install_harnesses(
         elif name == "codex":
             results[name] = _install_codex(config)
             config.setdefault("harnesses", {}).setdefault("codex", {})["enabled"] = True
+        elif name == "gstack":
+            results[name] = _install_gstack(config)
+            details = results[name].details or {}
+            gstack_cfg = config.setdefault("harnesses", {}).setdefault("gstack", {})
+            gstack_cfg["enabled"] = results[name].action == "enabled"
+            gstack_cfg["path"] = results[name].path
+            gstack_cfg["last_ingest_ts"] = details.get("last_ingest_ts")
+            gstack_cfg["detected_projects"] = details.get("projects_detected", [])
     save_config(config)
     return results
 
@@ -69,6 +77,9 @@ def disable_harnesses(*, harness: str = "all") -> dict[str, HarnessResult]:
         elif name == "codex":
             results[name] = _disable_codex()
             config.setdefault("harnesses", {}).setdefault("codex", {})["enabled"] = False
+        elif name == "gstack":
+            results[name] = _disable_gstack()
+            config.setdefault("harnesses", {}).setdefault("gstack", {})["enabled"] = False
     save_config(config)
     return results
 
@@ -82,6 +93,8 @@ def harness_status(*, harness: str = "all") -> dict[str, Dict[str, Any]]:
             status[name] = _status_claude_code(config)
         elif name == "codex":
             status[name] = _status_codex(config)
+        elif name == "gstack":
+            status[name] = _status_gstack(config)
     return status
 
 
@@ -93,6 +106,8 @@ def _normalize_harnesses(harness: str) -> list[str]:
         return ["claude_code"]
     if value == "codex":
         return ["codex"]
+    if value == "gstack":
+        return ["gstack"]
     raise ValueError(f"Unsupported harness: {harness}")
 
 
@@ -364,3 +379,69 @@ def _write_json(path: Path, data: Dict[str, Any]) -> None:
 
 def _escape_toml(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+# ---------------------------------------------------------------------------
+# gstack adapter
+# ---------------------------------------------------------------------------
+
+
+def _install_gstack(config: Dict[str, Any]) -> HarnessResult:
+    from dhee.adapters import gstack as gstack_adapter
+
+    detected = gstack_adapter.detect()
+    if not detected.installed and not detected.projects:
+        return HarnessResult(
+            harness="gstack",
+            action="skipped",
+            path=detected.gstack_home,
+            changed=False,
+            details={
+                "reason": "gstack_not_detected",
+                "looked_for": str(Path.home() / ".claude" / "skills" / "gstack" / "VERSION"),
+                "gstack_home": detected.gstack_home,
+            },
+        )
+    report = gstack_adapter.backfill()
+    return HarnessResult(
+        harness="gstack",
+        action="enabled",
+        path=detected.gstack_home,
+        changed=report.get("atoms_total", 0) > 0,
+        details={
+            "projects_detected": detected.projects,
+            "atoms_ingested": report.get("atoms_total", 0),
+            "last_ingest_ts": report.get("last_ingest_ts"),
+            "gstack_version": detected.version,
+        },
+    )
+
+
+def _disable_gstack() -> HarnessResult:
+    from dhee.adapters import gstack as gstack_adapter
+
+    cleared = gstack_adapter.clear_manifest()
+    return HarnessResult(
+        harness="gstack",
+        action="disabled",
+        path=str(Path.home() / ".dhee" / "gstack_manifest.json"),
+        changed=cleared,
+        details={"manifest_cleared": cleared},
+    )
+
+
+def _status_gstack(config: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee.adapters import gstack as gstack_adapter
+
+    info = gstack_adapter.status()
+    enabled = bool(((config.get("harnesses") or {}).get("gstack") or {}).get("enabled", False))
+    return {
+        "enabled_in_config": enabled,
+        "installed": info["detected"]["installed"],
+        "gstack_home": info["detected"]["gstack_home"],
+        "projects_detected": info["detected"]["projects"],
+        "projects_tracked": info["projects_tracked"],
+        "manifest_path": info["manifest_path"],
+        "last_ingest_ts": info["last_ingest_ts"],
+        "gstack_version": info["detected"]["version"],
+    }

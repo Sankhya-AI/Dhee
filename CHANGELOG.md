@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [5.1.0] - 2026-04-21 — gstack adapter
+
+Third first-class harness target: `dhee install gstack`. gstack (Garry
+Tan's 23-skill Claude Code skill pack) keeps its memory under
+`~/.gstack/projects/<slug>/` as siloed JSONL + markdown. This release
+adds a read-only adapter that ingests every gstack learning, timeline
+event, review, and checkpoint section into Dhee's existing memory
+pipeline so gstack users get semantic search, consolidation, correction,
+and episodic rehydration without rewriting any gstack code.
+
+- New: `dhee/adapters/gstack.py` + `dhee/adapters/gstack_parser.py` —
+  detect, backfill, and delta tail-ingest with per-project cursor
+  manifest at `$DHEE_DATA_DIR/gstack_manifest.json`.
+- New: `dhee install gstack` (also `dhee install --harness gstack`) and
+  `dhee adapters gstack [status|reingest|clear]`.
+- `dhee harness status` / `enable` / `disable` now accepts `--harness gstack`.
+- Claude Code session hooks call `tail_ingest()` on `SessionStart` and
+  `Stop`; no-op unless the user has explicitly run `dhee install gstack`.
+- Zero mutation of gstack files. Respects `$GSTACK_HOME`. Runs gstack's
+  own prompt-injection denylist before writing so we never ingest what
+  gstack itself would reject.
+- Docs: `docs/adapters/gstack.md` maps gstack's six memory failure modes
+  onto the existing Dhee components that fix each one.
+- Tests: `tests/test_gstack_adapter.py` covers backfill, tail,
+  idempotency, checkpoint sectioning, uninstall, graceful skip when
+  gstack is absent, and injection-safe refusal.
+
 ## [5.0.0] - 2026-04-20 — Portable Memory OS Release
 
 Native Claude Code + Codex on one shared Dhee kernel. This release turns Dhee from "memory + router for one harness" into a portable memory OS with native harness install, host-parsed artifact reuse, continuity/handoff, shared-task collaboration, and signed export/import packs.
