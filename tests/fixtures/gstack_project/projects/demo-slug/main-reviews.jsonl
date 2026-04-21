@@ -1,0 +1,2 @@
+{"summary":"Missing null check on user input","severity":"high","file":"src/handler.py","line":42,"reviewer":"security","ts":"2026-04-21T12:10:00Z"}
+{"summary":"Consider caching this lookup","severity":"low","file":"src/util.py","line":7,"reviewer":"perf","ts":"2026-04-21T12:11:00Z"}
