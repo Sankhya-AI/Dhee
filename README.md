@@ -59,7 +59,7 @@ curl -fsSL https://raw.githubusercontent.com/Sankhya-AI/Dhee/main/install.sh | s
 The installer:
 
 1. Creates `~/.dhee` with a self-contained venv.
-2. Installs `dhee[all]` from PyPI.
+2. Installs `dhee[app]` from PyPI.
 3. Prompts you for a **provider** (OpenAI default, Gemini, NVIDIA, or Ollama).
 4. Prompts for your **API key** (stored encrypted under `~/.dhee/secret_store.enc.json`).
 5. Wires Claude Code hooks + MCP server + context router.

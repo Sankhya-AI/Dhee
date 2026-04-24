@@ -5,7 +5,7 @@
 #
 # What it does:
 #   1. Creates ~/.dhee with a hidden Python venv
-#   2. Installs the dhee package (with all providers)
+#   2. Installs the dhee package (app runtime + hosted providers)
 #   3. Symlinks `dhee` and `dhee-mcp` into ~/.local/bin
 #   4. Wires Claude Code (hooks + MCP + router) if available
 #   5. Runs `dhee onboard` — interactive provider picker, API key paste,
@@ -21,7 +21,7 @@ DHEE_HOME="$HOME/.dhee"
 VENV_DIR="$DHEE_HOME/.venv"
 BIN_DIR="$HOME/.local/bin"
 MIN_PYTHON="3.9"
-PACKAGE="dhee[all]"
+PACKAGE="dhee[app]"
 
 # --- Colors ---
 if [ -t 1 ]; then

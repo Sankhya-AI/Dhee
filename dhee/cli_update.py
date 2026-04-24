@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Optional
 
 
-PACKAGE_NAME = "dhee[all]"
+PACKAGE_NAME = "dhee[app]"
 
 
 def _venv_python() -> Path:

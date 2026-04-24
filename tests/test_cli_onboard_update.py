@@ -131,7 +131,7 @@ def test_update_uses_pypi_path_on_non_editable_install(monkeypatch):
 
     cli_update.cmd_update(SimpleNamespace(from_pypi=False))
 
-    # Must have issued the pip upgrade for dhee[all]
+    # Must have issued the pip upgrade for the app runtime.
     pip_upgrades = [r for r in runs if "install" in r and "--upgrade" in r and any("dhee" in piece for piece in r)]
     assert pip_upgrades, f"expected pip upgrade, got {runs}"
 
@@ -172,9 +172,9 @@ def test_update_from_pypi_flag_overrides_editable(monkeypatch, tmp_path):
 
     cli_update.cmd_update(SimpleNamespace(from_pypi=True))
 
-    # No git pull; pip upgrade dhee[all] instead.
+    # No git pull; pip upgrade the app runtime instead.
     assert not any(r[:2] == ["git", "pull"] for r in runs), runs
-    assert any("install" in r and "--upgrade" in r and "dhee[all]" in r for r in runs)
+    assert any("install" in r and "--upgrade" in r and "dhee[app]" in r for r in runs)
 
 
 def test_ui_auto_open_respects_no_open_flag(monkeypatch):

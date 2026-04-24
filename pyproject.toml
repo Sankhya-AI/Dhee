@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dhee"
-version = "6.0.0"
+version = "6.0.1"
 description = "Shared information layer for screen-aware AI agents — real-time collaboration, workspace/project memory, and context routing"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -50,6 +50,13 @@ benchmarks = ["huggingface_hub>=0.24.0"]
 edge = ["onnxruntime>=1.16"]
 # Training (QLoRA fine-tuning)
 training = ["unsloth", "datasets>=2.0", "trl>=0.7", "peft>=0.6"]
+app = [
+    "openai>=1.0.0",
+    "google-genai>=1.0.0",
+    "ollama>=0.4.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+]
 all = [
     "google-genai>=1.0.0",
     "openai>=1.0.0",
