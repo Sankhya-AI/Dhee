@@ -42,7 +42,7 @@ from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFil
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 log = logging.getLogger(__name__)
 
@@ -163,52 +163,65 @@ class WorldContextPackPayload(BaseModel):
     limit: int = 5
 
 
-class WorkspaceRootCreatePayload(BaseModel):
-    name: str
+class UiPayload(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+
+class WorkspaceRootCreatePayload(UiPayload):
+    name: Optional[str] = Field(default=None, validation_alias=AliasChoices("name", "label"))
     description: Optional[str] = None
-    root_path: Optional[str] = None
+    root_path: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("root_path", "rootPath", "workspace_path", "workspacePath", "path"),
+    )
 
 
-class WorkspaceRootUpdatePayload(BaseModel):
-    name: Optional[str] = None
+class WorkspaceRootUpdatePayload(UiPayload):
+    name: Optional[str] = Field(default=None, validation_alias=AliasChoices("name", "label"))
     description: Optional[str] = None
 
 
-class WorkspaceCreatePayload(BaseModel):
-    workspace_path: str
+class WorkspaceCreatePayload(UiPayload):
+    workspace_path: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("workspace_path", "workspacePath", "root_path", "rootPath", "path"),
+    )
     label: Optional[str] = None
-    folder_path: Optional[str] = None
-    is_primary: bool = False
+    folder_path: Optional[str] = Field(default=None, validation_alias=AliasChoices("folder_path", "folderPath"))
+    is_primary: bool = Field(default=False, validation_alias=AliasChoices("is_primary", "isPrimary"))
     folders: Optional[List[str]] = None
 
 
-class WorkspaceFolderPayload(BaseModel):
-    path: str
+class WorkspaceFolderPayload(UiPayload):
+    path: Optional[str] = Field(default=None, validation_alias=AliasChoices("path", "mount_path", "mountPath", "rootPath"))
     label: Optional[str] = None
 
 
-class WorkspaceUpdatePayload(BaseModel):
-    label: Optional[str] = None
+class WorkspaceUpdatePayload(UiPayload):
+    label: Optional[str] = Field(default=None, validation_alias=AliasChoices("label", "name"))
     description: Optional[str] = None
-    root_path: Optional[str] = None
+    root_path: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("root_path", "rootPath", "workspace_path", "workspacePath", "path"),
+    )
 
 
-class WorkspaceProjectCreatePayload(BaseModel):
-    name: str
+class WorkspaceProjectCreatePayload(UiPayload):
+    name: Optional[str] = Field(default=None, validation_alias=AliasChoices("name", "label"))
     description: Optional[str] = None
-    default_runtime: Optional[str] = None
+    default_runtime: Optional[str] = Field(default=None, validation_alias=AliasChoices("default_runtime", "defaultRuntime"))
     color: Optional[str] = None
     icon: Optional[str] = None
-    scope_rules: Optional[List[Dict[str, Any]]] = None
+    scope_rules: Optional[List[Dict[str, Any]]] = Field(default=None, validation_alias=AliasChoices("scope_rules", "scopeRules"))
 
 
-class WorkspaceProjectUpdatePayload(BaseModel):
-    name: Optional[str] = None
+class WorkspaceProjectUpdatePayload(UiPayload):
+    name: Optional[str] = Field(default=None, validation_alias=AliasChoices("name", "label"))
     description: Optional[str] = None
-    default_runtime: Optional[str] = None
+    default_runtime: Optional[str] = Field(default=None, validation_alias=AliasChoices("default_runtime", "defaultRuntime"))
     color: Optional[str] = None
     icon: Optional[str] = None
-    scope_rules: Optional[List[Dict[str, Any]]] = None
+    scope_rules: Optional[List[Dict[str, Any]]] = Field(default=None, validation_alias=AliasChoices("scope_rules", "scopeRules"))
 
 
 class FolderPickPayload(BaseModel):
@@ -624,11 +637,12 @@ def create_app(*, serve_static: bool = True, dev_mode: bool = False) -> FastAPI:
     def create_workspace_api(payload: WorkspaceRootCreatePayload) -> Dict[str, Any]:
         try:
             db = _get_db()
-            root_path = os.path.abspath(os.path.expanduser(payload.root_path or _ui_repo()))
+            root_path = _abs_user_path(payload.root_path or _ui_repo())
+            workspace_name = _display_name(payload.name, fallback_path=root_path)
             workspace = db.upsert_workspace(
                 {
                     "user_id": _ui_user_id(),
-                    "name": payload.name,
+                    "name": workspace_name,
                     "description": payload.description,
                     "root_path": root_path,
                     "metadata": {"created_via": "sankhya-ui"},
@@ -648,7 +662,7 @@ def create_app(*, serve_static: bool = True, dev_mode: bool = False) -> FastAPI:
                     "workspace_id": workspace["id"],
                     "user_id": _ui_user_id(),
                     "name": "General",
-                    "description": f"Default project for {payload.name}",
+                    "description": f"Default project for {workspace_name}",
                     "default_runtime": "codex",
                     "metadata": {"created_via": "sankhya-ui", "auto_created": True},
                 }
@@ -658,6 +672,7 @@ def create_app(*, serve_static: bool = True, dev_mode: bool = False) -> FastAPI:
                 user_id=_ui_user_id(),
                 rules=[{"path_prefix": root_path, "label": "root"}],
             )
+            _mirror_runtime_sessions(db, extra_paths=[root_path])
             return {"ok": True, "workspace": _workspace_summary(db, workspace)}
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -666,14 +681,17 @@ def create_app(*, serve_static: bool = True, dev_mode: bool = False) -> FastAPI:
     def create_project_api(payload: WorkspaceRootCreatePayload) -> Dict[str, Any]:
         try:
             db = _get_db()
+            workspace_name = _display_name(payload.name, fallback_path=payload.root_path)
             workspace = db.upsert_workspace(
                 {
                     "user_id": _ui_user_id(),
-                    "name": payload.name,
+                    "name": workspace_name,
                     "description": payload.description,
+                    "root_path": _abs_user_path(payload.root_path) or None,
                     "metadata": {"created_via": "sankhya-ui"},
                 }
             )
+            _mirror_runtime_sessions(db, extra_paths=[_workspace_primary_path(workspace)])
             return {"ok": True, "workspace": _workspace_summary(db, workspace)}
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -725,7 +743,9 @@ def create_app(*, serve_static: bool = True, dev_mode: bool = False) -> FastAPI:
     ) -> Dict[str, Any]:
         try:
             db = _get_db()
-            workspace_path = os.path.abspath(os.path.expanduser(payload.workspace_path))
+            workspace_path = _abs_user_path(payload.workspace_path)
+            if not workspace_path:
+                raise HTTPException(status_code=400, detail="workspace_path is required")
             workspace = db.upsert_project_workspace(
                 {
                     "user_id": _ui_user_id(),
@@ -744,7 +764,10 @@ def create_app(*, serve_static: bool = True, dev_mode: bool = False) -> FastAPI:
                     },
                 }
             )
+            _mirror_runtime_sessions(db, extra_paths=[workspace_path])
             return {"ok": True, "workspace": _workspace_summary(db, workspace)}
+        except HTTPException:
+            raise
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -780,11 +803,14 @@ def create_app(*, serve_static: bool = True, dev_mode: bool = False) -> FastAPI:
             workspace = db.get_workspace(workspace_id, user_id=_ui_user_id())
             if not workspace:
                 raise HTTPException(status_code=404, detail="Workspace not found")
+            project_name = _display_name(payload.name, fallback="Project")
+            if not project_name:
+                raise HTTPException(status_code=400, detail="Project name is required")
             project = db.upsert_workspace_project(
                 {
                     "workspace_id": workspace_id,
                     "user_id": _ui_user_id(),
-                    "name": payload.name,
+                    "name": project_name,
                     "description": payload.description,
                     "default_runtime": payload.default_runtime or "codex",
                     "color": payload.color,
@@ -792,13 +818,20 @@ def create_app(*, serve_static: bool = True, dev_mode: bool = False) -> FastAPI:
                     "metadata": {"created_via": "sankhya-ui"},
                 }
             )
-            rules = payload.scope_rules or []
+            rules = _normalize_scope_rules(payload.scope_rules)
             if not rules:
                 rules = [{"path_prefix": _workspace_primary_path(workspace), "label": "root"}]
             db.replace_workspace_project_scope_rules(
                 project_id=str(project.get("id") or ""),
                 user_id=_ui_user_id(),
                 rules=rules,
+            )
+            _mirror_runtime_sessions(
+                db,
+                extra_paths=[
+                    _workspace_primary_path(workspace),
+                    *[str(rule.get("path_prefix") or "") for rule in rules],
+                ],
             )
             return {"ok": True, "project": _project_summary(db, project)}
         except HTTPException:
@@ -843,12 +876,19 @@ def create_app(*, serve_static: bool = True, dev_mode: bool = False) -> FastAPI:
                     "metadata": dict(project.get("metadata") or {}),
                 }
             )
+            scan_paths: List[str] = []
             if payload.scope_rules is not None:
+                rules = _normalize_scope_rules(payload.scope_rules)
                 db.replace_workspace_project_scope_rules(
                     project_id=project_id,
                     user_id=_ui_user_id(),
-                    rules=payload.scope_rules,
+                    rules=rules,
                 )
+                scan_paths.extend(str(rule.get("path_prefix") or "") for rule in rules)
+            workspace = db.get_workspace(str(project.get("workspace_id") or ""), user_id=_ui_user_id())
+            if workspace:
+                scan_paths.append(_workspace_primary_path(workspace))
+            _mirror_runtime_sessions(db, extra_paths=scan_paths)
             return {"ok": True, "project": _project_summary(db, updated)}
         except HTTPException:
             raise
@@ -910,7 +950,9 @@ def create_app(*, serve_static: bool = True, dev_mode: bool = False) -> FastAPI:
             workspace = db.get_workspace(workspace_id, user_id=_ui_user_id())
             if not workspace:
                 raise HTTPException(status_code=404, detail="Workspace not found")
-            resolved = os.path.abspath(os.path.expanduser(payload.path))
+            resolved = _abs_user_path(payload.path)
+            if not resolved:
+                raise HTTPException(status_code=400, detail="path is required")
             mounts = db.list_workspace_mounts(workspace_id=workspace_id, user_id=_ui_user_id())
             if not any(str(mount.get("mount_path") or "") == resolved for mount in mounts):
                 db.upsert_workspace_mount(
@@ -925,6 +967,7 @@ def create_app(*, serve_static: bool = True, dev_mode: bool = False) -> FastAPI:
             updated = db.get_workspace(workspace_id, user_id=_ui_user_id())
             if not updated:
                 raise HTTPException(status_code=404, detail="Workspace not found")
+            _mirror_runtime_sessions(db, extra_paths=[resolved])
             return {"ok": True, "workspace": _workspace_summary(db, updated)}
         except HTTPException:
             raise
@@ -950,7 +993,7 @@ def create_app(*, serve_static: bool = True, dev_mode: bool = False) -> FastAPI:
                 else workspace.get("description")
             )
             next_root = (
-                str(payload.root_path).strip()
+                _abs_user_path(payload.root_path)
                 if payload.root_path is not None and str(payload.root_path).strip()
                 else _workspace_primary_path(workspace)
             )
@@ -968,7 +1011,7 @@ def create_app(*, serve_static: bool = True, dev_mode: bool = False) -> FastAPI:
             # asset drawer path resolution, and folder list all see
             # the new primary root immediately.
             if payload.root_path is not None and str(payload.root_path).strip():
-                resolved_root = os.path.abspath(os.path.expanduser(next_root))
+                resolved_root = _abs_user_path(next_root)
                 try:
                     # Demote any pre-existing primary mounts to non-primary.
                     for mount in db.list_workspace_mounts(workspace_id=workspace_id, user_id=_ui_user_id()):
@@ -993,6 +1036,7 @@ def create_app(*, serve_static: bool = True, dev_mode: bool = False) -> FastAPI:
                     )
                 except Exception:
                     pass
+            _mirror_runtime_sessions(db, extra_paths=[next_root])
             return {"ok": True, "workspace": _workspace_summary(db, updated)}
         except HTTPException:
             raise
@@ -2418,6 +2462,23 @@ def _ui_repo() -> str:
     )
 
 
+def _abs_user_path(value: Optional[str]) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    return os.path.abspath(os.path.expanduser(raw))
+
+
+def _display_name(value: Optional[str], *, fallback_path: Optional[str] = None, fallback: str = "Workspace") -> str:
+    name = str(value or "").strip()
+    if name:
+        return name
+    path = _abs_user_path(fallback_path)
+    if path:
+        return os.path.basename(path.rstrip(os.sep)) or path
+    return fallback
+
+
 def _get_db():
     from dhee.mcp_server import get_db
 
@@ -2528,6 +2589,34 @@ def _workspace_project_scope_rules(db: Any, project_id: str) -> List[Dict[str, A
         return db.list_workspace_project_scope_rules(project_id=project_id, user_id=_ui_user_id())
     except Exception:
         return []
+
+
+def _normalize_scope_rules(rules: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in rules or []:
+        if not isinstance(item, dict):
+            continue
+        prefix = str(
+            item.get("path_prefix")
+            or item.get("pathPrefix")
+            or item.get("path")
+            or item.get("prefix")
+            or ""
+        ).strip()
+        if not prefix:
+            continue
+        resolved = _abs_user_path(prefix)
+        if not resolved or resolved in seen:
+            continue
+        seen.add(resolved)
+        normalized.append(
+            {
+                "path_prefix": resolved,
+                "label": str(item.get("label") or item.get("name") or "").strip(),
+            }
+        )
+    return normalized
 
 
 def _resolve_workspace_project_for_path(
@@ -2697,10 +2786,159 @@ def _agent_session_id(runtime_id: str, native_session_id: str) -> str:
     return f"session:{runtime_id}:{native_session_id}"
 
 
-def _mirror_runtime_sessions(db: Any) -> Dict[str, Any]:
+_RUNTIME_PROCESS_CACHE: Dict[str, Any] = {"at": 0.0, "items": []}
+
+
+def _process_cwd(pid: Any) -> Optional[str]:
+    try:
+        pid_int = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if pid_int <= 0:
+        return None
+    proc_cwd = Path("/proc") / str(pid_int) / "cwd"
+    try:
+        if proc_cwd.exists():
+            return os.path.abspath(os.readlink(proc_cwd))
+    except Exception:
+        pass
+    try:
+        result = subprocess.run(
+            ["lsof", "-a", "-p", str(pid_int), "-d", "cwd", "-Fn"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=0.6,
+        )
+    except Exception:
+        return None
+    for line in (result.stdout or "").splitlines():
+        if line.startswith("n") and len(line) > 1:
+            return os.path.abspath(os.path.expanduser(line[1:]))
+    return None
+
+
+def _runtime_processes() -> List[Dict[str, Any]]:
+    now = time.time()
+    cached_at = float(_RUNTIME_PROCESS_CACHE.get("at") or 0.0)
+    if now - cached_at < 5:
+        return list(_RUNTIME_PROCESS_CACHE.get("items") or [])
+    items: List[Dict[str, Any]] = []
+    try:
+        result = subprocess.run(
+            ["ps", "-axo", "pid=,comm=,args="],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=0.8,
+        )
+    except Exception:
+        _RUNTIME_PROCESS_CACHE.update({"at": now, "items": []})
+        return []
+    for line in (result.stdout or "").splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 2:
+            continue
+        pid = parts[0]
+        comm = parts[1]
+        args = parts[2] if len(parts) > 2 else comm
+        haystack = f"{comm} {args}".lower()
+        lower_args = str(args or "").lower()
+        runtime_id = ""
+        if os.path.basename(comm).lower() == "claude" or re.search(r"(^|[/\s])claude(\s|$)", haystack):
+            runtime_id = "claude-code"
+        elif (
+            ".app/" not in lower_args
+            and "codex computer use" not in lower_args
+            and (
+                os.path.basename(comm).lower() == "codex"
+                or re.search(r"(^|[/\s])codex(\s|$)", haystack)
+            )
+        ):
+            runtime_id = "codex"
+        if not runtime_id:
+            continue
+        items.append(
+            {
+                "pid": int(pid) if str(pid).isdigit() else pid,
+                "runtime_id": runtime_id,
+                "command": args,
+                "cwd": _process_cwd(pid),
+            }
+        )
+    _RUNTIME_PROCESS_CACHE.update({"at": now, "items": items})
+    return list(items)
+
+
+def _paths_overlap(left: Optional[str], right: Optional[str]) -> bool:
+    left_abs = _abs_user_path(left)
+    right_abs = _abs_user_path(right)
+    if not left_abs or not right_abs:
+        return False
+    try:
+        common = os.path.commonpath([left_abs, right_abs])
+    except ValueError:
+        return False
+    return common in {left_abs, right_abs}
+
+
+def _runtime_has_process_for_path(runtime_id: str, path: Optional[str]) -> bool:
+    candidate = _abs_user_path(path)
+    if not candidate:
+        return False
+    for proc in _runtime_processes():
+        if str(proc.get("runtime_id") or "") != runtime_id:
+            continue
+        if _paths_overlap(proc.get("cwd"), candidate):
+            return True
+    return False
+
+
+def _recent_enough(value: Any, *, seconds: int = 1800) -> bool:
+    dt = _coerce_datetime(value)
+    if dt is None:
+        return False
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    age = datetime.now(timezone.utc) - dt.astimezone(timezone.utc)
+    return 0 <= age.total_seconds() <= seconds
+
+
+def _workspace_scan_roots(db: Any, extra_paths: Optional[List[str]] = None) -> List[str]:
+    roots: List[str] = []
+    seen: set[str] = set()
+
+    def add(path: Optional[str]) -> None:
+        resolved = _abs_user_path(path)
+        if not resolved or resolved in seen:
+            return
+        seen.add(resolved)
+        roots.append(resolved)
+
+    add(_ui_repo())
+    for path in extra_paths or []:
+        add(path)
+    try:
+        workspaces = db.list_workspaces(user_id=_ui_user_id(), limit=500)
+    except Exception:
+        workspaces = []
+    for workspace in workspaces:
+        add(workspace.get("root_path"))
+        workspace_id = str(workspace.get("id") or "")
+        try:
+            mounts = db.list_workspace_mounts(workspace_id=workspace_id, user_id=_ui_user_id())
+        except Exception:
+            mounts = []
+        for mount in mounts:
+            add(mount.get("mount_path") or mount.get("path"))
+    return roots
+
+
+def _mirror_runtime_sessions(db: Any, extra_paths: Optional[List[str]] = None) -> Dict[str, Any]:
     repo = _ui_repo()
     project, default_workspace = _ensure_default_project_workspace(db, repo)
     mirrored: List[Dict[str, Any]] = []
+    seen_sessions: set[tuple[str, str]] = set()
 
     def mirror_one(
         runtime_id: str,
@@ -2716,12 +2954,18 @@ def _mirror_runtime_sessions(db: Any) -> Dict[str, Any]:
         permission_mode: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         is_current: bool = False,
+        repo_hint: Optional[str] = None,
     ) -> Dict[str, Any]:
+        dedupe_key = (runtime_id, native_session_id)
+        if dedupe_key in seen_sessions:
+            return next((item for item in mirrored if item.get("runtime_id") == runtime_id and item.get("native_session_id") == native_session_id), {})
+        seen_sessions.add(dedupe_key)
+        task_repo = _abs_user_path(repo_hint or cwd or repo) or repo
         workspace = _resolve_workspace_for_path(db, path=cwd, project_id=None) or default_workspace
         resolved_project = _resolve_workspace_project_for_path(
             db,
             workspace_id=str(workspace.get("id") or ""),
-            path=cwd or repo,
+            path=cwd or task_repo,
         ) or _ensure_unassigned_workspace_project(db, workspace)
         session_id = _agent_session_id(runtime_id, native_session_id)
         task_id = _session_task_id(runtime_id, native_session_id)
@@ -2731,7 +2975,7 @@ def _mirror_runtime_sessions(db: Any) -> Dict[str, Any]:
                 "id": task_id,
                 "user_id": _ui_user_id(),
                 "project_id": resolved_project["id"],
-                "repo": repo,
+                "repo": task_repo,
                 "workspace_id": workspace["id"],
                 "folder_path": ".",
                 "session_id": session_id,
@@ -2776,59 +3020,70 @@ def _mirror_runtime_sessions(db: Any) -> Dict[str, Any]:
         mirrored.append(session)
         return session
 
-    for thread in _repo_codex_threads(repo, limit=18):
-        thread_id = str(thread.get("id") or "").strip()
-        if not thread_id:
-            continue
-        mirror_one(
-            "codex",
-            thread_id,
-            title=str(thread.get("title") or "Untitled Codex session"),
-            cwd=str(thread.get("cwd") or repo),
-            model=thread.get("model"),
-            state="active" if thread.get("isCurrent") else "recent",
-            rollout_path=thread.get("rolloutPath"),
-            started_at=thread.get("startedAt"),
-            updated_at=thread.get("updatedAt"),
-            permission_mode="native",
-            metadata={
-                "messages": thread.get("messages") or [],
-                "recent_tools": thread.get("recentTools") or [],
-                "plan": thread.get("plan") or [],
-                "touched_files": thread.get("touchedFiles") or [],
-                "rate_limits": thread.get("rateLimits") or {},
-                "updated_at_label": thread.get("updatedAtLabel"),
-                "preview": thread.get("preview"),
-                "is_current": bool(thread.get("isCurrent")),
-            },
-            is_current=bool(thread.get("isCurrent")),
-        )
+    for scan_root in _workspace_scan_roots(db, extra_paths=extra_paths):
+        for thread in _repo_codex_threads(scan_root, limit=18):
+            thread_id = str(thread.get("id") or "").strip()
+            if not thread_id:
+                continue
+            thread_cwd = str(thread.get("cwd") or scan_root)
+            is_current = bool(thread.get("isCurrent")) or _runtime_has_process_for_path("codex", thread_cwd)
+            mirror_one(
+                "codex",
+                thread_id,
+                title=str(thread.get("title") or "Untitled Codex session"),
+                cwd=thread_cwd,
+                model=thread.get("model"),
+                state="active" if is_current else str(thread.get("state") or "recent"),
+                rollout_path=thread.get("rolloutPath"),
+                started_at=thread.get("startedAt"),
+                updated_at=thread.get("updatedAt"),
+                permission_mode="native",
+                metadata={
+                    "messages": thread.get("messages") or [],
+                    "recent_tools": thread.get("recentTools") or [],
+                    "plan": thread.get("plan") or [],
+                    "touched_files": thread.get("touchedFiles") or [],
+                    "rate_limits": thread.get("rateLimits") or {},
+                    "updated_at_label": thread.get("updatedAtLabel"),
+                    "preview": thread.get("preview"),
+                    "is_current": is_current,
+                },
+                is_current=is_current,
+                repo_hint=scan_root,
+            )
 
-    claude_session = _find_claude_session(repo)
-    if claude_session:
-        native_id = str(claude_session.get("id") or "claude-local")
-        mirror_one(
-            "claude-code",
-            native_id,
-            title=str(claude_session.get("title") or "Claude Code session"),
-            cwd=str(claude_session.get("cwd") or repo),
-            model=claude_session.get("model"),
-            state=str(claude_session.get("state") or "recent"),
-            started_at=claude_session.get("startedAt"),
-            updated_at=claude_session.get("updatedAt"),
-            permission_mode="native",
-            metadata={
-                "version": claude_session.get("version"),
-                "entrypoint": claude_session.get("entrypoint"),
-                "note": claude_session.get("note"),
-                "messages": [],
-                "recent_tools": [],
-                "plan": [],
-                "touched_files": [],
-                "rate_limits": {},
-            },
-            is_current=str(claude_session.get("state") or "") == "active",
-        )
+        for claude_session in _find_claude_sessions(scan_root, limit=8):
+            native_id = str(claude_session.get("id") or "claude-local")
+            if not native_id:
+                continue
+            claude_cwd = str(claude_session.get("cwd") or scan_root)
+            is_current = str(claude_session.get("state") or "") == "active"
+            mirror_one(
+                "claude-code",
+                native_id,
+                title=str(claude_session.get("title") or "Claude Code session"),
+                cwd=claude_cwd,
+                model=claude_session.get("model"),
+                state=str(claude_session.get("state") or "recent"),
+                started_at=claude_session.get("startedAt"),
+                updated_at=claude_session.get("updatedAt"),
+                permission_mode=str(claude_session.get("permissionMode") or "native"),
+                metadata={
+                    "version": claude_session.get("version"),
+                    "entrypoint": claude_session.get("entrypoint"),
+                    "note": claude_session.get("note"),
+                    "messages": claude_session.get("messages") or [],
+                    "recent_tools": claude_session.get("recentTools") or [],
+                    "plan": [],
+                    "touched_files": claude_session.get("touchedFiles") or [],
+                    "rate_limits": {},
+                    "preview": claude_session.get("preview"),
+                    "is_current": is_current,
+                    "pid": claude_session.get("pid"),
+                },
+                is_current=is_current,
+                repo_hint=scan_root,
+            )
 
     return {"project": project, "workspace": default_workspace, "sessions": mirrored}
 
@@ -3030,80 +3285,216 @@ def _touch_shared_task(
     )
 
 
-def _find_claude_session(repo: str) -> Optional[Dict[str, Any]]:
+def _claude_message_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: List[str] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = str(block.get("text") or "").strip()
+                if text:
+                    parts.append(text)
+        return "\n".join(parts).strip()
+    return ""
+
+
+def _claude_log_details(path: Path, *, fallback_cwd: str) -> Dict[str, Any]:
+    messages: deque[Dict[str, Any]] = deque(maxlen=8)
+    recent_tools: deque[str] = deque(maxlen=8)
+    touched_files: set[str] = set()
+    session_id = path.stem
+    cwd = fallback_cwd
+    version = None
+    model = None
+    started_at = None
+    updated_at = _iso_or_none(path.stat().st_mtime)
+    first_user = ""
+    last_user = ""
+    last_assistant = ""
+    permission_mode = "native"
+
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                session_id = str(item.get("sessionId") or session_id)
+                cwd = str(item.get("cwd") or cwd or fallback_cwd)
+                version = item.get("version") or version
+                timestamp = item.get("timestamp")
+                if timestamp and started_at is None:
+                    started_at = _iso_or_none(timestamp)
+                if timestamp:
+                    updated_at = _iso_or_none(timestamp) or updated_at
+                if item.get("type") == "permission-mode":
+                    raw_mode = str(item.get("permissionMode") or item.get("mode") or "").strip()
+                    if raw_mode:
+                        permission_mode = _normalize_permission_mode("claude-code", raw_mode)
+                message = item.get("message") or {}
+                if isinstance(message, dict):
+                    role = str(message.get("role") or item.get("type") or "").strip()
+                    model = message.get("model") or model
+                    content = message.get("content")
+                    text = _claude_message_text(content)
+                    if text and role in {"user", "assistant"}:
+                        messages.append(
+                            {
+                                "role": role,
+                                "content": text,
+                                "timestamp": timestamp,
+                            }
+                        )
+                        if role == "user":
+                            if not first_user:
+                                first_user = text
+                            last_user = text
+                        elif role == "assistant":
+                            last_assistant = text
+                    if isinstance(content, list):
+                        for block in content:
+                            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                                continue
+                            tool_name = str(block.get("name") or "").strip()
+                            if tool_name:
+                                recent_tools.append(tool_name)
+                            tool_input = block.get("input") or {}
+                            if isinstance(tool_input, dict):
+                                file_path = str(
+                                    tool_input.get("file_path")
+                                    or tool_input.get("path")
+                                    or ""
+                                ).strip()
+                                if file_path:
+                                    touched_files.add(_abs_user_path(file_path) or file_path)
+    except OSError:
+        pass
+
+    title = first_user or last_user or path.stem
+    preview = last_assistant or last_user
+    return {
+        "id": session_id,
+        "cwd": cwd or fallback_cwd,
+        "title": title[:120],
+        "model": model,
+        "startedAt": started_at,
+        "updatedAt": updated_at,
+        "version": version,
+        "permissionMode": permission_mode,
+        "messages": list(messages),
+        "recentTools": list(recent_tools),
+        "touchedFiles": sorted(touched_files)[:80],
+        "preview": preview[:600],
+        "logPath": str(path),
+    }
+
+
+def _claude_logs_for_repo(repo: str, *, limit: int = 6) -> List[Path]:
+    try:
+        from dhee.core.log_parser import _escape_path
+    except Exception:
+        escaped = repo.replace("/", "-").replace("\\", "-")
+    else:
+        escaped = _escape_path(repo)
+    root = Path.home() / ".claude" / "projects" / escaped
+    if not root.is_dir():
+        return []
+    try:
+        files = [path for path in root.iterdir() if path.is_file() and path.suffix == ".jsonl"]
+    except OSError:
+        return []
+    return sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)[: max(1, int(limit))]
+
+
+def _find_claude_sessions(repo: str, limit: int = 6) -> List[Dict[str, Any]]:
+    repo_abs = _abs_user_path(repo)
+    sessions: Dict[str, Dict[str, Any]] = {}
+
     root = Path.home() / ".claude" / "sessions"
-    if not root.exists():
-        return None
-    for path in sorted(root.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
+    if root.exists():
+        for path in sorted(root.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            cwd = _abs_user_path(data.get("cwd"))
+            pid = data.get("pid")
+            process_cwd = _process_cwd(pid) if _pid_alive(pid) else None
+            effective_cwd = cwd or process_cwd or repo_abs
+            if repo_abs and effective_cwd and not _paths_overlap(effective_cwd, repo_abs):
+                continue
+            session_id = str(data.get("sessionId") or path.stem)
+            if not session_id:
+                continue
+            sessions[session_id] = {
+                "id": session_id,
+                "cwd": effective_cwd,
+                "pid": pid,
+                "startedAt": _iso_or_none(data.get("startedAt")),
+                "updatedAt": _iso_or_none(path.stat().st_mtime),
+                "state": "active" if _pid_alive(pid) else "stale",
+                "version": data.get("version"),
+                "entrypoint": data.get("entrypoint"),
+                "title": data.get("title"),
+                "permissionMode": _normalize_permission_mode("claude-code", data.get("permissionMode") or data.get("permission_mode")),
+                "note": "Claude Code session discovered from the local session registry.",
+            }
+
+    for log_path in _claude_logs_for_repo(repo_abs, limit=limit):
+        details = _claude_log_details(log_path, fallback_cwd=repo_abs)
+        session_id = str(details.get("id") or log_path.stem)
+        if not session_id:
             continue
-        cwd = str(data.get("cwd") or "")
-        if cwd and not _path_matches_repo(cwd, repo):
-            continue
-        pid = data.get("pid")
-        return {
-            "id": str(data.get("sessionId") or path.stem),
+        existing = sessions.get(session_id, {})
+        cwd = _abs_user_path(details.get("cwd") or existing.get("cwd") or repo_abs)
+        active = bool(existing.get("state") == "active") or _runtime_has_process_for_path("claude-code", cwd)
+        state = "active" if active else ("recent" if _recent_enough(details.get("updatedAt"), seconds=86_400) else "stale")
+        sessions[session_id] = {
+            **existing,
+            **details,
+            "id": session_id,
             "cwd": cwd,
-            "pid": pid,
-            "startedAt": _iso_or_none(data.get("startedAt")),
-            "updatedAt": _iso_or_none(path.stat().st_mtime),
-            "state": "active" if _pid_alive(pid) else "stale",
-            "version": data.get("version"),
-            "entrypoint": data.get("entrypoint"),
+            "pid": existing.get("pid"),
+            "state": state,
+            "entrypoint": existing.get("entrypoint") or "cli",
+            "note": "Claude Code conversation log mirrored from ~/.claude/projects.",
         }
-    return None
+
+    return sorted(
+        sessions.values(),
+        key=lambda item: _coerce_datetime(item.get("updatedAt")) or datetime.fromtimestamp(0, tz=timezone.utc),
+        reverse=True,
+    )[: max(1, int(limit))]
+
+
+def _find_claude_session(repo: str) -> Optional[Dict[str, Any]]:
+    sessions = _find_claude_sessions(repo, limit=1)
+    return sessions[0] if sessions else None
 
 
 def _find_codex_session(repo: str) -> Optional[Dict[str, Any]]:
-    state_db = Path.home() / ".codex" / "state_5.sqlite"
-    if not state_db.exists():
+    threads = _repo_codex_threads(repo, limit=1)
+    if not threads:
         return None
-    try:
-        conn = sqlite3.connect(str(state_db))
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            """
-            SELECT id, cwd, title, updated_at, updated_at_ms,
-                   created_at, created_at_ms, model, rollout_path
-            FROM threads
-            WHERE archived = 0
-            ORDER BY COALESCE(updated_at_ms, updated_at) DESC
-            LIMIT 50
-            """
-        ).fetchall()
-    except Exception:
-        return None
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-    for row in rows:
-        data = dict(row)
-        cwd = str(data.get("cwd") or "")
-        if cwd and not _path_matches_repo(cwd, repo):
-            continue
-        return {
-            "id": str(data.get("id") or ""),
-            "cwd": cwd,
-            "title": data.get("title"),
-            "model": data.get("model"),
-            "rolloutPath": data.get("rollout_path"),
-            "startedAt": _iso_or_none(
-                data.get("created_at_ms") or data.get("created_at")
-            ),
-            "updatedAt": _iso_or_none(
-                data.get("updated_at_ms") or data.get("updated_at")
-            ),
-            "state": "recent",
-            "note": (
-                "Codex local state shows the most recent thread for this repo, "
-                "but does not expose reliable process liveness."
-            ),
-        }
-    return None
+    thread = threads[0]
+    return {
+        "id": str(thread.get("id") or ""),
+        "cwd": thread.get("cwd"),
+        "title": thread.get("title"),
+        "model": thread.get("model"),
+        "rolloutPath": thread.get("rolloutPath"),
+        "startedAt": thread.get("startedAt"),
+        "updatedAt": thread.get("updatedAt"),
+        "state": "active" if thread.get("isCurrent") else str(thread.get("state") or "recent"),
+        "note": (
+            "Codex local state shows the most recent thread for this repo; "
+            "recently updated threads are treated as live for the UI."
+        ),
+    }
 
 
 def _latest_claude_limit_event() -> Optional[Dict[str, Any]]:
@@ -3932,6 +4323,7 @@ def _create_suggested_task_from_broadcast(
 
 
 def _repo_codex_threads(repo: str, limit: int = 6) -> List[Dict[str, Any]]:
+    repo_abs = _abs_user_path(repo)
     state_db = Path.home() / ".codex" / "state_5.sqlite"
     if not state_db.exists():
         return []
@@ -3947,26 +4339,33 @@ def _repo_codex_threads(repo: str, limit: int = 6) -> List[Dict[str, Any]]:
             ORDER BY COALESCE(updated_at_ms, updated_at) DESC
             LIMIT ?
             """,
-            (f"{repo}%", limit),
+            (f"{repo_abs}%", limit),
         ).fetchall()
     finally:
         conn.close()
     items: List[Dict[str, Any]] = []
     for index, row in enumerate(rows):
         data = dict(row)
+        cwd = _abs_user_path(data.get("cwd") or repo_abs)
+        if repo_abs and cwd and not _path_matches_repo(cwd, repo_abs):
+            continue
         rollout_path = str(data.get("rollout_path") or "")
-        rollout = _parse_codex_rollout(Path(rollout_path), repo=repo)
+        rollout = _parse_codex_rollout(Path(rollout_path), repo=repo_abs)
         updated_at = _iso_or_none(data.get("updated_at_ms") or data.get("updated_at"))
+        is_current = index == 0 and (
+            _recent_enough(updated_at, seconds=1800) or _runtime_has_process_for_path("codex", cwd)
+        )
         items.append(
             {
                 "id": str(data.get("id") or f"thread-{index}"),
                 "title": str(data.get("title") or "Untitled Codex session"),
-                "cwd": str(data.get("cwd") or repo),
+                "cwd": cwd,
                 "model": data.get("model"),
                 "updatedAt": updated_at,
                 "updatedAtLabel": _format_ui_clock(updated_at),
                 "rolloutPath": rollout_path,
-                "isCurrent": index == 0,
+                "isCurrent": is_current,
+                "state": "active" if is_current else ("recent" if _recent_enough(updated_at, seconds=86_400) else "stale"),
                 **rollout,
             }
         )

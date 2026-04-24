@@ -6,6 +6,7 @@ user-facing CRUD surface.
 
 from __future__ import annotations
 
+import json
 import os
 import pytest
 from fastapi.testclient import TestClient
@@ -45,6 +46,143 @@ def test_create_workspace_seeds_default_project_and_mount(client, tmp_path):
     # POST /api/workspaces auto-seeds a "General" project.
     project_names = {p["name"] for p in ws.get("projects") or []}
     assert "General" in project_names
+
+
+def test_camel_case_create_payloads_scan_live_codex_session(tmp_path, monkeypatch):
+    import dhee.mcp_server as mcp_server_module
+    import dhee.ui.server as ui_server
+    from dhee.ui.server import create_app
+
+    repo_root = tmp_path / "repo"
+    frontend_root = repo_root / "apps" / "frontend"
+    frontend_root.mkdir(parents=True)
+
+    monkeypatch.setenv("DHEE_DATA_DIR", str(tmp_path / "dhee"))
+    monkeypatch.setenv("DHEE_USER_ID", "default")
+    monkeypatch.setenv("DHEE_UI_REPO", str(repo_root))
+    mcp_server_module._db = None
+    monkeypatch.setattr(
+        ui_server,
+        "_repo_codex_threads",
+        lambda repo, limit=18: [
+            {
+                "id": "codex-live-frontend",
+                "title": "Frontend workspace fix",
+                "cwd": str(frontend_root),
+                "model": "gpt-5.4",
+                "messages": [{"role": "assistant", "content": "Working in frontend"}],
+                "recentTools": ["Read"],
+                "plan": [],
+                "touchedFiles": [],
+                "preview": "Working in frontend",
+                "updatedAt": "2026-04-24T06:00:00Z",
+                "isCurrent": True,
+            }
+        ],
+    )
+    monkeypatch.setattr(ui_server, "_find_claude_sessions", lambda repo, limit=8: [])
+
+    with TestClient(create_app(serve_static=False)) as c:
+        created = c.post(
+            "/api/workspaces",
+            json={"label": "Repo Workspace", "rootPath": str(repo_root)},
+        )
+        assert created.status_code == 200, created.text
+        workspace = created.json()["workspace"]
+        assert workspace["rootPath"] == str(repo_root)
+        assert "session:codex:codex-live-frontend" in {
+            session["id"] for session in workspace.get("sessions") or []
+        }
+
+        project_created = c.post(
+            f"/api/workspaces/{workspace['id']}/projects",
+            json={
+                "label": "Frontend",
+                "defaultRuntime": "claude-code",
+                "scopeRules": [{"pathPrefix": str(frontend_root), "label": "frontend"}],
+            },
+        )
+        assert project_created.status_code == 200, project_created.text
+        project = project_created.json()["project"]
+        assert project["name"] == "Frontend"
+        assert project["defaultRuntime"] == "claude-code"
+        assert project["scopeRules"][0]["pathPrefix"] == str(frontend_root)
+        assert "session:codex:codex-live-frontend" in {
+            session["id"] for session in project.get("sessions") or []
+        }
+
+    mcp_server_module._db = None
+
+
+def test_workspace_creation_scans_claude_project_logs(tmp_path, monkeypatch):
+    import dhee.mcp_server as mcp_server_module
+    import dhee.ui.server as ui_server
+    from dhee.core.log_parser import _escape_path
+    from dhee.ui.server import create_app
+
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    fake_home = tmp_path / "home"
+    log_dir = fake_home / ".claude" / "projects" / _escape_path(str(repo_root))
+    log_dir.mkdir(parents=True)
+    (log_dir / "claude-session.jsonl").write_text(
+        "\n".join(
+            json.dumps(item)
+            for item in [
+                {
+                    "type": "user",
+                    "timestamp": "2026-04-24T06:00:00Z",
+                    "cwd": str(repo_root),
+                    "sessionId": "claude-session",
+                    "message": {"role": "user", "content": "Fix workspace creation"},
+                },
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-04-24T06:01:00Z",
+                    "cwd": str(repo_root),
+                    "sessionId": "claude-session",
+                    "version": "2.1.118",
+                    "message": {
+                        "role": "assistant",
+                        "model": "claude-opus",
+                        "content": [
+                            {"type": "text", "text": "Scanning workspace state"},
+                            {
+                                "type": "tool_use",
+                                "name": "Read",
+                                "input": {"file_path": str(repo_root / "server.py")},
+                            },
+                        ],
+                    },
+                },
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("DHEE_DATA_DIR", str(tmp_path / "dhee"))
+    monkeypatch.setenv("DHEE_USER_ID", "default")
+    monkeypatch.setenv("DHEE_UI_REPO", str(repo_root))
+    mcp_server_module._db = None
+    monkeypatch.setattr(ui_server.Path, "home", lambda: fake_home)
+    monkeypatch.setattr(ui_server, "_repo_codex_threads", lambda repo, limit=18: [])
+    monkeypatch.setattr(
+        ui_server,
+        "_runtime_processes",
+        lambda: [{"pid": 123, "runtime_id": "claude-code", "cwd": str(repo_root), "command": "claude"}],
+    )
+
+    with TestClient(create_app(serve_static=False)) as c:
+        created = c.post("/api/workspaces", json={"name": "Repo", "root_path": str(repo_root)})
+        assert created.status_code == 200, created.text
+        sessions = created.json()["workspace"].get("sessions") or []
+        claude = next(session for session in sessions if session["id"] == "session:claude-code:claude-session")
+        assert claude["state"] == "active"
+        assert claude["isCurrent"] is True
+        assert claude["preview"] == "Scanning workspace state"
+
+    mcp_server_module._db = None
 
 
 def test_update_workspace_label_description_and_root(client, tmp_path):
