@@ -130,10 +130,10 @@ export const api = {
     ),
   projects: () => j<ProjectIndexSnapshot>("/workspaces"),
   workspaces: () => j<ProjectIndexSnapshot>("/workspaces"),
-  createWorkspaceRoot: (name: string, root_path: string, description?: string) =>
+  createWorkspaceRoot: (name: string, description?: string) =>
     j<{ ok: boolean; workspace: WorkspaceDetailSnapshot["workspace"] }>("/workspaces", {
       method: "POST",
-      body: JSON.stringify({ name, root_path, description }),
+      body: JSON.stringify({ name, description }),
     }),
   createProject: (workspaceId: string, payload: { name: string; description?: string; default_runtime?: string; color?: string; icon?: string; scope_rules?: { path_prefix: string; label?: string }[] }) =>
     j<{ ok: boolean; project: ProjectSummary }>(
@@ -179,7 +179,7 @@ export const api = {
     ),
   updateWorkspace: (
     workspaceId: string,
-    payload: { label?: string; description?: string; root_path?: string },
+    payload: { label?: string; description?: string },
   ) =>
     j<{ ok: boolean; workspace: WorkspaceDetailSnapshot["workspace"] }>(
       `/workspaces/${encodeURIComponent(workspaceId)}`,

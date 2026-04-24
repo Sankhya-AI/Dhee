@@ -2,24 +2,14 @@ import { useEffect, useState } from "react";
 import { api } from "../api";
 import type {
   ProjectIndexSnapshot,
+  ProjectScopeRule,
   ProjectSummary,
   WorkspaceSummary,
 } from "../types";
 
-// ---------------------------------------------------------------------------
-// WorkspaceManagerModal — single dialog that handles:
-//
-//   * create workspace (name + root folder)
-//   * rename / describe / repoint workspace
-//   * delete workspace (with type-to-confirm)
-//   * create project inside the selected workspace
-//   * rename / change default runtime on a project
-//   * delete project
-//
-// The backend already exposes all six operations; this is the missing
-// UX surface. Kept as a modal instead of a dedicated page so users can
-// open it from the Channel view without leaving context.
-// ---------------------------------------------------------------------------
+// WorkspaceManagerModal — workspace is a collection of projects,
+// project is one or more folders. Workspaces have no root folder;
+// folders attach to projects via scope rules.
 
 type Tab = "workspaces" | "projects";
 
@@ -129,23 +119,30 @@ export function WorkspaceManagerModal({
 
   // Create-workspace state
   const [newWsName, setNewWsName] = useState("");
-  const [newWsRoot, setNewWsRoot] = useState("");
   const [newWsDesc, setNewWsDesc] = useState("");
 
   // Edit-workspace state
   const [editWsName, setEditWsName] = useState("");
   const [editWsDesc, setEditWsDesc] = useState("");
-  const [editWsRoot, setEditWsRoot] = useState("");
   const [deleteConfirm, setDeleteConfirm] = useState("");
 
   // Create-project state
   const [newProjectName, setNewProjectName] = useState("");
   const [newProjectDesc, setNewProjectDesc] = useState("");
   const [newProjectRuntime, setNewProjectRuntime] = useState<string>("codex");
+  const [newProjectFolders, setNewProjectFolders] = useState<string[]>([]);
 
   // Edit-project state (keyed by project id so edits don't leak across selections)
   const [projectEdits, setProjectEdits] = useState<
-    Record<string, { name: string; description: string; defaultRuntime: string }>
+    Record<
+      string,
+      {
+        name: string;
+        description: string;
+        defaultRuntime: string;
+        folders: string[];
+      }
+    >
   >({});
 
   const [busy, setBusy] = useState(false);
@@ -159,11 +156,11 @@ export function WorkspaceManagerModal({
     setError(null);
     setNotice(null);
     setNewWsName("");
-    setNewWsRoot("");
     setNewWsDesc("");
     setNewProjectName("");
     setNewProjectDesc("");
     setNewProjectRuntime("codex");
+    setNewProjectFolders([]);
     setDeleteConfirm("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -172,14 +169,10 @@ export function WorkspaceManagerModal({
     if (!currentWorkspace) {
       setEditWsName("");
       setEditWsDesc("");
-      setEditWsRoot("");
       return;
     }
     setEditWsName(String(currentWorkspace.label || currentWorkspace.name || ""));
     setEditWsDesc(String(currentWorkspace.description || ""));
-    const mounts = currentWorkspace.mounts || currentWorkspace.folders || [];
-    const primary = mounts.find((m) => m.primary) || mounts[0];
-    setEditWsRoot(String(primary?.path || currentWorkspace.workspacePath || currentWorkspace.rootPath || ""));
     setDeleteConfirm("");
   }, [currentWorkspace?.id, currentWorkspace?.label, currentWorkspace?.description]);
 
@@ -189,10 +182,12 @@ export function WorkspaceManagerModal({
     setProjectEdits((prev) => {
       const next: typeof prev = {};
       for (const project of currentWorkspace.projects || []) {
+        const folders = (project.scopeRules || []).map((r: ProjectScopeRule) => r.pathPrefix);
         next[project.id] = prev[project.id] || {
           name: project.name,
           description: project.description || "",
           defaultRuntime: project.defaultRuntime || "codex",
+          folders,
         };
       }
       return next;
@@ -201,10 +196,10 @@ export function WorkspaceManagerModal({
 
   if (!open) return null;
 
-  const pickFolder = async (onPicked: (path: string) => void) => {
+  const pickFolder = async (onPicked: (path: string) => void, prompt?: string) => {
     setError(null);
     try {
-      const res = await api.pickFolder("Choose a workspace root");
+      const res = await api.pickFolder(prompt || "Choose a folder");
       if (res.ok && res.path) onPicked(res.path);
     } catch (e) {
       setError(String(e));
@@ -229,31 +224,23 @@ export function WorkspaceManagerModal({
   const onCreateWorkspace = () =>
     runGuarded("Workspace created.", async () => {
       const name = newWsName.trim();
-      const root = newWsRoot.trim();
-      if (!name || !root) {
-        throw new Error("Name and root folder are required.");
+      if (!name) {
+        throw new Error("Name is required.");
       }
-      await api.createWorkspaceRoot(name, root, newWsDesc.trim() || undefined);
+      await api.createWorkspaceRoot(name, newWsDesc.trim() || undefined);
       setNewWsName("");
-      setNewWsRoot("");
       setNewWsDesc("");
     });
 
   const onUpdateWorkspace = () =>
     runGuarded("Workspace updated.", async () => {
       if (!currentWorkspace) return;
-      const payload: { label?: string; description?: string; root_path?: string } = {};
+      const payload: { label?: string; description?: string } = {};
       if (editWsName.trim() && editWsName !== (currentWorkspace.label || currentWorkspace.name)) {
         payload.label = editWsName.trim();
       }
       if (editWsDesc !== (currentWorkspace.description || "")) {
         payload.description = editWsDesc;
-      }
-      const currentRoot = String(
-        currentWorkspace.workspacePath || currentWorkspace.rootPath || "",
-      );
-      if (editWsRoot.trim() && editWsRoot.trim() !== currentRoot) {
-        payload.root_path = editWsRoot.trim();
       }
       if (!Object.keys(payload).length) {
         throw new Error("Nothing to save.");
@@ -277,25 +264,44 @@ export function WorkspaceManagerModal({
       if (!currentWorkspace) throw new Error("Pick a workspace first.");
       const name = newProjectName.trim();
       if (!name) throw new Error("Project name is required.");
+      const rules = newProjectFolders
+        .map((p) => p.trim())
+        .filter(Boolean)
+        .map((path_prefix) => ({ path_prefix }));
       await api.createProject(currentWorkspace.id, {
         name,
         description: newProjectDesc.trim() || undefined,
         default_runtime: newProjectRuntime,
+        scope_rules: rules,
       });
       setNewProjectName("");
       setNewProjectDesc("");
       setNewProjectRuntime("codex");
+      setNewProjectFolders([]);
     });
 
   const onUpdateProject = (project: ProjectSummary) => () =>
     runGuarded("Project updated.", async () => {
       const draft = projectEdits[project.id];
       if (!draft) return;
-      const payload: { name?: string; description?: string; default_runtime?: string } = {};
+      const payload: {
+        name?: string;
+        description?: string;
+        default_runtime?: string;
+        scope_rules?: { path_prefix: string; label?: string }[];
+      } = {};
       if (draft.name.trim() && draft.name.trim() !== project.name) payload.name = draft.name.trim();
       if (draft.description !== (project.description || "")) payload.description = draft.description;
       if (draft.defaultRuntime && draft.defaultRuntime !== (project.defaultRuntime || "codex")) {
         payload.default_runtime = draft.defaultRuntime;
+      }
+      const currentFolders = (project.scopeRules || []).map((r) => r.pathPrefix);
+      const draftFolders = draft.folders.map((p) => p.trim()).filter(Boolean);
+      const foldersChanged =
+        currentFolders.length !== draftFolders.length ||
+        currentFolders.some((p, i) => p !== draftFolders[i]);
+      if (foldersChanged) {
+        payload.scope_rules = draftFolders.map((path_prefix) => ({ path_prefix }));
       }
       if (!Object.keys(payload).length) throw new Error("Nothing to save.");
       await api.updateProject(project.id, payload);
@@ -393,21 +399,6 @@ export function WorkspaceManagerModal({
                   onChange={(e) => setNewWsName(e.target.value)}
                   style={inputStyle}
                 />
-                <div style={{ display: "flex", gap: 8 }}>
-                  <input
-                    placeholder="Root folder (absolute path)"
-                    value={newWsRoot}
-                    onChange={(e) => setNewWsRoot(e.target.value)}
-                    style={{ ...inputStyle, flex: 1 }}
-                  />
-                  <button
-                    onClick={() => void pickFolder((path) => setNewWsRoot(path))}
-                    style={buttonGhost}
-                    disabled={busy}
-                  >
-                    browse…
-                  </button>
-                </div>
                 <textarea
                   placeholder="Description (optional)"
                   value={newWsDesc}
@@ -415,13 +406,16 @@ export function WorkspaceManagerModal({
                   rows={2}
                   style={{ ...inputStyle, resize: "vertical" }}
                 />
+                <div style={{ fontFamily: "var(--mono)", fontSize: 9, color: "var(--ink3)", lineHeight: 1.5 }}>
+                  A workspace is a collection of projects. Folders attach to projects, not workspaces.
+                </div>
                 <div style={{ display: "flex", justifyContent: "flex-end" }}>
                   <button
                     onClick={() => void onCreateWorkspace()}
-                    disabled={busy || !newWsName.trim() || !newWsRoot.trim()}
+                    disabled={busy || !newWsName.trim()}
                     style={{
                       ...buttonPrimary,
-                      opacity: busy || !newWsName.trim() || !newWsRoot.trim() ? 0.5 : 1,
+                      opacity: busy || !newWsName.trim() ? 0.5 : 1,
                     }}
                   >
                     create workspace
@@ -469,9 +463,11 @@ export function WorkspaceManagerModal({
                             <div style={{ fontSize: 13, fontWeight: 600, lineHeight: 1.3 }}>
                               {workspace.label || workspace.name}
                             </div>
-                            <div style={{ fontFamily: "var(--mono)", fontSize: 9, color: "var(--ink3)", marginTop: 2 }}>
-                              {workspace.workspacePath || workspace.rootPath || "—"}
-                            </div>
+                            {workspace.description && (
+                              <div style={{ fontFamily: "var(--mono)", fontSize: 9, color: "var(--ink3)", marginTop: 2 }}>
+                                {workspace.description}
+                              </div>
+                            )}
                           </div>
                           <span style={{ fontFamily: "var(--mono)", fontSize: 9, color: "var(--ink3)" }}>
                             {projectCount} project{projectCount === 1 ? "" : "s"}
@@ -501,21 +497,6 @@ export function WorkspaceManagerModal({
                     placeholder="Name"
                     style={inputStyle}
                   />
-                  <div style={{ display: "flex", gap: 8 }}>
-                    <input
-                      value={editWsRoot}
-                      onChange={(e) => setEditWsRoot(e.target.value)}
-                      placeholder="Root folder"
-                      style={{ ...inputStyle, flex: 1 }}
-                    />
-                    <button
-                      onClick={() => void pickFolder((path) => setEditWsRoot(path))}
-                      style={buttonGhost}
-                      disabled={busy}
-                    >
-                      browse…
-                    </button>
-                  </div>
                   <textarea
                     value={editWsDesc}
                     onChange={(e) => setEditWsDesc(e.target.value)}
@@ -642,6 +623,14 @@ export function WorkspaceManagerModal({
                         ))}
                       </select>
                     </div>
+                    <FoldersEditor
+                      folders={newProjectFolders}
+                      onChange={setNewProjectFolders}
+                      onPick={(apply) =>
+                        void pickFolder(apply, "Choose a project folder")
+                      }
+                      disabled={busy}
+                    />
                     <div style={{ display: "flex", justifyContent: "flex-end" }}>
                       <button
                         onClick={() => void onCreateProject()}
@@ -682,6 +671,7 @@ export function WorkspaceManagerModal({
                               name: project.name,
                               description: project.description || "",
                               defaultRuntime: project.defaultRuntime || "codex",
+                              folders: (project.scopeRules || []).map((r) => r.pathPrefix),
                             };
                           const setDraft = (patch: Partial<typeof draft>) =>
                             setProjectEdits((prev) => ({
@@ -733,6 +723,14 @@ export function WorkspaceManagerModal({
                                   ))}
                                 </select>
                               </div>
+                              <FoldersEditor
+                                folders={draft.folders}
+                                onChange={(folders) => setDraft({ folders })}
+                                onPick={(apply) =>
+                                  void pickFolder(apply, `Add a folder to ${project.name}`)
+                                }
+                                disabled={busy}
+                              />
                               <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
                                 <button
                                   onClick={() => void onDeleteProject(project)()}
@@ -786,6 +784,81 @@ export function WorkspaceManagerModal({
             close
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function FoldersEditor({
+  folders,
+  onChange,
+  onPick,
+  disabled,
+}: {
+  folders: string[];
+  onChange: (next: string[]) => void;
+  onPick: (apply: (path: string) => void) => void;
+  disabled?: boolean;
+}) {
+  const update = (index: number, value: string) => {
+    const next = folders.slice();
+    next[index] = value;
+    onChange(next);
+  };
+  const remove = (index: number) => {
+    const next = folders.slice();
+    next.splice(index, 1);
+    onChange(next);
+  };
+  const addBlank = () => onChange([...folders, ""]);
+  const addPicked = () => onPick((path) => onChange([...folders, path]));
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      <div style={labelStyle}>Folders · {folders.length}</div>
+      {folders.length === 0 && (
+        <div
+          style={{
+            fontFamily: "var(--mono)",
+            fontSize: 9,
+            color: "var(--ink3)",
+            lineHeight: 1.5,
+          }}
+        >
+          No folders yet. A project can have one or many.
+        </div>
+      )}
+      {folders.map((folder, index) => (
+        <div key={index} style={{ display: "flex", gap: 6 }}>
+          <input
+            value={folder}
+            onChange={(e) => update(index, e.target.value)}
+            placeholder="/absolute/path"
+            style={{ ...inputStyle, flex: 1 }}
+          />
+          <button
+            onClick={() => onPick((path) => update(index, path))}
+            style={buttonGhost}
+            disabled={disabled}
+          >
+            browse…
+          </button>
+          <button
+            onClick={() => remove(index)}
+            style={buttonGhost}
+            disabled={disabled}
+            title="Remove folder"
+          >
+            ✕
+          </button>
+        </div>
+      ))}
+      <div style={{ display: "flex", gap: 6 }}>
+        <button onClick={addPicked} style={buttonGhost} disabled={disabled}>
+          + pick folder
+        </button>
+        <button onClick={addBlank} style={buttonGhost} disabled={disabled}>
+          + type path
+        </button>
       </div>
     </div>
   );

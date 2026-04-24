@@ -190,8 +190,8 @@ export default function App() {
     }
   }, [view, activeTaskId, selectedProjectId, selectedWorkspaceId, selectedSessionId]);
 
-  const handleCreateWorkspace = async (name: string, workspacePath: string) => {
-    await api.createWorkspaceRoot(name, workspacePath);
+  const handleCreateWorkspace = async (name: string) => {
+    await api.createWorkspaceRoot(name);
     await refreshProjects();
     await refreshWorkspaceGraph();
   };

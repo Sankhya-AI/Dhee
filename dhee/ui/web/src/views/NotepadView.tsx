@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api } from "../api";
 import type { ProjectIndexSnapshot, Tweaks } from "../types";
 
 type NoteMode = "task" | "memory";
@@ -21,7 +20,7 @@ export function NotepadView({
   onAddTask: (title: string) => void;
   onAddMemory: (text: string) => void;
   onSelectSession: (sessionId: string, taskId?: string | null) => void;
-  onCreateWorkspace: (name: string, workspacePath: string) => Promise<void> | void;
+  onCreateWorkspace: (name: string) => Promise<void> | void;
   onLaunchSession: (
     title: string,
     runtime: "claude-code" | "codex",
@@ -50,9 +49,7 @@ export function NotepadView({
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [showWorkspaceModal, setShowWorkspaceModal] = useState(false);
   const [workspaceName, setWorkspaceName] = useState("");
-  const [workspaceFolder, setWorkspaceFolder] = useState("");
   const [busy, setBusy] = useState(false);
-  const [folderBusy, setFolderBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -138,32 +135,12 @@ export function NotepadView({
     }
   };
 
-  const pickFolder = async () => {
-    setFolderBusy(true);
-    setError(null);
-    try {
-      const res = await api.pickFolder("Select a workspace folder");
-      if (res.ok && res.path) {
-        setWorkspaceFolder(res.path);
-        if (!workspaceName.trim()) {
-          const parts = res.path.replace(/\/$/, "").split("/");
-          setWorkspaceName(parts[parts.length - 1] || "Workspace");
-        }
-      }
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setFolderBusy(false);
-    }
-  };
-
   const createWorkspace = async () => {
-    if (!workspaceFolder.trim() || !workspaceName.trim() || busy) return;
+    if (!workspaceName.trim() || busy) return;
     setBusy(true);
     setError(null);
     try {
-      await onCreateWorkspace(workspaceName.trim(), workspaceFolder.trim());
-      setWorkspaceFolder("");
+      await onCreateWorkspace(workspaceName.trim());
       setWorkspaceName("");
       setShowWorkspaceModal(false);
     } catch (e) {
@@ -468,19 +445,9 @@ export function NotepadView({
                 placeholder="Workspace name"
                 style={{ border: "1px solid var(--border)", padding: "11px 12px", background: "white" }}
               />
-              <button
-                onClick={() => void pickFolder()}
-                style={{
-                  padding: "11px 12px",
-                  border: "1px solid var(--border)",
-                  background: "white",
-                  fontFamily: "var(--mono)",
-                  fontSize: 10,
-                  textAlign: "left",
-                }}
-              >
-                {folderBusy ? "opening folder dialog…" : workspaceFolder || "select folder"}
-              </button>
+              <div style={{ fontFamily: "var(--mono)", fontSize: 9, color: "var(--ink3)", lineHeight: 1.5 }}>
+                A workspace is a collection of projects. Add projects and their folders after creating it.
+              </div>
               <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
                 <button
                   onClick={() => setShowWorkspaceModal(false)}

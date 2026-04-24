@@ -326,6 +326,96 @@ def _engram_from_memory(mem: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+_AUTO_MEMORY_TIER_BY_TYPE = {
+    "user": "high",
+    "feedback": "high",
+    "project": "medium",
+    "reference": "medium",
+}
+
+
+def _parse_auto_memory_file(path: Path) -> Optional[Dict[str, Any]]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    name = path.stem
+    description = ""
+    mem_type = "project"
+    body = text
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end != -1:
+            header = text[3:end]
+            body = text[end + 4 :].lstrip("\n")
+            for line in header.splitlines():
+                key, sep, value = line.partition(":")
+                if not sep:
+                    continue
+                key = key.strip().lower()
+                value = value.strip().strip('"').strip("'")
+                if key == "name" and value:
+                    name = value
+                elif key == "description" and value:
+                    description = value
+                elif key == "type" and value:
+                    mem_type = value
+    body = body.strip()
+    if not body and not description:
+        return None
+    content_parts: List[str] = [f"[{mem_type}] {name}"]
+    if description:
+        content_parts.append(description)
+    if body:
+        content_parts.append(body)
+    content = "\n\n".join(content_parts)
+    try:
+        created = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).strftime("%Y-%m-%d")
+    except OSError:
+        created = time.strftime("%Y-%m-%d")
+    tier = _AUTO_MEMORY_TIER_BY_TYPE.get(mem_type, "medium")
+    file_id = hashlib.sha1(str(path).encode("utf-8")).hexdigest()[:16]
+    return {
+        "id": f"auto:{file_id}",
+        "tier": tier,
+        "content": content,
+        "source": "claude_auto_memory",
+        "created": created,
+        "tags": [mem_type, "auto-memory"],
+        "decay": 1.0,
+        "reaffirmed": 0,
+        "tokens": _estimate_tokens(content),
+    }
+
+
+def _auto_memory_engrams() -> List[Dict[str, Any]]:
+    roots = [Path.home() / ".claude" / "projects"]
+    engrams: List[Dict[str, Any]] = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        try:
+            project_dirs = [p for p in root.iterdir() if p.is_dir()]
+        except OSError:
+            continue
+        for project_dir in project_dirs:
+            memory_dir = project_dir / "memory"
+            if not memory_dir.is_dir():
+                continue
+            try:
+                files = [p for p in memory_dir.iterdir() if p.is_file() and p.suffix == ".md"]
+            except OSError:
+                continue
+            for path in files:
+                if path.name.upper() == "MEMORY.MD":
+                    continue
+                eng = _parse_auto_memory_file(path)
+                if eng:
+                    engrams.append(eng)
+    engrams.sort(key=lambda e: e.get("created") or "", reverse=True)
+    return engrams
+
+
 # ─── App factory ──────────────────────────────────────────────────────────────
 
 
@@ -368,6 +458,7 @@ def create_app(*, serve_static: bool = True, dev_mode: bool = False) -> FastAPI:
             if isinstance(raw, dict):
                 raw = raw.get("results") or raw.get("memories") or []
             engrams = [_engram_from_memory(m) for m in raw if m]
+            engrams.extend(_auto_memory_engrams())
             return {"live": True, "engrams": engrams, "count": len(engrams)}
         except Exception as exc:  # noqa: BLE001
             log.warning("list_memories failed: %s", exc)
@@ -637,43 +728,22 @@ def create_app(*, serve_static: bool = True, dev_mode: bool = False) -> FastAPI:
     def create_workspace_api(payload: WorkspaceRootCreatePayload) -> Dict[str, Any]:
         try:
             db = _get_db()
-            root_path = _abs_user_path(payload.root_path or _ui_repo())
-            workspace_name = _display_name(payload.name, fallback_path=root_path)
+            workspace_name = _display_name(payload.name, fallback="Workspace")
+            if not workspace_name:
+                raise HTTPException(status_code=400, detail="Workspace name is required")
             workspace = db.upsert_workspace(
                 {
                     "user_id": _ui_user_id(),
                     "name": workspace_name,
                     "description": payload.description,
-                    "root_path": root_path,
+                    "root_path": None,
                     "metadata": {"created_via": "sankhya-ui"},
                 }
             )
-            db.upsert_workspace_mount(
-                {
-                    "workspace_id": workspace["id"],
-                    "user_id": _ui_user_id(),
-                    "mount_path": root_path,
-                    "label": os.path.basename(root_path.rstrip(os.sep)) or root_path,
-                    "is_primary": True,
-                }
-            )
-            general = db.upsert_workspace_project(
-                {
-                    "workspace_id": workspace["id"],
-                    "user_id": _ui_user_id(),
-                    "name": "General",
-                    "description": f"Default project for {workspace_name}",
-                    "default_runtime": "codex",
-                    "metadata": {"created_via": "sankhya-ui", "auto_created": True},
-                }
-            )
-            db.replace_workspace_project_scope_rules(
-                project_id=str(general.get("id") or ""),
-                user_id=_ui_user_id(),
-                rules=[{"path_prefix": root_path, "label": "root"}],
-            )
-            _mirror_runtime_sessions(db, extra_paths=[root_path])
+            _mirror_runtime_sessions(db)
             return {"ok": True, "workspace": _workspace_summary(db, workspace)}
+        except HTTPException:
+            raise
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -819,8 +889,6 @@ def create_app(*, serve_static: bool = True, dev_mode: bool = False) -> FastAPI:
                 }
             )
             rules = _normalize_scope_rules(payload.scope_rules)
-            if not rules:
-                rules = [{"path_prefix": _workspace_primary_path(workspace), "label": "root"}]
             db.replace_workspace_project_scope_rules(
                 project_id=str(project.get("id") or ""),
                 user_id=_ui_user_id(),
@@ -828,10 +896,7 @@ def create_app(*, serve_static: bool = True, dev_mode: bool = False) -> FastAPI:
             )
             _mirror_runtime_sessions(
                 db,
-                extra_paths=[
-                    _workspace_primary_path(workspace),
-                    *[str(rule.get("path_prefix") or "") for rule in rules],
-                ],
+                extra_paths=[str(rule.get("path_prefix") or "") for rule in rules],
             )
             return {"ok": True, "project": _project_summary(db, project)}
         except HTTPException:
