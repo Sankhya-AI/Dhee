@@ -1827,6 +1827,30 @@ def build_parser() -> argparse.ArgumentParser:
     # uninstall
     sub.add_parser("uninstall", help="Remove ~/.dhee directory")
 
+    # ui — Sankhya web frontend
+    try:
+        from dhee.ui.cli import register as _register_ui
+
+        _register_ui(sub)
+    except Exception:
+        pass
+
+    # onboard — interactive provider + key wizard (called by install.sh)
+    try:
+        from dhee.cli_onboard import register as _register_onboard
+
+        _register_onboard(sub)
+    except Exception:
+        pass
+
+    # update — pull latest release + rebuild UI
+    try:
+        from dhee.cli_update import register as _register_update
+
+        _register_update(sub)
+    except Exception:
+        pass
+
     return parser
 
 
@@ -1885,7 +1909,7 @@ def main() -> None:
         parser.print_help()
         sys.exit(0)
 
-    handler = COMMAND_MAP.get(args.command)
+    handler = COMMAND_MAP.get(args.command) or getattr(args, "func", None)
     if handler:
         try:
             handler(args)

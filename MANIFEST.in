@@ -1,0 +1,11 @@
+prune dhee/ui/web/node_modules
+prune engram-bus
+prune engram-bridge
+prune engram-enterprise
+prune engram-failure
+prune engram-heartbeat
+prune engram-identity
+prune engram-metamemory
+prune engram-policy
+
+recursive-include dhee/ui/web/dist *

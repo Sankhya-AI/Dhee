@@ -69,6 +69,22 @@ def _shared_context() -> Dict[str, Any]:
     }
 
 
+def _router_meta(extra: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    ctx = _shared_context()
+    base = {
+        "user_id": ctx.get("user_id"),
+        "agent_id": ctx.get("agent_id"),
+        "harness": ctx.get("harness"),
+        "repo": ctx.get("repo"),
+        "cwd": ctx.get("cwd"),
+        "session_id": ctx.get("session_id"),
+        "thread_id": ctx.get("thread_id"),
+    }
+    if extra:
+        base.update(extra)
+    return base
+
+
 def _shared_event_id(tool_name: str, *parts: Any) -> str:
     seed = "|".join([tool_name, *[str(part or "") for part in parts]])
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()
@@ -330,7 +346,7 @@ def handle_dhee_read(arguments: Dict[str, Any]) -> Dict[str, Any]:
     stored = ptr_store.store(
         content,
         tool="Read",
-        meta={
+        meta=_router_meta({
             "file_path": file_path,
             "offset": offset,
             "limit": limit,
@@ -340,7 +356,7 @@ def handle_dhee_read(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "kind": d.kind,
             "intent": intent_label,
             "depth": depth,
-        },
+        }),
     )
     rendered = d.render(stored.ptr, depth=depth)
     inlined = False
@@ -477,7 +493,7 @@ def handle_dhee_bash(arguments: Dict[str, Any]) -> Dict[str, Any]:
     stored = ptr_store.store(
         raw_blob,
         tool="Bash",
-        meta={
+        meta=_router_meta({
             "command": cmd,
             "cwd": cwd,
             "exit_code": exit_code,
@@ -487,7 +503,7 @@ def handle_dhee_bash(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "stdout_bytes": d.stdout_bytes,
             "stderr_bytes": d.stderr_bytes,
             "timed_out": timed_out,
-        },
+        }),
     )
     rendered = d.render(stored.ptr)
     raw_output_bytes = d.stdout_bytes + d.stderr_bytes
@@ -573,7 +589,7 @@ def handle_dhee_agent(arguments: Dict[str, Any]) -> Dict[str, Any]:
     stored = ptr_store.store(
         text,
         tool="Agent",
-        meta={
+        meta=_router_meta({
             "source": source,
             "kind": d.kind,
             "intent": d.kind,  # agent digest kind == intent bucket
@@ -582,7 +598,7 @@ def handle_dhee_agent(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "est_tokens": d.est_tokens,
             "file_refs": d.file_refs[:50],
             "error_hits": d.error_hits,
-        },
+        }),
     )
     return {
         "ptr": stored.ptr,
@@ -661,7 +677,7 @@ def handle_dhee_grep(arguments: Dict[str, Any]) -> Dict[str, Any]:
     stored = ptr_store.store(
         raw,
         tool="Grep",
-        meta={
+        meta=_router_meta({
             "pattern": pattern,
             "path": path,
             "glob": glob,
@@ -675,7 +691,7 @@ def handle_dhee_grep(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "est_tokens": digest.est_tokens,
             "engine": digest.engine,
             "intent": "grep",
-        },
+        }),
     )
     rendered = digest.render(stored.ptr)
     inlined = False
@@ -853,6 +869,7 @@ def handle_dhee_expand_result(arguments: Dict[str, Any]) -> Dict[str, Any]:
         tool=str(meta.get("tool") or ""),
         intent=str(meta.get("intent") or meta.get("class") or meta.get("kind") or ""),
         depth=str(meta.get("depth") or ""),
+        agent_id=str(meta.get("agent_id") or os.environ.get("DHEE_AGENT_ID") or ""),
     )
     result: dict[str, Any] = {"ptr": ptr, "meta": meta, "content": sliced}
     if slice_info:

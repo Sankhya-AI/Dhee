@@ -41,9 +41,18 @@ logger = logging.getLogger(__name__)
 
 def _detect_provider() -> str:
     """Detect which LLM/embedder provider to use based on environment."""
-    if os.environ.get("OPENAI_API_KEY"):
+    try:
+        from dhee.cli_config import get_api_key
+    except Exception:
+        get_api_key = None  # type: ignore[assignment]
+
+    if os.environ.get("OPENAI_API_KEY") or (get_api_key and get_api_key("openai")):
         return "openai"
-    if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
+    if (
+        os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("GOOGLE_API_KEY")
+        or (get_api_key and get_api_key("gemini"))
+    ):
         return "gemini"
     if (
         os.environ.get("NVIDIA_API_KEY")
@@ -51,6 +60,7 @@ def _detect_provider() -> str:
         or os.environ.get("NVIDIA_EMBEDDING_API_KEY")
         or os.environ.get("NVIDIA_EMBED_API_KEY")
         or os.environ.get("NVIDIA_LLAMA_4_MAV_API_KEY")
+        or (get_api_key and get_api_key("nvidia"))
     ):
         return "nvidia"
     # Zero-config fallback: local simple embedder + mock LLM.
@@ -69,7 +79,15 @@ def _get_embedding_dims(provider: str) -> int:
 
 
 def _has_api_key() -> bool:
-    return bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY"))
+    try:
+        from dhee.cli_config import get_api_key
+    except Exception:
+        get_api_key = None  # type: ignore[assignment]
+    return bool(
+        os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+        or (get_api_key and (get_api_key("gemini") or get_api_key("openai")))
+    )
 
 
 def _get_data_dir() -> Path:

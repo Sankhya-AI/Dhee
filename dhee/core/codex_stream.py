@@ -240,6 +240,10 @@ def _ingest_exec_command(
                 "class": digest.cls,
                 "native_tool": "exec_command",
                 "harness": "codex",
+                "agent_id": "codex",
+                "char_count": len(raw_blob),
+                "stdout_bytes": digest.stdout_bytes,
+                "stderr_bytes": digest.stderr_bytes,
             },
         )
         shared = publish_shared_task_result(

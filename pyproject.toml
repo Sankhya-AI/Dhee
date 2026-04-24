@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dhee"
-version = "5.0.0"
-description = "Cognition layer for AI agents — persistent memory, performance tracking, and insight synthesis"
+version = "6.0.0"
+description = "Shared information layer for screen-aware AI agents — real-time collaboration, workspace/project memory, and context routing"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
@@ -84,6 +84,33 @@ Issues = "https://github.com/Sankhya-AI/Dhee/issues"
 Documentation = "https://github.com/Sankhya-AI/Dhee#readme"
 Changelog = "https://github.com/Sankhya-AI/Dhee/blob/main/CHANGELOG.md"
 
+[tool.setuptools]
+include-package-data = false
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["dhee*", "engram*"]
+exclude = [
+    "dhee.ui.web.node_modules*",
+    "engram-bus*",
+    "engram-bridge*",
+    "engram-enterprise*",
+    "engram-failure*",
+    "engram-heartbeat*",
+    "engram-identity*",
+    "engram-metamemory*",
+    "engram-policy*",
+]
+
+# Ship the prebuilt Sankhya SPA so `pip install dhee` users get a
+# working `dhee ui` without Node.js. The source `src/` + `public/`
+# deliberately stay out — they're only needed for editable checkouts
+# that already have the git repo.
+[tool.setuptools.package-data]
+"dhee.ui.web" = [
+    "dist/**/*",
+    "index.html",
+    "package.json",
+    "vite.config.ts",
+    "tsconfig.json",
+]

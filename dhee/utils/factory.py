@@ -59,9 +59,18 @@ def _detect_provider() -> Tuple[str, str]:
         embedder = "qwen" if _qwen_embedder_available() else "simple"
         return (embedder, "dhee")
 
-    if os.environ.get("OPENAI_API_KEY"):
+    try:
+        from dhee.cli_config import get_api_key
+    except Exception:
+        get_api_key = None  # type: ignore[assignment]
+
+    if os.environ.get("OPENAI_API_KEY") or (get_api_key and get_api_key("openai")):
         return ("openai", "openai")
-    if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
+    if (
+        os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("GOOGLE_API_KEY")
+        or (get_api_key and get_api_key("gemini"))
+    ):
         return ("gemini", "gemini")
 
     # Try Ollama
@@ -74,7 +83,11 @@ def _detect_provider() -> Tuple[str, str]:
         pass
 
     # NVIDIA (internal — not customer-documented)
-    if os.environ.get("NVIDIA_API_KEY") or os.environ.get("NVIDIA_QWEN_API_KEY"):
+    if (
+        os.environ.get("NVIDIA_API_KEY")
+        or os.environ.get("NVIDIA_QWEN_API_KEY")
+        or (get_api_key and get_api_key("nvidia"))
+    ):
         return ("nvidia", "nvidia")
 
     # Zero-config fallback: hash embedder + mock LLM

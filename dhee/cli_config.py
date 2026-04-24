@@ -94,7 +94,11 @@ def save_config(config: Dict[str, Any]) -> None:
 
 
 def get_api_key(provider: str) -> Optional[str]:
-    """Read the API key from environment for the given provider."""
+    """Read the API key for the given provider.
+
+    Environment variables win for backward compatibility. If none are
+    set, fall back to Dhee's encrypted local secret store.
+    """
     defaults = PROVIDER_DEFAULTS.get(provider, {})
     env_var = defaults.get("env_var")
     if env_var:
@@ -105,7 +109,12 @@ def get_api_key(provider: str) -> Optional[str]:
         key = os.environ.get(alt)
         if key:
             return key
-    return None
+    try:
+        from dhee.secret_store import get_stored_api_key
+
+        return get_stored_api_key(provider)
+    except Exception:
+        return None
 
 
 def get_memory_instance(config: Optional[Dict[str, Any]] = None):

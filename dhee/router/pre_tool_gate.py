@@ -69,11 +69,19 @@ def _enforce_on() -> bool:
         return False
 
 
+_ESCAPE_HINT = (
+    " If the dhee MCP server isn't wired into this host, install it with "
+    "`dhee install` (adds .mcp.json / Claude Code config), or disable "
+    "enforcement for this session with `rm ~/.dhee/router_enforce` (or "
+    "unset DHEE_ROUTER_ENFORCE)."
+)
+
+
 def _deny(reason: str, steer: str) -> dict[str, Any]:
     return {
         "permissionDecision": "deny",
         "reason": reason,
-        "additionalContext": steer,
+        "additionalContext": steer + _ESCAPE_HINT,
     }
 
 

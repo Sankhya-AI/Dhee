@@ -62,6 +62,11 @@ _GROUP_CATASTROPHE_THRESHOLD = 0.06
 # M4.2b: minimum samples per group before we trust its delta. Below this,
 # the group contributes only to the rolling baseline, not to the decision.
 _MIN_GROUP_SAMPLES = 2
+# M4.3: newly promoted strategies stay under watch for a short online window.
+# If they regress beyond this threshold, rollback is automatic.
+_POST_PROMOTION_MIN_EVAL_COUNT = 5
+_POST_PROMOTION_REGRESSION_THRESHOLD = 0.04
+_POST_PROMOTION_GROUP_CATASTROPHE_THRESHOLD = 0.06
 
 
 @dataclass
@@ -89,6 +94,16 @@ class ImprovementAttempt:
     # M4.2b: populated at resolve time — per-task-type candidate delta
     # vs. parent baseline; surfaced via get_stats() for debuggability.
     group_deltas: Dict[str, float] = field(default_factory=dict)
+    # M4.3: parent global baseline at propose-time. Used for post-promotion
+    # regression checks so we compare against a stable reference.
+    parent_global_baseline: float = 0.5
+    # M4.3: promoted strategies are watched for the next N evaluations.
+    post_promotion_status: str = "not_started"  # not_started|watching|validated|rolled_back
+    post_promotion_scores: List[float] = field(default_factory=list)
+    post_promotion_samples: List[Dict[str, Any]] = field(default_factory=list)
+    post_promotion_group_deltas: Dict[str, float] = field(default_factory=dict)
+    post_promotion_delta: Optional[float] = None
+    post_promotion_resolved_at: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -105,6 +120,13 @@ class ImprovementAttempt:
             "eval_samples": self.eval_samples[-20:],
             "parent_baseline_by_task": dict(self.parent_baseline_by_task),
             "group_deltas": dict(self.group_deltas),
+            "parent_global_baseline": float(self.parent_global_baseline),
+            "post_promotion_status": self.post_promotion_status,
+            "post_promotion_scores": self.post_promotion_scores[-50:],
+            "post_promotion_samples": self.post_promotion_samples[-50:],
+            "post_promotion_group_deltas": dict(self.post_promotion_group_deltas),
+            "post_promotion_delta": self.post_promotion_delta,
+            "post_promotion_resolved_at": self.post_promotion_resolved_at,
             "resolved_at": self.resolved_at,
         }
 
@@ -136,6 +158,7 @@ class MetaBuddhi:
         )
         self._attempts: Dict[str, ImprovementAttempt] = {}
         self._pending_attempt: Optional[str] = None
+        self._watching_attempt: Optional[str] = None
         # M4.2b: per-task-type rolling baseline. Updated on every
         # record_evaluation call — even when no attempt is pending — so
         # the next proposal has a fresh parent baseline to snapshot.
@@ -171,6 +194,16 @@ class MetaBuddhi:
         if self._pending_attempt:
             pending = self._attempts.get(self._pending_attempt)
             if pending and pending.status == "evaluating":
+                return None
+        # M4.3: no overlapping mutations while a newly promoted strategy is
+        # still under post-promotion validation.
+        if self._watching_attempt:
+            watching = self._attempts.get(self._watching_attempt)
+            if (
+                watching
+                and watching.status == "promoted"
+                and watching.post_promotion_status == "watching"
+            ):
                 return None
 
         active = self._store.get_active()
@@ -226,6 +259,7 @@ class MetaBuddhi:
             new_value=new_val,
             rationale=rationale,
             proposed_at=time.time(),
+            parent_global_baseline=active.avg_score if active.eval_scores else 0.5,
         )
         # M4.2b: snapshot parent's per-task-type baseline right now, so
         # resolution compares apples-to-apples per task type.
@@ -254,6 +288,8 @@ class MetaBuddhi:
         score: float,
         *,
         task_type: Optional[str] = None,
+        source: Optional[str] = None,
+        signal_components: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
         """Record an evaluation score for the pending improvement.
 
@@ -274,7 +310,14 @@ class MetaBuddhi:
             self._update_group_stat(task_type, score)
 
         if not self._pending_attempt:
-            return None
+            # M4.3: no candidate pending; use incoming scores to validate the
+            # most recently promoted strategy during its watch window.
+            return self._record_post_promotion_signal(
+                score=score,
+                task_type=task_type,
+                source=source,
+                signal_components=signal_components,
+            )
 
         attempt = self._attempts.get(self._pending_attempt)
         if not attempt or attempt.status != "evaluating":
@@ -284,6 +327,8 @@ class MetaBuddhi:
         attempt.eval_samples.append({
             "score": float(score),
             "task_type": task_type,
+            "source": source or "unknown",
+            "signal_components": dict(signal_components or {}),
             "ts": time.time(),
         })
 
@@ -355,6 +400,8 @@ class MetaBuddhi:
         if promote:
             self._store.promote(attempt.strategy_id)
             attempt.status = "promoted"
+            attempt.post_promotion_status = "watching"
+            self._watching_attempt = attempt.id
             logger.info(
                 "MetaBuddhi promoted strategy: %s (delta=+%.3f basis=%s groups=%s)",
                 attempt.dimension, delta, basis, group_deltas,
@@ -362,6 +409,10 @@ class MetaBuddhi:
         else:
             self._store.rollback(attempt.strategy_id)
             attempt.status = "rolled_back"
+            attempt.post_promotion_status = "rolled_back"
+            attempt.post_promotion_resolved_at = time.time()
+            if self._watching_attempt == attempt.id:
+                self._watching_attempt = None
             if catastrophic_group is not None:
                 logger.info(
                     "MetaBuddhi rolled back: %s (delta=%.3f basis=%s) — "
@@ -529,6 +580,11 @@ class MetaBuddhi:
                 if self._pending_attempt and self._pending_attempt in self._attempts
                 else None
             ),
+            "watching_attempt": (
+                self._attempts[self._watching_attempt].to_dict()
+                if self._watching_attempt and self._watching_attempt in self._attempts
+                else None
+            ),
             "total_attempts": len(self._attempts),
             "promoted": sum(
                 1 for a in self._attempts.values() if a.status == "promoted"
@@ -556,6 +612,7 @@ class MetaBuddhi:
                     f.write(json.dumps(a.to_dict(), ensure_ascii=False) + "\n")
                 # Also save pending pointer
                 f.write(json.dumps({"_pending": self._pending_attempt}) + "\n")
+                f.write(json.dumps({"_watching": self._watching_attempt}) + "\n")
         except OSError as e:
             logger.debug("Failed to save attempts: %s", e)
 
@@ -574,6 +631,9 @@ class MetaBuddhi:
                         if "_pending" in data:
                             self._pending_attempt = data["_pending"]
                             continue
+                        if "_watching" in data:
+                            self._watching_attempt = data["_watching"]
+                            continue
                         attempt = ImprovementAttempt(
                             id=data["id"],
                             strategy_id=data["strategy_id"],
@@ -591,12 +651,127 @@ class MetaBuddhi:
                                 "parent_baseline_by_task", {}
                             ),
                             group_deltas=data.get("group_deltas", {}),
+                            parent_global_baseline=float(
+                                data.get("parent_global_baseline", 0.5)
+                            ),
+                            post_promotion_status=data.get(
+                                "post_promotion_status", "not_started"
+                            ),
+                            post_promotion_scores=data.get(
+                                "post_promotion_scores", []
+                            ),
+                            post_promotion_samples=data.get(
+                                "post_promotion_samples", []
+                            ),
+                            post_promotion_group_deltas=data.get(
+                                "post_promotion_group_deltas", {}
+                            ),
+                            post_promotion_delta=data.get("post_promotion_delta"),
+                            post_promotion_resolved_at=data.get(
+                                "post_promotion_resolved_at"
+                            ),
                         )
                         self._attempts[attempt.id] = attempt
                     except (KeyError, TypeError):
                         continue
         except (OSError, json.JSONDecodeError) as e:
             logger.debug("Failed to load attempts: %s", e)
+
+    def _record_post_promotion_signal(
+        self,
+        *,
+        score: float,
+        task_type: Optional[str],
+        source: Optional[str],
+        signal_components: Optional[Dict[str, Any]],
+    ) -> Optional[str]:
+        attempt = (
+            self._attempts.get(self._watching_attempt) if self._watching_attempt else None
+        )
+        if (
+            not attempt
+            or attempt.status != "promoted"
+            or attempt.post_promotion_status not in {"watching", "not_started"}
+        ):
+            return None
+
+        attempt.post_promotion_status = "watching"
+        attempt.post_promotion_scores.append(float(score))
+        attempt.post_promotion_samples.append(
+            {
+                "score": float(score),
+                "task_type": task_type,
+                "source": source or "unknown",
+                "signal_components": dict(signal_components or {}),
+                "ts": time.time(),
+            }
+        )
+        if len(attempt.post_promotion_scores) < _POST_PROMOTION_MIN_EVAL_COUNT:
+            self._save_attempts()
+            return "watching"
+
+        post_avg = sum(attempt.post_promotion_scores) / len(
+            attempt.post_promotion_scores
+        )
+        global_delta = post_avg - float(attempt.parent_global_baseline)
+        attempt.post_promotion_delta = global_delta
+
+        # Group-level post-promotion regression checks.
+        sample_groups: Dict[str, List[float]] = {}
+        for sample in attempt.post_promotion_samples:
+            t = sample.get("task_type")
+            if not t:
+                continue
+            sample_groups.setdefault(str(t), []).append(float(sample["score"]))
+
+        post_group_deltas: Dict[str, float] = {}
+        for task_name, scores in sample_groups.items():
+            if len(scores) < _MIN_GROUP_SAMPLES:
+                continue
+            parent = attempt.parent_baseline_by_task.get(task_name)
+            if not parent:
+                continue
+            parent_mean = float(parent.get("mean", 0.5))
+            post_group_deltas[task_name] = (sum(scores) / len(scores)) - parent_mean
+        attempt.post_promotion_group_deltas = post_group_deltas
+
+        catastrophic_group = None
+        for task_name, delta in post_group_deltas.items():
+            if delta <= -_POST_PROMOTION_GROUP_CATASTROPHE_THRESHOLD:
+                catastrophic_group = (task_name, delta)
+                break
+
+        if (
+            global_delta <= -_POST_PROMOTION_REGRESSION_THRESHOLD
+            or catastrophic_group is not None
+        ):
+            self._store.rollback(attempt.strategy_id)
+            attempt.status = "rolled_back"
+            attempt.post_promotion_status = "rolled_back"
+            attempt.post_promotion_resolved_at = time.time()
+            self._watching_attempt = None
+            if catastrophic_group is not None:
+                logger.info(
+                    "MetaBuddhi post-promotion rollback: %s due to group %s=%.3f",
+                    attempt.dimension, catastrophic_group[0], catastrophic_group[1],
+                )
+            else:
+                logger.info(
+                    "MetaBuddhi post-promotion rollback: %s (delta=%.3f)",
+                    attempt.dimension, global_delta,
+                )
+            self._save_attempts()
+            return "rolled_back"
+
+        attempt.post_promotion_status = "validated"
+        attempt.post_promotion_resolved_at = time.time()
+        self._watching_attempt = None
+        self._save_attempts()
+        logger.info(
+            "MetaBuddhi post-promotion validated: %s (delta=+%.3f)",
+            attempt.dimension, global_delta,
+        )
+        return "validated"
 
     # ------------------------------------------------------------------
     # M4.2b: group-baseline persistence

@@ -1,15 +1,20 @@
 #!/bin/sh
-# Dhee installer — one command to add cognition to Claude Code.
+# Dhee installer — one command, interactive provider + key setup + UI.
 #
-#   curl -fsSL https://raw.githubusercontent.com/Sankhya-AI/dhee/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/Sankhya-AI/Dhee/main/install.sh | sh
 #
 # What it does:
 #   1. Creates ~/.dhee with a hidden Python venv
-#   2. Installs the dhee package
-#   3. Full Claude Code bootstrap: hooks + MCP server + context router
-#      (all enabled by default — see CLI flags to opt out individual pieces)
+#   2. Installs the dhee package (with all providers)
+#   3. Symlinks `dhee` and `dhee-mcp` into ~/.local/bin
+#   4. Wires Claude Code (hooks + MCP + router) if available
+#   5. Runs `dhee onboard` — interactive provider picker, API key paste,
+#      and web UI build
 #
-# Requires: Python 3.9+, Claude Code CLI
+# Non-interactive: pass DHEE_PROVIDER=openai DHEE_API_KEY=sk-... to skip
+# the prompts entirely (CI-friendly).
+#
+# Requires: Python 3.9+  (Claude Code CLI + Node.js optional)
 set -e
 
 DHEE_HOME="$HOME/.dhee"
@@ -20,9 +25,9 @@ PACKAGE="dhee[all]"
 
 # --- Colors ---
 if [ -t 1 ]; then
-    BOLD="\033[1m" GREEN="\033[32m" YELLOW="\033[33m" RED="\033[31m" RESET="\033[0m"
+    BOLD="\033[1m" GREEN="\033[32m" YELLOW="\033[33m" RED="\033[31m" DIM="\033[2m" RESET="\033[0m"
 else
-    BOLD="" GREEN="" YELLOW="" RED="" RESET=""
+    BOLD="" GREEN="" YELLOW="" RED="" DIM="" RESET=""
 fi
 
 info()  { printf "${GREEN}>${RESET} %s\n" "$1"; }
@@ -58,10 +63,12 @@ done
 # --- Create/update venv ---
 if [ -d "$VENV_DIR" ]; then
     info "Updating existing install"
+    FRESH_INSTALL=0
 else
     info "Installing Dhee"
     mkdir -p "$DHEE_HOME"
     "$PYTHON" -m venv "$VENV_DIR"
+    FRESH_INSTALL=1
 fi
 
 # --- Install package ---
@@ -106,16 +113,53 @@ if command -v claude >/dev/null 2>&1 || [ -f "$HOME/.claude/settings.json" ]; th
     if "$VENV_DIR/bin/dhee" install >/dev/null 2>&1; then
         done_ "Claude Code wired: hooks + MCP + router"
     else
-        warn "Bootstrap failed — run 'dhee install' manually for details"
+        warn "Claude Code bootstrap failed — run 'dhee install' manually for details"
     fi
 else
     warn "Claude Code not found — run 'dhee install' after installing Claude Code"
 fi
 
+# --- Onboarding (interactive provider + key) ---
+# If the caller set DHEE_PROVIDER + DHEE_API_KEY we stash the key
+# non-interactively, then ask `dhee onboard --provider ... --skip-ui-build`
+# to only do the provider save and UI build (it won't re-prompt for the
+# key because one is already stored).
+NONINTERACTIVE_DONE=0
+if [ -n "${DHEE_PROVIDER:-}" ] && [ -n "${DHEE_API_KEY:-}" ]; then
+    info "Non-interactive onboarding for provider: ${DHEE_PROVIDER}"
+    if "$VENV_DIR/bin/python" -c "
+import sys
+from dhee.secret_store import store_api_key
+try:
+    store_api_key('${DHEE_PROVIDER}', '${DHEE_API_KEY}', label='installer')
+except Exception as e:
+    print(e, file=sys.stderr); sys.exit(1)
+" >/dev/null 2>&1; then
+        done_ "API key stored for ${DHEE_PROVIDER}"
+        NONINTERACTIVE_DONE=1
+    else
+        warn "Non-interactive key storage failed — falling back to prompt"
+    fi
+fi
+
+ONBOARD_STATUS=0
+if [ "$NONINTERACTIVE_DONE" = "1" ]; then
+    "$VENV_DIR/bin/dhee" onboard --provider "${DHEE_PROVIDER}" || ONBOARD_STATUS=$?
+else
+    # Interactive: onboard reads from /dev/tty so this works under curl | sh.
+    if [ -r /dev/tty ]; then
+        "$VENV_DIR/bin/dhee" onboard < /dev/tty || ONBOARD_STATUS=$?
+    else
+        warn "No TTY detected — skipping interactive onboarding."
+        warn "Run 'dhee onboard' manually to pick a provider and paste your API key."
+        ONBOARD_STATUS=0
+    fi
+fi
+
 # --- Done ---
 printf "\n${BOLD}${GREEN}Dhee is ready.${RESET}\n"
-printf "  Open Claude Code in any project — cognition + router are automatic.\n\n"
-printf "  Inspect:   dhee router status | dhee router stats\n"
-printf "  Opt out:   dhee router disable   (keeps hooks + MCP, drops router)\n"
-printf "  Update:    re-run this script\n"
-printf "  Remove:    dhee uninstall-hooks && rm -rf ~/.dhee\n\n"
+printf "  Launch the UI: ${BOLD}dhee ui${RESET}  ${DIM}(opens in your browser)${RESET}\n"
+printf "  Update later:  ${BOLD}dhee update${RESET}\n\n"
+printf "${DIM}  Inspect:   dhee router status | dhee router stats${RESET}\n"
+printf "${DIM}  Opt out:   dhee router disable${RESET}\n"
+printf "${DIM}  Remove:    dhee uninstall-hooks && rm -rf ~/.dhee${RESET}\n\n"

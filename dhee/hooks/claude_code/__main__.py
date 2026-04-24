@@ -333,6 +333,49 @@ def handle_post_tool(payload: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         pass
 
+    # Fan this signal onto the workspace information line so sibling
+    # agents (codex, browser, etc.) in the same workspace see the
+    # event live. Idempotent; safe even if the router already emitted.
+    try:
+        from dhee.core.workspace_line import emit_agent_activity
+
+        source_path = str(
+            (tool_input or {}).get("file_path")
+            or (tool_input or {}).get("path")
+            or (tool_input or {}).get("notebook_path")
+            or ""
+        ) or None
+        ptr = str(metadata.get("ptr") or "") or None
+        session_id = (
+            payload.get("session_id")
+            or payload.get("native_session_id")
+            or os.environ.get("CLAUDE_SESSION_ID")
+            or os.environ.get("DHEE_SESSION_ID")
+        )
+        tool_use_id = str(payload.get("tool_use_id") or "") or None
+        dhee = _get_dhee()
+        emit_agent_activity(
+            dhee._engram.memory.db,
+            user_id=os.environ.get("DHEE_USER_ID", "default"),
+            tool_name=str(tool_name or "tool"),
+            packet_kind="hook_post_tool",
+            digest=content,
+            runtime_id="claude-code",
+            native_session_id=session_id,
+            session_id=session_id,
+            cwd=os.getcwd(),
+            repo=os.getcwd(),
+            source_path=source_path,
+            source_event_id=tool_use_id,
+            ptr=ptr,
+            harness="claude-code",
+            agent_id="claude-code",
+            metadata=metadata,
+            result_status="completed" if success else "failed",
+        )
+    except Exception:
+        pass
+
     return {}
 
 
@@ -420,6 +463,27 @@ def handle_stop(payload: dict[str, Any]) -> dict[str, Any]:
         memory = getattr(dhee, "_memory", None) or getattr(dhee, "memory", None)
         evo = getattr(memory, "evolution_layer", None) if memory else None
         if evo is not None:
+            outcome_meta = {}
+            if isinstance(payload, dict):
+                for key in ("tests_passed", "tests_failed", "correction_count", "reverted"):
+                    if key in payload:
+                        outcome_meta[key] = payload.get(key)
+                raw_signals = payload.get("signals")
+                if isinstance(raw_signals, dict):
+                    # Preserve session-level heuristics emitted by the tracker.
+                    outcome_meta.update(raw_signals)
+            if any(
+                value is not None and value != ""
+                for value in (task_type, outcome_score, what_worked, what_failed)
+            ) or outcome_meta:
+                evo.record_task_outcome(
+                    task_type=task_type,
+                    outcome_score=outcome_score,
+                    what_worked=what_worked,
+                    what_failed=what_failed,
+                    metadata=outcome_meta,
+                    source="claude_stop",
+                )
             evo.on_session_end(reason=payload.get("hook_event_name", "session_end"))
     except Exception:
         pass

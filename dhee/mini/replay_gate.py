@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional
@@ -38,6 +39,15 @@ GATE_PROMOTE_DELTA = 0.02
 
 # Below this the corpus is too thin to render a verdict worth acting on.
 GATE_MIN_SAMPLES = 5
+
+# Minimum per-task-family samples when corpus carries task_type metadata.
+GATE_MIN_GROUP_SAMPLES = 2
+
+# If any single task family regresses beyond this delta, block promotion.
+GATE_MAX_GROUP_REGRESSION = 0.05
+
+# Confidence interval z-score for fold-delta lower-bound check.
+GATE_CONFIDENCE_Z = 1.96
 
 
 EvaluatorFn = Callable[[str, List[Dict[str, Any]]], float]
@@ -75,11 +85,17 @@ class ReplayGate:
         evaluator: Optional[EvaluatorFn] = None,
         min_samples: int = GATE_MIN_SAMPLES,
         promote_delta: float = GATE_PROMOTE_DELTA,
+        min_group_samples: int = GATE_MIN_GROUP_SAMPLES,
+        max_group_regression: float = GATE_MAX_GROUP_REGRESSION,
+        confidence_z: float = GATE_CONFIDENCE_Z,
     ) -> None:
         self._corpus_dir = corpus_dir
         self._evaluator = evaluator
         self._min_samples = int(min_samples)
         self._promote_delta = float(promote_delta)
+        self._min_group_samples = max(1, int(min_group_samples))
+        self._max_group_regression = max(0.0, float(max_group_regression))
+        self._confidence_z = max(0.0, float(confidence_z))
 
     # ------------------------------------------------------------------
     # Public surface
@@ -155,16 +171,118 @@ class ReplayGate:
             )
 
         delta = candidate_score - incumbent_score
-        passed = delta >= self._promote_delta
+        metrics: Dict[str, Any] = {
+            "promote_delta": self._promote_delta,
+            "min_group_samples": self._min_group_samples,
+            "max_group_regression": self._max_group_regression,
+        }
+
+        # Group-relative safety checks: if task types are present in corpus
+        # metadata, enforce minimum per-group support and block catastrophic
+        # single-group regressions.
+        groups = self._group_corpus_by_task_type(corpus)
+        if groups:
+            counts = {k: len(v) for k, v in groups.items()}
+            metrics["group_counts"] = counts
+            sparse = sorted(
+                [k for k, n in counts.items() if n < self._min_group_samples]
+            )
+            if sparse:
+                metrics["sparse_groups"] = sparse
+                return GateVerdict(
+                    passed=False,
+                    reason="insufficient_group_samples",
+                    candidate_score=candidate_score,
+                    incumbent_score=incumbent_score,
+                    delta=delta,
+                    corpus_size=len(corpus),
+                    metrics=metrics,
+                )
+
+            group_deltas: Dict[str, float] = {}
+            for task_type, subset in groups.items():
+                try:
+                    cand_g = float(evaluator(candidate_model_path, subset))
+                    base_g = float(evaluator(incumbent_model_path, subset))
+                except Exception as exc:
+                    logger.exception(
+                        "ReplayGate: group evaluator crashed (task_type=%s)",
+                        task_type,
+                    )
+                    return GateVerdict(
+                        passed=False,
+                        reason="evaluator_error",
+                        candidate_score=candidate_score,
+                        incumbent_score=incumbent_score,
+                        delta=delta,
+                        corpus_size=len(corpus),
+                        metrics={
+                            **metrics,
+                            "error": f"{type(exc).__name__}: {exc}",
+                            "task_type": task_type,
+                        },
+                    )
+                group_deltas[task_type] = cand_g - base_g
+            metrics["group_deltas"] = group_deltas
+            if group_deltas:
+                worst_group, worst_delta = min(
+                    group_deltas.items(), key=lambda kv: kv[1]
+                )
+                metrics["worst_group"] = {
+                    "task_type": worst_group,
+                    "delta": worst_delta,
+                }
+                if worst_delta < -self._max_group_regression:
+                    return GateVerdict(
+                        passed=False,
+                        reason="group_regression",
+                        candidate_score=candidate_score,
+                        incumbent_score=incumbent_score,
+                        delta=delta,
+                        corpus_size=len(corpus),
+                        metrics=metrics,
+                    )
+
+        ci_lower = delta
+        fold_deltas = self._fold_deltas(
+            evaluator=evaluator,
+            candidate_model_path=candidate_model_path,
+            incumbent_model_path=incumbent_model_path,
+            corpus=corpus,
+        )
+        if fold_deltas:
+            metrics["fold_deltas"] = fold_deltas
+        if len(fold_deltas) >= 2:
+            mean_delta = sum(fold_deltas) / len(fold_deltas)
+            if len(fold_deltas) > 1:
+                variance = sum(
+                    (d - mean_delta) ** 2 for d in fold_deltas
+                ) / (len(fold_deltas) - 1)
+            else:
+                variance = 0.0
+            stderr = math.sqrt(max(0.0, variance)) / math.sqrt(len(fold_deltas))
+            ci_lower = mean_delta - self._confidence_z * stderr
+            metrics["confidence"] = {
+                "fold_count": len(fold_deltas),
+                "mean_delta": mean_delta,
+                "stderr": stderr,
+                "z": self._confidence_z,
+                "ci_lower": ci_lower,
+            }
+
+        passed = delta >= self._promote_delta and ci_lower >= self._promote_delta
+        reason = "promoted" if passed else "regressed"
+        if delta >= self._promote_delta and ci_lower < self._promote_delta:
+            reason = "low_confidence"
 
         return GateVerdict(
             passed=passed,
-            reason="promoted" if passed else "regressed",
+            reason=reason,
             candidate_score=candidate_score,
             incumbent_score=incumbent_score,
             delta=delta,
             corpus_size=len(corpus),
-            metrics={"promote_delta": self._promote_delta},
+            metrics=metrics,
         )
 
     # ------------------------------------------------------------------
@@ -197,6 +315,57 @@ class ReplayGate:
         if self._evaluator is not None:
             return self._evaluator
         return _default_karma_evaluator()
+
+    def _group_corpus_by_task_type(
+        self, corpus: List[Dict[str, Any]]
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        groups: Dict[str, List[Dict[str, Any]]] = {}
+        for rec in corpus:
+            task_type = self._task_type_from_record(rec)
+            if not task_type:
+                continue
+            groups.setdefault(task_type, []).append(rec)
+        return groups
+
+    @staticmethod
+    def _task_type_from_record(rec: Dict[str, Any]) -> str:
+        meta = rec.get("metadata")
+        if isinstance(meta, dict):
+            value = meta.get("task_type")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        value = rec.get("task_type")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return ""
+
+    def _fold_deltas(
+        self,
+        *,
+        evaluator: EvaluatorFn,
+        candidate_model_path: str,
+        incumbent_model_path: str,
+        corpus: List[Dict[str, Any]],
+        fold_count: int = 5,
+    ) -> List[float]:
+        if len(corpus) < max(2, fold_count):
+            return []
+        folds: List[List[Dict[str, Any]]] = [[] for _ in range(max(2, fold_count))]
+        for idx, rec in enumerate(corpus):
+            folds[idx % len(folds)].append(rec)
+        deltas: List[float] = []
+        for subset in folds:
+            if not subset:
+                continue
+            try:
+                cand = float(evaluator(candidate_model_path, subset))
+                base = float(evaluator(incumbent_model_path, subset))
+            except Exception:
+                # Keep CI best-effort; evaluator hard-fail is already handled
+                # for the full corpus above.
+                continue
+            deltas.append(cand - base)
+        return deltas
 
 
 def _default_karma_evaluator() -> Optional[EvaluatorFn]:

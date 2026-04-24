@@ -127,7 +127,14 @@ def load(ptr: str) -> str | None:
     return None
 
 
-def record_expansion(ptr: str, *, tool: str = "", intent: str = "", depth: str = "") -> None:
+def record_expansion(
+    ptr: str,
+    *,
+    tool: str = "",
+    intent: str = "",
+    depth: str = "",
+    agent_id: str = "",
+) -> None:
     """Append an append-only audit record that `ptr` was expanded.
 
     Per-session JSONL file. ``tool`` / ``intent`` / ``depth`` attribution
@@ -145,6 +152,8 @@ def record_expansion(ptr: str, *, tool: str = "", intent: str = "", depth: str =
             rec["intent"] = intent
         if depth:
             rec["depth"] = depth
+        if agent_id:
+            rec["agent_id"] = agent_id
         with log.open("a", encoding="utf-8") as f:
             f.write(_json.dumps(rec) + "\n")
     except Exception:
@@ -166,6 +175,35 @@ def iter_expansion_counts() -> dict[str, int]:
         try:
             with log.open("r", encoding="utf-8") as f:
                 out[sdir.name] = sum(1 for line in f if line.strip())
+        except Exception:
+            continue
+    return out
+
+
+def iter_expansion_records() -> list[dict[str, Any]]:
+    """Return every parsed expansion record across all session dirs."""
+    root = _root()
+    out: list[dict[str, Any]] = []
+    if not root.exists():
+        return out
+    for sdir in root.iterdir():
+        if not sdir.is_dir():
+            continue
+        log = sdir / "expansions.jsonl"
+        if not log.exists():
+            continue
+        try:
+            import json as _json
+
+            with log.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    rec = _json.loads(line)
+                    if isinstance(rec, dict):
+                        rec.setdefault("session_id", sdir.name)
+                        out.append(rec)
         except Exception:
             continue
     return out

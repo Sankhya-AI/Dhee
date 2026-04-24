@@ -2,72 +2,82 @@
   <img src="docs/dhee-logo.png" alt="Dhee" width="80">
 </p>
 
-<h1 align="center">Dhee — Self-Evolving Memory & Context Router for AI Agents</h1>
-
-<h3 align="center">A measurable context router + self-evolving memory layer for AI agents. Works with Claude Code, Cursor, Codex, Gemini CLI, Aider, Cline, and any MCP client.</h3>
-
-<p align="center"><sub>
-Savings numbers are projections from router replay on real sessions (run <code>dhee router report</code> to reproduce on yours). A fully sanitized public replay corpus lands with the next release — until then, every "savings %" in this README is cited against the command that produced it, not a marketing slide.
-</sub></p>
+<h1 align="center">Dhee — the shared information layer for screen-aware AI agents</h1>
 
 <p align="center">
-  Open-source agent memory layer and tool-output router for LLM apps.<br>
-  Future-proof your <b>CLAUDE.md</b>, <b>AGENTS.md</b>, GBrain, and skills library — without blowing your context window or your token budget.
+  <em>Git for AI agents.</em> One memory line. Every agent — Claude Code, Codex, Cursor,
+  browser bots — reads from it, writes to it, coordinates through it. In real time.
 </p>
 
 <p align="center">
-  <a href="https://pypi.org/project/dhee"><img src="https://img.shields.io/badge/python-3.9%2B-blue.svg?style=flat-square" alt="Python 3.9+"></a>
-  <a href="https://github.com/Sankhya-AI/Dhee/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square" alt="MIT License"></a>
-  <a href="benchmarks/longmemeval/"><img src="https://img.shields.io/badge/LongMemEval-%231%20recall%20%E2%80%94%20R%401%2094.8%25-brightgreen.svg?style=flat-square" alt="#1 on LongMemEval recall"></a>
-  <a href="https://pypi.org/project/dhee"><img src="https://img.shields.io/pypi/v/dhee?style=flat-square&color=orange" alt="PyPI"></a>
+  <a href="https://pypi.org/project/dhee/"><img src="https://img.shields.io/pypi/v/dhee.svg" alt="PyPI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT"></a>
+  <img src="https://img.shields.io/badge/python-3.9%2B-informational.svg" alt="Python 3.9+">
 </p>
 
 <p align="center">
-  <b>#1 on LongMemEval retrieval</b> — R@1 <b>94.8%</b> / R@5 <b>99.4%</b> / R@10 <b>99.8%</b> on 500 questions, no held-out split. <a href="#benchmarks">Beats MemPalace and agentmemory →</a>
-</p>
-
-<p align="center">
-  <img src="docs/demo/demo.gif" alt="Dhee demo — fat skills, thin tokens, self-evolving retrieval" width="900">
-</p>
-
-<p align="center">
-  <a href="#what-dhee-is">What is Dhee</a> &middot;
   <a href="#quick-start">Quick Start</a> &middot;
-  <a href="#benchmarks">Benchmarks</a> &middot;
-  <a href="#vs-alternatives">vs Alternatives</a> &middot;
+  <a href="#why-dhee">Why Dhee</a> &middot;
   <a href="#how-it-works">How It Works</a> &middot;
+  <a href="#the-channel-view">The Channel</a> &middot;
   <a href="#integrations">Integrations</a>
 </p>
 
 ---
 
-## What is Dhee?
+## The problem
 
-**Dhee is an open-source, self-evolving memory and context-router for LLM-powered AI agents.** It sits between your agent (Claude Code, Cursor, Codex, Gemini CLI, Aider, Cline, Goose, or any MCP-compatible client) and the model, and does three things so your CLAUDE.md, AGENTS.md, skills library, and tool output stop costing you tokens:
+Every AI agent shows up like a new employee.
 
-1. **Reduces tokens.** The agent only sees the slice of context it needs this turn. A fat CLAUDE.md is injected as heading-scoped chunks, not in full. A large tool-result is replaced with a digest + pointer; the model expands the pointer only when the digest isn't enough. The exact per-session savings are visible in `dhee router report` — it's your sessions, your numbers, not a marketing claim.
+Claude Code, Codex, Cursor, Gemini CLI, browser agents — they all work on the same codebase. **None of them share what they learn.**
 
-2. **Remembers — and keeps doing so as the store grows.** Doc chunks, session outcomes, failures, decisions, user preferences. Tier-based retention is live: supersede chains with lineage, canonical write-once facts that never evict, reaffirmation-driven promotion (medium → high → canonical), and cold-archive forgetting of stale avoid-tier rows. Run `dhee why <memory_id>` to read the lineage of any fact.
+- 9:00 AM — *"Here's the codebase…"* you explain it to Claude Code.
+- 11:30 AM — *"Here's the codebase…"* you explain it to Codex. Again.
+- 2:15 PM — *"Here's the codebase…"* you explain it to Cursor. Still again.
 
-3. **Self-evolves — one product, one code path.** At the router layer, `dhee router tune` reads the expansion ledger and atomically rewrites `~/.dhee/router_policy.json`: deeper digests for classes the model keeps expanding, shallower for classes it never does. At the cognition layer, MetaBuddhi runs a full propose → assess → commit / rollback loop online with per-task-type group-relative confidence and a catastrophic-group guardrail that rolls back any strategy whose single-group regression crosses threshold even when the aggregate is positive. Nididhyasana gates training at session boundaries; a replay-based RL gate only promotes a candidate when it beats the incumbent by ≥ 0.02 on a held-out corpus. All native, no opt-in flag.
+Claude Code hits its session limit? You copy-paste context into Codex, re-upload the spec PDF, re-explain the decisions you already made. Every developer using multiple agents is paying this tax every day.
 
-### Who it's for
+## The solution — git for AI agents
 
-- **Every Claude Code / Cursor / Codex / Gemini CLI / Aider / Cline user** who has ever hit a context limit or a $200 token bill.
-- **Anyone maintaining a fat agent** — a 5,000-line CLAUDE.md, a Skills library, a GBrain-style agent framework, a library of prompts. Dhee future-proofs it. Keep writing. Dhee handles the delivery.
-- **Teams building AI products** who want one memory layer that works across every model, every host, every language. SQLite + MCP. No infra to run.
+Dhee is a **shared information layer**. One workspace → many projects → every agent session plugs into the same live memory.
+
+- An agent reads a file, processes an asset, runs a tool — the digest lands on the shared line in real time.
+- Another agent, different tool, different project in the same workspace — sees it instantly. No re-upload, no re-explain.
+- Backend agent broadcasts an API contract change → a task auto-spawns in the frontend project. Claude Code picks it up and ships the UI.
+- Every workspace is a repo for the agents' *knowledge*, the way git is a repo for code.
+
+**The philosophy:** share a single information layer; agents connect and collaborate through it.
 
 ---
 
-## Quick Start
-
-**One command. No venv. No config. No pasting into `settings.json`.**
+## Quick start
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Sankhya-AI/Dhee/main/install.sh | sh
 ```
 
-The installer creates `~/.dhee`, installs the `dhee` package, and configures Dhee as the native memory/router layer for both Claude Code and Codex. Both harnesses point at the same kernel, so memory, artifacts, shared-task results, and portability packs all compound in one place.
+The installer:
+
+1. Creates `~/.dhee` with a self-contained venv.
+2. Installs `dhee[all]` from PyPI.
+3. Prompts you for a **provider** (OpenAI default, Gemini, NVIDIA, or Ollama).
+4. Prompts for your **API key** (stored encrypted under `~/.dhee/secret_store.enc.json`).
+5. Wires Claude Code hooks + MCP server + context router.
+6. Builds the web UI.
+
+Then:
+
+```bash
+dhee ui          # opens http://127.0.0.1:8080/ in your browser
+dhee update      # pull the latest release + rebuild UI
+```
+
+Non-interactive flow for CI / scripted installs:
+
+```bash
+DHEE_PROVIDER=openai DHEE_API_KEY=sk-... \
+  curl -fsSL https://raw.githubusercontent.com/Sankhya-AI/Dhee/main/install.sh | sh
+```
 
 <details>
 <summary><b>Other install options</b></summary>
@@ -236,177 +246,136 @@ Dhee turns that library into searchable, decay-aware, self-promoting memory:
 
 Got a GBrain? An AGENTS.md with 15 sections? A Skills library that your team reluctantly prunes every sprint because it "got too big for context"? Stop pruning. Dhee was built for this.
 
-```bash
-# Point Dhee at your skills directory
-dhee ingest ~/my-agent/skills/        # 50 files, 200K tokens
-dhee ingest ~/my-agent/CLAUDE.md      # 5K tokens
-dhee ingest ~/my-agent/AGENTS.md      # 3K tokens
-```
+---
 
-Dhee chunks them heading-by-heading, embeds them once, and on every turn only the *relevant* slice is injected. Your fat skills stay fat where they should be — in your repo, authored by humans, reviewable, version-controlled. They just stop paying rent in your model's context window.
+## <span id="why-dhee">Why Dhee</span>
+
+| What you feel today | What Dhee replaces it with |
+|---|---|
+| Every new agent session starts from scratch | Every agent joins a live memory line |
+| Copy-pasting context between Claude Code and Codex | Cross-runtime broadcasts with auto-created tasks |
+| Re-uploading the same PDF / design export / schema | Project-scoped asset drawer; upload once, all agents benefit |
+| Fat `CLAUDE.md` burned on every call | Heading-scoped retrieval — the agent sees the 200 tokens that matter, not the 5,000 that don't |
+| Tool output dumps bloating context | Router digests + pointers; raw stays out of the conversation |
+| "Session limit reached" forces a painful restart | Line survives; resume in another runtime with full context |
+
+**Measured savings:** 428k tokens → 197k tokens on a real dev session (−54%). Your own numbers are visible in `dhee router stats` anytime.
 
 ---
 
-## How It Works
+## <span id="the-channel-view">The channel — where agents collaborate</span>
 
-### The 4-operation API
+`dhee ui` opens a three-column workspace:
 
-Every interface — hooks, MCP, Python, CLI — exposes the same 4 operations.
+**Left rail.** Workspace picker + project tree. "+ new / manage" button opens a full CRUD dialog — create `Office`, `Personal`, `Sankhya AI Labs`; each with many projects (`frontend`, `backend`, `design`, …). Rename, re-root, delete. **"Connected agents"** block shows every runtime with a live dot: `claude-code · live`, `codex · live`, `browser agent · live`.
 
-```python
-from dhee import Dhee
+**Centre.** The live information line. Every tool call an agent makes lands here, newest first, attributed:
 
-d = Dhee()
-d.remember("User prefers FastAPI over Flask")
-d.recall("what framework does the project use?")
-d.context("fixing the auth bug")
-d.checkpoint("Fixed auth bug", what_worked="git blame first", outcome_score=1.0)
+```
+10:02 · claude-code · backend  "read schema.sql (R-abc)"
+10:04 · codex · frontend        "broadcast · api contract changed"
+10:09 · browser agent           "verified fix on staging checkout"
+10:14 · claude-code             "merged PR #412 · closing thread"
 ```
 
-| Operation | LLM calls | Cost |
-|:----------|:----------|:-----|
-| `remember` | 0 | ~$0.0002 |
-| `recall` | 0 | ~$0.0002 |
-| `context` | 0 | ~$0.0002 |
-| `checkpoint` | 1 per ~10 memories | ~$0.001 |
-| **Typical 20-turn Opus session** | **1** | **~$0.004** |
+Kind filters: `all / broadcasts / tool events / notes`.
 
-Dhee's own LLM overhead is ~$0.004 per session (one checkpoint call per ~10 memories). Token savings per session depend entirely on your tool-output footprint — `dhee router report` prints the delta for your real sessions.
+**Right rail.** Broadcast composer — title + target-project picker. Broadcasting into another project **auto-creates a task there**. Asset drawer — drag a spec PDF, design export, or schema into the project; every agent in the workspace sees it, with a "processed by codex · 2m ago" feed under each asset.
 
-### The router — digest at source
-
-The part that saves the most tokens isn't doc injection. It's keeping raw tool output out of context in the first place.
-
-Four MCP tools replace `Read`/`Bash`/`Agent` on heavy calls:
-
-- `mcp__dhee__dhee_read(file_path, offset?, limit?)` — returns a digest (symbols, head, tail, kind, token estimate) + pointer. Raw content stored, not injected.
-- `mcp__dhee__dhee_bash(command)` — runs the command, digests output by class (git log, pytest, grep, listing, generic), returns summary + pointer.
-- `mcp__dhee__dhee_agent(text)` — digests any long subagent return: file refs, headings, bullets, error signals, head/tail.
-- `mcp__dhee__dhee_expand_result(ptr)` — only called when the digest genuinely isn't enough. Raw re-enters context on demand.
-
-A huge `git log --oneline` becomes a short digest + pointer. Raw content is stored in the pointer store and only re-enters the context window when the model calls `dhee_expand_result(ptr)`. `dhee router report` shows the exact per-tool byte/token delta on your sessions.
-
-### The cognition engine
-
-Parallel intelligence layer — zero LLM calls on the hot path.
-
-- **Performance tracking** — outcomes per task type, trend detection, regression warnings.
-- **Insight synthesis** — causal hypotheses from what worked/failed, with confidence scores.
-- **Prospective memory** — future triggers with keyword matching.
-- **Belief store** — confidence-tracked facts with contradiction detection.
-- **Policy store** — condition→action rules mined from task completions.
-- **Edit ledger** — dedup of repeated Edit/Write so compaction keeps the *unique* changes, not 50 iterations.
+**Canvas view.** Openswarm-inspired infinite canvas. DOM cards per entity (workspace → project → session → task → result), smooth pan / momentum / pinch zoom, minimap, direction hints, skeleton loader. One view of the whole brain.
 
 ---
 
-## Integrations
+## <span id="how-it-works">How it works</span>
 
-### Claude Code — Native Hooks
+Three substrates, one product:
+
+### 1. The information line (push-based pub/sub)
+
+Every write path — the MCP router, the Claude Code PostToolUse hook, project-asset uploads, human broadcasts — fans out through an in-process bus after the DB write. SSE subscribers get the message in the same event-loop tick. No 1-second polling. Dedup on `(workspace_id, dedup_key)` so retries from emitters are silent no-ops at the database level.
+
+### 2. Shared context (workspace → project → session → asset)
+
+Workspaces own projects. Projects own sessions and project assets. Agent sessions tag every tool call with `workspace_id` + `project_id` so context is routable, not a global soup. Drop a PDF into `design`; the backend-project codex session doesn't see it unless it reads it — at which point the "processed by" linkage shows up in the design project's asset drawer.
+
+### 3. The context router (token saver)
+
+Heavy tool output (Bash, Grep, Agent, huge Read) goes through the router. A digest goes to the LLM; the raw is stored behind a pointer. Fat `CLAUDE.md` gets heading-chunked and only the slices relevant to *this turn* get injected. When you hit Claude Code's session limit, `dhee handoff` hands the whole context — including the shared line — to Codex intact.
+
+All three compose: the router produces digests → digests land on the line → other agents' sessions read them back in the next turn.
+
+---
+
+## <span id="integrations">Integrations — screen-aware agents</span>
+
+Dhee is a layer, not a runtime. It plugs into whatever agent you already use:
+
+- **Claude Code** — hooks + MCP server (`dhee install`, auto-wired by the installer).
+- **Codex CLI** — MCP server wired via `~/.codex/config.toml`; session mirror reads rollouts in real time.
+- **Cursor** — MCP server.
+- **Gemini CLI**, **Aider**, **Cline** — MCP-compatible; drop `dhee-mcp` into the config.
+- **Browser agents** — localhost REST API; register an agent session, publish to the line, subscribe via SSE.
+
+When any of them process the screen — read a file, open a URL, execute a tool — the output is workspace-scoped, digested, and broadcast. That's what makes every runtime **screen-aware** through Dhee: they stop being isolated chat tabs and start behaving like teammates who remember what the others just did.
+
+---
+
+## CLI cheatsheet
 
 ```bash
-pip install dhee
-dhee install --harness all
-dhee ingest     # chunks project docs into memory
-```
+# Setup / maintenance
+dhee onboard            # interactive provider + key wizard (also runs inside install.sh)
+dhee update             # pull latest release + rebuild UI
+dhee install            # wire hooks + MCP into Claude Code / Codex / Cursor
+dhee doctor             # diagnose installation
 
-Claude gets native lifecycle hooks, router enforcement, and shared-task context injection. No SKILL.md, no plugin directory, no manual `settings.json` editing.
-
-### Codex — Native Config + Stream Sync
-
-```bash
-pip install dhee
-dhee install --harness all
-dhee harness status
-```
-
-Codex is wired natively through `~/.codex/config.toml` and a Dhee-managed instructions file. Dhee tails Codex's persisted event stream incrementally, so post-tool results, shared-task work, and host-parsed artifacts become reusable context without a manual sync step.
-
-### MCP Server (Claude Code, Cursor, Codex, Gemini CLI, Cline, Goose, any MCP client)
-
-```json
-{
-  "mcpServers": {
-    "dhee": { "command": "dhee-mcp" }
-  }
-}
-```
-
-28 tools exposed. The agent uses them as needed.
-
-### Python SDK / CLI / Docker
-
-```bash
-dhee remember "User prefers Python"
-dhee recall "programming language"
-dhee ingest CLAUDE.md AGENTS.md
-dhee docs                          # show ingested manifest
-dhee router report                 # router stats + replay projection
-dhee router tune                   # re-tune retrieval policy
-dhee checkpoint "Fixed auth" --what-worked "checked logs"
+# Daily use
+dhee ui                 # open the channel view in your browser
+dhee ui --no-open       # same, don't auto-launch the browser
+dhee router stats       # what was digested today, how many tokens saved
+dhee handoff            # hand the current session context to another runtime
 ```
 
 ---
 
-## Provider Options
+## Packaging
 
-```bash
-pip install dhee[openai,mcp]     # OpenAI (recommended, cheapest embeddings)
-pip install dhee[nvidia,mcp]     # NVIDIA NIM (current SOTA stack)
-pip install dhee[gemini,mcp]     # Google Gemini
-pip install dhee[ollama,mcp]     # Ollama (local, no API costs)
-```
+- **PyPI:** [`pip install dhee`](https://pypi.org/project/dhee/) — ships the prebuilt web UI, no Node required.
+- **Source tree:** `pip install -e .` in a clone; `dhee update` will then run `git pull` + `pip install -e .` + rebuild the UI.
+
+---
+
+## What ships
+
+- **Workspaces & projects** — full CRUD in the UI, REST API, and cascading deletes.
+- **Information line** — SSE stream with project/channel filters, dedup-on-write, optional `?backfill=N` for reconnects.
+- **Asset drawer** — SHA-256-deduped project/workspace assets with per-asset "processed by" feeds.
+- **Canvas** — deterministic hierarchical layout, infinite-pan DOM canvas, minimap, direction hints, loading skeleton.
+- **Router** — digest-and-pointer for Read/Bash/Grep/Agent; heading-scoped `CLAUDE.md` injection.
+- **Secret store** — Fernet-encrypted local vault for provider keys, env vars still win for back-compat.
+- **1,200+ tests** — `pytest tests/` runs green (handful of pre-existing non-blocking failures in adjacent subsystems).
 
 ---
 
 ## FAQ
 
-### What problem does Dhee solve?
-Large AI-agent projects accumulate a fat `CLAUDE.md`, `AGENTS.md`, skills library, and tool output that gets re-injected into the LLM's context window on every turn. Dhee chunks, indexes, and decays that knowledge, and digests fat tool output at the source, so only the relevant 300-ish tokens reach the model — cutting a 20-turn Claude Opus session from ~$0.50 of stale-rule tokens down to a few cents.
+**Can I use Dhee without Claude Code?** Yes. Any MCP-compatible agent works. Claude Code just gets the tightest integration (native PostToolUse hook for per-turn digest capture).
 
-### How is Dhee different from Mem0, Letta, MemPalace, and agentmemory?
-Dhee is the only agent memory layer that (a) leads on the [LongMemEval](https://github.com/xiaowu0162/LongMemEval) retrieval benchmark at R@5 99.4% on the full 500-question set, (b) self-evolves its retrieval policy per tool and per intent, and (c) ships a **context router** that digests `Read`, `Bash`, and subagent output at source instead of dumping raw into context. See the [comparison table](#vs-alternatives).
+**Does the line share across machines?** Today: single-host, in-process pub/sub. Hosted Dhee (Redis pub/sub or Postgres LISTEN/NOTIFY, end-to-end encrypted) is in active development — it's the piece that turns the local tool into a team product.
 
-### Does Dhee work with Claude Code, Cursor, Codex, Gemini CLI, or Aider?
-Yes. Dhee now has first-class native integrations for Claude Code and Codex on one shared kernel. It also exposes an MCP server for Cursor, Gemini CLI, Cline, Goose, and other MCP clients.
+**What happens to my data?** Everything lives under `~/.dhee/`. SQLite for structured data (history, workspaces, projects, assets, line messages), Fernet-encrypted JSON for secrets, content-addressed pointer store for raw tool outputs. Nothing leaves your machine unless you point a hosted MCP at it.
 
-### How does Dhee reduce Claude Code token usage?
-Two ways: (1) it replaces a large `CLAUDE.md` that normally re-loads every turn with a heading-scoped, vector-indexed memory that injects only matching rules above threshold; (2) its router wraps `Read`/`Bash`/`Agent` so heavy tool output becomes a digest with a pointer — raw content only re-enters context if the model explicitly calls `dhee_expand_result(ptr)`. Exact per-turn savings on your own sessions are printed by `dhee router report`.
-
-### Is Dhee production-ready? What storage does it use?
-Dhee runs on SQLite by default — no Postgres, no Qdrant, no pgvector, no extra infra. It ships 1,170+ tests, reproducible benchmarks in-tree, an MIT license, and works offline with Ollama embeddings or online with OpenAI, NVIDIA NIM, or Gemini.
-
-### How does Dhee's self-evolution actually work?
-Every time the model calls `dhee_expand_result(ptr)` to see the raw output behind a digest, Dhee logs (tool, intent, depth). `dhee router tune` reads that ledger and atomically rewrites `~/.dhee/router_policy.json` — deeper digests for file types the model keeps expanding, shallower ones it never does. No config to hand-maintain. The longer you use it, the better it fits your workflow.
-
-### Where are the benchmarks and can I reproduce them?
-Full command, per-question JSONL output, and `metrics.json` are committed under [`benchmarks/longmemeval/`](benchmarks/longmemeval/). Clone the repo, run the command, recompute R@k yourself — any mismatch is an issue you can open.
+**Production-ready?** The local CLI + UI are shipping. Multi-host hosted Dhee is the next milestone — that's where your memory lives online and connects natively to every agent on the market.
 
 ---
 
-## Contributing
+## License
 
-```bash
-git clone https://github.com/Sankhya-AI/Dhee.git
-cd Dhee
-./scripts/bootstrap_dev_env.sh
-source .venv-dhee/bin/activate
-pytest    # 1180+ test functions across the suite
-```
-
-Benchmarks are reproducible from [`benchmarks/longmemeval/`](benchmarks/longmemeval/). Any improvement to R@k with full per-question output is welcome.
+MIT. Make it yours.
 
 ---
 
-<p align="center">
-  <b>Your fat skills stay fat. Your token bill stays thin. Your agent gets smarter every session.</b>
-  <br><br>
-  <a href="https://github.com/Sankhya-AI/Dhee">GitHub</a> &middot;
-  <a href="https://pypi.org/project/dhee">PyPI</a> &middot;
-  <a href="https://github.com/Sankhya-AI/Dhee/issues">Issues</a>
-</p>
-
-<p align="center">MIT License &mdash; <a href="https://sankhyaailabs.com">Sankhya AI</a></p>
-
-<p align="center"><sub>
-<b>Topics:</b> ai-agents · agent-memory · llm-memory · claude-code · claude-code-hooks · claudemd · agentsmd · mcp · mcp-server · model-context-protocol · context-router · context-engineering · context-compression · token-optimization · llm-tools · vector-memory · sqlite · longmemeval · memory-for-llm-agents · retrieval-augmented-generation · rag · mem0-alternative · letta-alternative · mempalace-alternative · cursor · codex · gemini-cli · aider · cline · goose
-</sub></p>
+<sub>
+Dhee is built by <a href="https://sankhyaailabs.com">Sankhya AI Labs</a>.
+Questions, bugs, feature requests: <a href="https://github.com/Sankhya-AI/Dhee/issues">GitHub Issues</a>.
+</sub>

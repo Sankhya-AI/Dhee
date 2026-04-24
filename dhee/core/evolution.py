@@ -264,13 +264,22 @@ class EvolutionLayer:
             except Exception as e:
                 logger.debug("Samskara answer recording failed: %s", e)
 
-        # M4.2: close the MetaBuddhi propose → assess → commit/rollback loop.
-        # An accepted answer is a positive evaluation of the active strategy
-        # (score=1.0). Once _MIN_EVAL_COUNT samples accumulate MetaBuddhi
-        # auto-resolves the pending attempt.
-        # M4.2b: tag the sample with task_type (if the caller supplied one)
-        # so resolution can use group-relative deltas.
-        self._feed_meta_buddhi_signal(1.0, task_type=task_type)
+        # M4.2+: accepted answers remain positive evidence, but the signal is
+        # no longer binary. We score with lightweight outcome features so
+        # MetaBuddhi sees better quality gradients than {1,0}.
+        score, components = self._compose_meta_buddhi_signal(
+            accepted=True,
+            metadata={
+                "source_memory_count": len(source_memory_ids),
+                "answer_chars": len(answer or ""),
+            },
+        )
+        self._feed_meta_buddhi_signal(
+            score,
+            task_type=task_type,
+            source="answer_accepted",
+            signal_components=components,
+        )
 
         # M3↔M4 bridge: "world didn't push back" signal. For each cited memory,
         # mark its active engram_facts as verified and bump their tier (the
@@ -303,9 +312,57 @@ class EvolutionLayer:
             except Exception as e:
                 logger.debug("Samskara correction recording failed: %s", e)
 
-        # M4.2: correction = negative evaluation of the active strategy.
-        # Don't bump tiers or mark facts verified on a correction path.
-        self._feed_meta_buddhi_signal(0.0, task_type=task_type)
+        # M4.2+: correction remains a negative signal, but with room for
+        # richer severity-aware updates when metadata is available.
+        score, components = self._compose_meta_buddhi_signal(
+            corrected=True,
+            metadata={
+                "wrong_answer_chars": len(wrong_answer or ""),
+                "correct_answer_chars": len(correct_answer or ""),
+                "source_memory_count": len(memory_ids),
+            },
+        )
+        self._feed_meta_buddhi_signal(
+            score,
+            task_type=task_type,
+            source="answer_corrected",
+            signal_components=components,
+        )
+
+    def record_task_outcome(
+        self,
+        *,
+        task_type: Optional[str] = None,
+        outcome_score: Optional[float] = None,
+        what_worked: Optional[str] = None,
+        what_failed: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        source: str = "task_outcome",
+    ) -> Optional[float]:
+        """Feed a structured session/task outcome into MetaBuddhi.
+
+        This is the higher-quality signal path for strategy evaluation:
+        it blends explicit outcome score (if present) with correction/test/
+        rollback context instead of relying on binary accept/correct events.
+        """
+        if not self._meta_buddhi:
+            return None
+        meta = dict(metadata or {})
+        if what_worked:
+            meta["what_worked"] = what_worked
+        if what_failed:
+            meta["what_failed"] = what_failed
+        score, components = self._compose_meta_buddhi_signal(
+            explicit_outcome_score=outcome_score,
+            metadata=meta,
+        )
+        self._feed_meta_buddhi_signal(
+            score,
+            task_type=task_type,
+            source=source,
+            signal_components=components,
+        )
+        return score
 
     # ------------------------------------------------------------------
     # M4.2 helpers: close the propose → assess → commit/rollback loop.
@@ -320,14 +377,111 @@ class EvolutionLayer:
         self._substrate_db = db
 
     def _feed_meta_buddhi_signal(
-        self, score: float, *, task_type: Optional[str] = None
+        self,
+        score: float,
+        *,
+        task_type: Optional[str] = None,
+        source: str = "unknown",
+        signal_components: Optional[Dict[str, Any]] = None,
     ) -> None:
         if not self._meta_buddhi:
             return
         try:
-            self._meta_buddhi.record_evaluation(score, task_type=task_type)
+            self._meta_buddhi.record_evaluation(
+                score,
+                task_type=task_type,
+                source=source,
+                signal_components=signal_components,
+            )
         except Exception as exc:
             logger.debug("MetaBuddhi record_evaluation failed: %s", exc)
+
+    def _compose_meta_buddhi_signal(
+        self,
+        *,
+        accepted: bool = False,
+        corrected: bool = False,
+        explicit_outcome_score: Optional[float] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> tuple[float, Dict[str, Any]]:
+        """Compute a bounded [0,1] evaluation score from outcome components."""
+        meta = dict(metadata or {})
+        score = 0.5
+        if accepted:
+            score += 0.25
+        if corrected:
+            score -= 0.35
+
+        clamped_outcome: Optional[float] = None
+        if explicit_outcome_score is not None:
+            clamped_outcome = self._clamp01(explicit_outcome_score)
+            score = 0.4 * score + 0.6 * clamped_outcome
+
+        if meta.get("what_worked"):
+            score += 0.07
+        if meta.get("what_failed"):
+            score -= 0.10
+
+        tests_passed = self._coerce_int(meta.get("tests_passed"))
+        tests_failed = self._coerce_int(meta.get("tests_failed"))
+        if tests_passed is not None or tests_failed is not None:
+            passed = max(0, tests_passed or 0)
+            failed = max(0, tests_failed or 0)
+            total = passed + failed
+            if total > 0:
+                pass_rate = passed / total
+                score += (pass_rate - 0.5) * 0.30
+                meta["pass_rate"] = round(pass_rate, 4)
+
+        correction_count = self._coerce_int(meta.get("correction_count"))
+        if correction_count and correction_count > 0:
+            score -= min(0.20, 0.03 * correction_count)
+
+        reverted = self._coerce_bool(meta.get("reverted"))
+        if reverted:
+            score -= 0.15
+
+        final = self._clamp01(score)
+        components = {
+            "accepted": bool(accepted),
+            "corrected": bool(corrected),
+            "explicit_outcome_score": clamped_outcome,
+            "tests_passed": tests_passed,
+            "tests_failed": tests_failed,
+            "correction_count": correction_count,
+            "reverted": bool(reverted),
+            "score_before_clamp": round(score, 6),
+            "final_score": final,
+        }
+        if "pass_rate" in meta:
+            components["pass_rate"] = meta["pass_rate"]
+        return final, components
+
+    @staticmethod
+    def _clamp01(value: float) -> float:
+        try:
+            return max(0.0, min(1.0, float(value)))
+        except (TypeError, ValueError):
+            return 0.5
+
+    @staticmethod
+    def _coerce_int(value: Any) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _coerce_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+        if isinstance(value, (int, float)):
+            return bool(value)
+        return False
 
     def _on_facts_grounded(self, memory_ids: List[str]) -> None:
         """Mark active engram_facts verified + bump tier on downstream success.

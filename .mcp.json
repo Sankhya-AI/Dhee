@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "dhee": {
+      "command": "/Users/chitranjanmalviya/Desktop/Dhee/.venv-dhee/bin/dhee-mcp",
+      "args": [],
+      "env": {}
+    }
+  }
+}

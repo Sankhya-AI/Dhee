@@ -131,15 +131,11 @@ def _get_embedding_dims_for_model(model: str, provider: str) -> int:
 
 def get_memory_instance() -> FullMemory:
     """Create and return a configured FullMemory instance for the MCP server."""
-    openai_key = os.environ.get("OPENAI_API_KEY")
-    gemini_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
-    nvidia_key = (
-        os.environ.get("NVIDIA_API_KEY")
-        or os.environ.get("NVIDIA_QWEN_API_KEY")
-        or os.environ.get("NVIDIA_EMBEDDING_API_KEY")
-        or os.environ.get("NVIDIA_EMBED_API_KEY")
-        or os.environ.get("NVIDIA_LLAMA_4_MAV_API_KEY")
-    )
+    from dhee.cli_config import get_api_key
+
+    openai_key = get_api_key("openai")
+    gemini_key = get_api_key("gemini")
+    nvidia_key = get_api_key("nvidia")
 
     def _env(key: str, default: str = "") -> str:
         """Read DHEE_ env var with FADEM_ fallback for backward compat."""
@@ -1270,6 +1266,20 @@ def _handle_record_outcome(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]
         score=max(0.0, min(1.0, score)),
         metadata=metadata,
     )
+    # Feed the same structured outcome into EvolutionLayer/MetaBuddhi so
+    # strategy learning sees richer task-level signals, not just answer events.
+    try:
+        mem = get_memory_instance()
+        evo = getattr(mem, "evolution_layer", None) if mem else None
+        if evo is not None:
+            evo.record_task_outcome(
+                task_type=task_type,
+                outcome_score=score,
+                metadata=metadata if isinstance(metadata, dict) else {},
+                source="mcp_record_outcome",
+            )
+    except Exception:
+        pass
     result: Dict[str, Any] = {"recorded": True, "task_type": task_type, "score": score}
     if insight:
         result["auto_insight"] = insight.to_dict()

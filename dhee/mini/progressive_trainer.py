@@ -334,7 +334,11 @@ class ProgressiveTrainer:
         # reason to the right stage status so doctor output stays readable.
         if verdict.reason in {"no_corpus", "no_evaluator", "no_incumbent"}:
             stage.status = _STAGE_NOT_AVAILABLE
-        elif verdict.reason in {"insufficient_samples", "no_candidate"}:
+        elif verdict.reason in {
+            "insufficient_samples",
+            "insufficient_group_samples",
+            "no_candidate",
+        }:
             stage.status = _STAGE_SKIPPED
         elif verdict.reason == "evaluator_error":
             stage.status = _STAGE_ERROR

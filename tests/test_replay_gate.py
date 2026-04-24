@@ -45,6 +45,51 @@ def _scoring_evaluator(scores: Dict[str, float]):
     return _fn
 
 
+def _tagged_corpus(task_types: List[str]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for i, task_type in enumerate(task_types):
+        rows.append(
+            {
+                "prompt": f"p{i}",
+                "expected": f"e{i}",
+                "metadata": {"task_type": task_type},
+            }
+        )
+    return rows
+
+
+def _group_scoring_evaluator(scores: Dict[tuple, float]):
+    def _fn(model_path: str, corpus: List[Dict[str, Any]]) -> float:
+        task_type = "__all__"
+        if corpus:
+            meta = corpus[0].get("metadata")
+            if isinstance(meta, dict):
+                task_type = str(meta.get("task_type") or "__all__")
+        return scores[(model_path, task_type)]
+
+    return _fn
+
+
+def _fold_sensitive_evaluator(
+    *,
+    full_size: int,
+    overall_scores: Dict[str, float],
+    fold_scores: Dict[tuple, float],
+):
+    def _fn(model_path: str, corpus: List[Dict[str, Any]]) -> float:
+        if len(corpus) == full_size:
+            return overall_scores[model_path]
+        first_prompt = str(corpus[0].get("prompt", "p0"))
+        try:
+            idx = int(first_prompt.lstrip("p"))
+        except ValueError:
+            idx = 0
+        fold = idx % 5
+        return fold_scores[(model_path, fold)]
+
+    return _fn
+
+
 # ---------------------------------------------------------------------------
 # ReplayGate unit tests
 # ---------------------------------------------------------------------------
@@ -142,6 +187,77 @@ class TestReplayGate:
         assert verdict.passed is False
         assert verdict.reason == "evaluator_error"
         assert "RuntimeError" in verdict.metrics["error"]
+
+    def test_task_type_groups_require_minimum_samples(self, tmp_path):
+        corpus = str(tmp_path / "corpus")
+        _write_corpus(corpus, _tagged_corpus(["qa", "qa", "qa", "qa", "code"]))
+        gate = ReplayGate(
+            corpus,
+            evaluator=_group_scoring_evaluator(
+                {
+                    ("cand", "__all__"): 0.9,
+                    ("base", "__all__"): 0.6,
+                    ("cand", "qa"): 0.9,
+                    ("base", "qa"): 0.6,
+                    ("cand", "code"): 0.9,
+                    ("base", "code"): 0.6,
+                }
+            ),
+        )
+        verdict = gate.evaluate("cand", "base")
+        assert verdict.passed is False
+        assert verdict.reason == "insufficient_group_samples"
+        assert "code" in verdict.metrics.get("sparse_groups", [])
+
+    def test_catastrophic_group_regression_blocks_promotion(self, tmp_path):
+        corpus = str(tmp_path / "corpus")
+        _write_corpus(corpus, _tagged_corpus(["qa", "qa", "qa", "code", "code", "code"]))
+        gate = ReplayGate(
+            corpus,
+            evaluator=_group_scoring_evaluator(
+                {
+                    ("cand", "__all__"): 0.80,
+                    ("base", "__all__"): 0.70,
+                    ("cand", "qa"): 0.95,
+                    ("base", "qa"): 0.80,
+                    ("cand", "code"): 0.60,
+                    ("base", "code"): 0.80,
+                }
+            ),
+        )
+        verdict = gate.evaluate("cand", "base")
+        assert verdict.passed is False
+        assert verdict.reason == "group_regression"
+        assert verdict.metrics["worst_group"]["task_type"] == "code"
+        assert verdict.metrics["worst_group"]["delta"] < -0.05
+
+    def test_low_confidence_blocks_when_fold_variance_is_high(self, tmp_path):
+        corpus = str(tmp_path / "corpus")
+        records = [{"prompt": f"p{i}", "expected": f"e{i}"} for i in range(10)]
+        _write_corpus(corpus, records)
+        gate = ReplayGate(
+            corpus,
+            evaluator=_fold_sensitive_evaluator(
+                full_size=len(records),
+                overall_scores={"cand": 0.75, "base": 0.70},  # +0.05 overall
+                fold_scores={
+                    ("cand", 0): 0.95,
+                    ("base", 0): 0.65,  # +0.30
+                    ("cand", 1): 0.95,
+                    ("base", 1): 0.65,  # +0.30
+                    ("cand", 2): 0.95,
+                    ("base", 2): 0.65,  # +0.30
+                    ("cand", 3): 0.55,
+                    ("base", 3): 0.75,  # -0.20
+                    ("cand", 4): 0.55,
+                    ("base", 4): 0.75,  # -0.20
+                },
+            ),
+        )
+        verdict = gate.evaluate("cand", "base")
+        assert verdict.passed is False
+        assert verdict.reason == "low_confidence"
+        assert verdict.metrics["confidence"]["ci_lower"] < 0.02
 
 
 # ---------------------------------------------------------------------------

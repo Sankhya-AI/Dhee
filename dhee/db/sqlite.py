@@ -739,6 +739,7 @@ class FullSQLiteManager(
             self._ensure_artifact_tables(conn)
             self._ensure_harness_stream_tables(conn)
             self._ensure_shared_task_tables(conn)
+            self._ensure_workspace_hierarchy_tables(conn)
             self._ensure_thread_state_table(conn)
             self._ensure_route_decision_tables(conn)
             return
@@ -858,6 +859,7 @@ class FullSQLiteManager(
         self._ensure_artifact_tables(conn)
         self._ensure_harness_stream_tables(conn)
         self._ensure_shared_task_tables(conn)
+        self._ensure_workspace_hierarchy_tables(conn)
         self._ensure_thread_state_table(conn)
         self._ensure_route_decision_tables(conn)
 

@@ -5,10 +5,12 @@ Plan reference: encapsulated-rolling-bengio.md, Movement 4.
 These tests lock in the wiring that closes the propose → assess →
 commit/rollback loop at the EvolutionLayer boundary:
 
-  * ``on_answer_generated`` feeds ``record_evaluation(1.0)`` into MetaBuddhi
+  * ``on_answer_generated`` feeds a positive structured evaluation signal
+    into MetaBuddhi (not a hardcoded 1.0),
     and, when a substrate DB is attached, stamps ``last_verified_at`` and
     bumps the tier of each cited fact via ``promote_on_downstream_success``.
-  * ``on_answer_corrected`` feeds ``record_evaluation(0.0)`` and leaves
+  * ``on_answer_corrected`` feeds a negative structured evaluation signal
+    and leaves
     tiers + verification stamps untouched.
 """
 
@@ -89,10 +91,14 @@ class _StubMetaBuddhi:
     def __init__(self):
         self.scores = []
         self.task_types = []
+        self.sources = []
+        self.components = []
 
-    def record_evaluation(self, score, *, task_type=None):
+    def record_evaluation(self, score, *, task_type=None, source=None, signal_components=None):
         self.scores.append(score)
         self.task_types.append(task_type)
+        self.sources.append(source)
+        self.components.append(signal_components or {})
         return None
 
 
@@ -149,7 +155,10 @@ def test_accepted_answer_records_positive_meta_buddhi_signal(evo_and_db):
     evo.on_answer_generated(
         query="q", answer="a", source_memory_ids=["m1"], user_id="u1",
     )
-    assert stub.scores == [1.0]
+    assert len(stub.scores) == 1
+    assert stub.scores[0] == pytest.approx(0.75)
+    assert stub.sources == ["answer_accepted"]
+    assert stub.components[0]["accepted"] is True
 
 
 def test_corrected_answer_records_negative_meta_buddhi_signal(evo_and_db):
@@ -164,7 +173,10 @@ def test_corrected_answer_records_negative_meta_buddhi_signal(evo_and_db):
         memory_ids=["m1"],
         user_id="u1",
     )
-    assert stub.scores == [0.0]
+    assert len(stub.scores) == 1
+    assert stub.scores[0] == pytest.approx(0.15)
+    assert stub.sources == ["answer_corrected"]
+    assert stub.components[0]["corrected"] is True
 
     # Correction path must NOT stamp last_verified_at or bump tier
     with db._get_connection() as conn:
@@ -176,6 +188,33 @@ def test_corrected_answer_records_negative_meta_buddhi_signal(evo_and_db):
         )
     assert row["last_verified_at"] is None
     assert row["tier"] == "medium"
+
+
+def test_task_outcome_signal_blends_outcome_and_operational_metadata(evo_and_db):
+    evo, _db = evo_and_db
+    stub = _StubMetaBuddhi()
+    evo._meta_buddhi = stub
+
+    score = evo.record_task_outcome(
+        task_type="bug_fix",
+        outcome_score=0.8,
+        what_worked="narrowed flaky test with isolation",
+        metadata={
+            "tests_passed": 8,
+            "tests_failed": 2,
+            "correction_count": 1,
+            "reverted": False,
+        },
+        source="unit_test",
+    )
+
+    assert score is not None
+    assert len(stub.scores) == 1
+    assert stub.scores[0] == pytest.approx(score)
+    assert stub.scores[0] > 0.7
+    assert stub.sources == ["unit_test"]
+    assert stub.components[0]["tests_passed"] == 8
+    assert stub.components[0]["tests_failed"] == 2
 
 
 def test_meta_buddhi_records_five_accepts_resolves_pending_attempt(evo_and_db):

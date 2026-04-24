@@ -10,7 +10,7 @@ import json
 import re
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from xml.etree import ElementTree as ET
 
 import pytest
@@ -729,6 +729,40 @@ class TestDispatchHandlers:
             assert kwargs["summary"] == "done"
             assert kwargs["task_type"] == "bug_fix"
             assert kwargs["outcome_score"] == 0.9
+
+    def test_stop_handler_feeds_structured_evolution_outcome(self):
+        from dhee.hooks.claude_code.__main__ import handle_stop
+
+        with patch("dhee.hooks.claude_code.__main__._get_dhee") as mock:
+            evo = MagicMock()
+            mem = MagicMock()
+            mem.evolution_layer = evo
+            mock.return_value._memory = mem
+            mock.return_value.checkpoint.return_value = {}
+
+            handle_stop(
+                {
+                    "summary": "done",
+                    "task_type": "bug_fix",
+                    "outcome_score": 0.85,
+                    "what_worked": "targeted failing test first",
+                    "what_failed": "broad refactor too early",
+                    "tests_passed": 12,
+                    "tests_failed": 1,
+                    "correction_count": 1,
+                    "signals": {"engagement": 0.9},
+                    "hook_event_name": "Stop",
+                }
+            )
+
+            evo.record_task_outcome.assert_called_once()
+            kwargs = evo.record_task_outcome.call_args.kwargs
+            assert kwargs["task_type"] == "bug_fix"
+            assert kwargs["outcome_score"] == 0.85
+            assert kwargs["source"] == "claude_stop"
+            assert kwargs["metadata"]["tests_passed"] == 12
+            assert kwargs["metadata"]["tests_failed"] == 1
+            assert kwargs["metadata"]["engagement"] == 0.9
 
 
 # ---------------------------------------------------------------------------

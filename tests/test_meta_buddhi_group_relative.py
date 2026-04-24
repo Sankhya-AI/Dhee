@@ -15,6 +15,8 @@ import pytest
 from dhee.core.meta_buddhi import (
     _GROUP_CATASTROPHE_THRESHOLD,
     _MIN_EVAL_COUNT,
+    _POST_PROMOTION_MIN_EVAL_COUNT,
+    _POST_PROMOTION_REGRESSION_THRESHOLD,
     _PROMOTION_THRESHOLD,
     MetaBuddhi,
 )
@@ -154,3 +156,49 @@ class TestUntaggedFallback:
         # fallback baseline is 0.5; candidate avg 0.9 → delta 0.4 → promote.
         assert final.status == "promoted"
         assert final.group_deltas == {}
+
+
+class TestPostPromotionValidation:
+    def _promote_candidate(self, mb):
+        # Seed parent baseline, then promote a candidate quickly.
+        for _ in range(6):
+            mb.record_evaluation(0.5, task_type="qa")
+            mb.record_evaluation(0.5, task_type="code")
+        attempt = mb.propose_improvement(dimension="semantic_weight")
+        assert attempt is not None
+        for _ in range(3):
+            mb.record_evaluation(0.9, task_type="qa", source="task_outcome")
+            mb.record_evaluation(0.9, task_type="code", source="task_outcome")
+        promoted = mb._attempts[attempt.id]
+        assert promoted.status == "promoted"
+        assert promoted.post_promotion_status == "watching"
+        return promoted
+
+    def test_proposal_blocked_while_post_promotion_watch_is_active(self, mb):
+        self._promote_candidate(mb)
+        blocked = mb.propose_improvement(dimension="keyword_weight")
+        assert blocked is None
+
+    def test_post_promotion_validation_marks_strategy_validated(self, mb):
+        promoted = self._promote_candidate(mb)
+        for _ in range(_POST_PROMOTION_MIN_EVAL_COUNT):
+            mb.record_evaluation(0.65, task_type="qa", source="task_outcome")
+        final = mb._attempts[promoted.id]
+        assert final.status == "promoted"
+        assert final.post_promotion_status == "validated"
+        assert final.post_promotion_resolved_at is not None
+        assert final.post_promotion_delta is not None
+        assert final.post_promotion_delta > -_POST_PROMOTION_REGRESSION_THRESHOLD
+
+    def test_post_promotion_regression_rolls_back(self, mb):
+        promoted = self._promote_candidate(mb)
+        for _ in range(_POST_PROMOTION_MIN_EVAL_COUNT):
+            mb.record_evaluation(0.10, task_type="qa", source="task_outcome")
+        final = mb._attempts[promoted.id]
+        assert final.status == "rolled_back"
+        assert final.post_promotion_status == "rolled_back"
+        assert final.post_promotion_delta is not None
+        assert final.post_promotion_delta <= -_POST_PROMOTION_REGRESSION_THRESHOLD
+        # Parent strategy should be active again after rollback.
+        active = mb.get_stats()["active_strategy"]
+        assert active["id"] == final.parent_strategy_id

@@ -57,11 +57,26 @@ def resolve_active_shared_task(
     *,
     user_id: str = "default",
     shared_task_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    thread_id: Optional[str] = None,
+    runtime_id: Optional[str] = None,
+    native_session_id: Optional[str] = None,
     repo: Optional[str] = None,
     cwd: Optional[str] = None,
     source_path: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Pick the active shared task whose repo/workspace best matches the path."""
+    if hasattr(db, "find_shared_task"):
+        task = db.find_shared_task(
+            user_id=user_id,
+            shared_task_id=shared_task_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            native_session_id=native_session_id,
+            runtime_id=runtime_id,
+        )
+        if isinstance(task, dict) and task.get("id"):
+            return task
     if shared_task_id:
         return db.get_shared_task(shared_task_id, user_id=user_id)
 
@@ -133,6 +148,10 @@ def publish_shared_task_result(
         db,
         user_id=user_id,
         shared_task_id=shared_task_id,
+        session_id=session_id,
+        thread_id=thread_id,
+        runtime_id=harness,
+        native_session_id=session_id,
         repo=repo,
         cwd=cwd,
         source_path=source_path,
@@ -153,6 +172,7 @@ def publish_shared_task_result(
         "shared_task_id": task["id"],
         "result_key": result_key,
         "user_id": user_id,
+        "project_id": task.get("project_id"),
         "repo": task.get("repo") or _abs_path(repo or cwd),
         "workspace_id": task.get("workspace_id") or _abs_path(repo or cwd),
         "folder_path": task.get("folder_path"),
@@ -171,7 +191,41 @@ def publish_shared_task_result(
         "agent_id": agent_id,
     }
     result_id = db.save_shared_task_result(payload)
-    return db.get_shared_task_result(result_id)
+    result = db.get_shared_task_result(result_id)
+
+    # Fan out onto the workspace information line so other agents in the
+    # same workspace/project see this event. Idempotent on (workspace,
+    # dedup_key); safe to invoke on every retry. Failures must never
+    # sink the underlying shared-task write.
+    try:
+        from dhee.core.workspace_line import emit_agent_activity
+
+        emit_agent_activity(
+            db,
+            user_id=user_id,
+            tool_name=tool_name,
+            packet_kind=packet_kind,
+            digest=digest,
+            shared_task=task,
+            session_id=session_id,
+            native_session_id=session_id,
+            runtime_id=harness,
+            repo=repo,
+            cwd=cwd,
+            source_path=source_path,
+            source_event_id=source_event_id,
+            ptr=ptr,
+            artifact_id=artifact_id,
+            task_id=str(task["id"]),
+            harness=harness,
+            agent_id=agent_id,
+            metadata=metadata,
+            result_status=result_status,
+        )
+    except Exception:
+        pass
+
+    return result
 
 
 def publish_in_flight(

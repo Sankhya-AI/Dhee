@@ -2025,6 +2025,296 @@ class FullMemory(SmartMemory, SceneProfileMixin):
     def _is_shareable_memory(self, memory):
         return _is_shareable(memory)
 
+    @staticmethod
+    def _belief_conflict_id(left_id: str, right_id: str) -> str:
+        ordered = sorted([str(left_id or "").strip(), str(right_id or "").strip()])
+        return f"belief::{ordered[0]}::{ordered[1]}"
+
+    @staticmethod
+    def _parse_belief_conflict_id(conflict_id: str) -> Tuple[str, str]:
+        raw = str(conflict_id or "").strip()
+        if not raw.startswith("belief::"):
+            raise ValueError("Unsupported conflict id")
+        parts = raw.split("::")
+        if len(parts) != 3 or not parts[1] or not parts[2]:
+            raise ValueError("Invalid belief conflict id")
+        return parts[1], parts[2]
+
+    def _belief_store(self):
+        buddhi = self.buddhi_layer
+        return getattr(buddhi, "beliefs", None) if buddhi is not None else None
+
+    def _belief_evidence_preview(self, store: Any, belief_id: str, limit: int = 5) -> List[Dict[str, Any]]:
+        try:
+            rows = list(store.get_belief_evidence(belief_id, limit=limit) or [])
+        except Exception:
+            return []
+        return [
+            {
+                "id": row.get("id"),
+                "content": row.get("content"),
+                "supports": bool(row.get("supports", True)),
+                "source": row.get("source"),
+                "confidence": row.get("confidence"),
+                "created_at": row.get("created_at"),
+                "memory_id": row.get("memory_id"),
+                "episode_id": row.get("episode_id"),
+            }
+            for row in rows
+        ]
+
+    def _belief_history_preview(self, store: Any, belief_id: str, limit: int = 6) -> List[Dict[str, Any]]:
+        try:
+            rows = list(store.get_belief_history(belief_id, limit=limit) or [])
+        except Exception:
+            return []
+        return [
+            {
+                "event_type": row.get("event_type"),
+                "reason": row.get("reason"),
+                "actor": row.get("actor"),
+                "created_at": row.get("created_at"),
+                "payload": row.get("payload") or {},
+            }
+            for row in rows
+        ]
+
+    def _belief_to_conflict_payload(self, store: Any, left: Any, right: Any) -> Dict[str, Any]:
+        pair_gap = abs(float(getattr(left, "confidence", 0.0)) - float(getattr(right, "confidence", 0.0)))
+        severity = "low"
+        if pair_gap <= 0.15:
+            severity = "high"
+        elif pair_gap <= 0.35:
+            severity = "medium"
+
+        def pack(belief: Any) -> Dict[str, Any]:
+            return {
+                "id": belief.id,
+                "content": belief.claim,
+                "confidence": float(belief.confidence),
+                "created": datetime.fromtimestamp(float(belief.created_at), tz=timezone.utc).isoformat()
+                if getattr(belief, "created_at", None)
+                else "",
+                "source": getattr(belief, "origin", "belief"),
+                "tier": "canonical" if float(getattr(belief, "confidence", 0.0)) >= 0.75 else "medium",
+                "domain": getattr(belief, "domain", "general"),
+                "freshness": getattr(getattr(belief, "freshness_status", None), "value", None),
+                "lifecycle": getattr(getattr(belief, "lifecycle_status", None), "value", None),
+                "truthStatus": getattr(getattr(belief, "truth_status", None), "value", None),
+                "sourceMemoryIds": list(getattr(belief, "source_memory_ids", []) or []),
+                "evidence": self._belief_evidence_preview(store, belief.id),
+                "history": self._belief_history_preview(store, belief.id),
+            }
+
+        return {
+            "id": self._belief_conflict_id(left.id, right.id),
+            "kind": "belief",
+            "severity": severity,
+            "reason": f"Contradictory beliefs in {getattr(left, 'domain', 'general')}",
+            "resolutionOptions": ["KEEP A", "KEEP B", "MERGE", "ARCHIVE BOTH"],
+            "belief_a": pack(left),
+            "belief_b": pack(right),
+        }
+
+    def _annotate_memory_resolution(
+        self,
+        memory_id: str,
+        *,
+        conflict_id: str,
+        resolution: str,
+        role: str,
+        reason: Optional[str] = None,
+        superseded_by: Optional[str] = None,
+        demote: bool = False,
+        tombstone: bool = False,
+    ) -> None:
+        memory = self.db.get_memory(memory_id)
+        if not memory:
+            return
+        if demote:
+            self._demote_existing(memory, reason=f"manual:{resolution}")
+            memory = self.db.get_memory(memory_id) or memory
+        metadata = dict(memory.get("metadata", {}) or {})
+        metadata["manual_conflict_resolution"] = {
+            "conflict_id": conflict_id,
+            "resolution": resolution,
+            "role": role,
+            "reason": reason or "",
+            "resolved_at": datetime.now(timezone.utc).isoformat(),
+            "superseded_by": superseded_by,
+        }
+        self.db.update_memory(memory_id, {"metadata": metadata})
+        if tombstone:
+            self.delete(memory_id)
+
+    def get_conflicts(self, user_id: str = "default", limit: int = 50) -> List[Dict[str, Any]]:
+        store = self._belief_store()
+        if store is None:
+            return []
+        pairs = list(store.get_contradictions(user_id) or [])[: max(1, int(limit))]
+        return [self._belief_to_conflict_payload(store, left, right) for left, right in pairs]
+
+    def resolve_conflict(
+        self,
+        conflict_id: str,
+        action: str,
+        merged_content: Optional[str] = None,
+        reason: Optional[str] = None,
+        actor: str = "user",
+    ) -> Dict[str, Any]:
+        store = self._belief_store()
+        if store is None:
+            raise ValueError("Buddhi belief store is not available")
+
+        left_id, right_id = self._parse_belief_conflict_id(conflict_id)
+        left = store.get_belief(left_id)
+        right = store.get_belief(right_id)
+        if left is None or right is None:
+            raise ValueError("Conflict beliefs were not found")
+
+        normalized = str(action or "").strip().upper()
+        if normalized not in {"KEEP A", "KEEP B", "MERGE", "ARCHIVE BOTH"}:
+            raise ValueError("Unsupported conflict action")
+
+        if normalized == "KEEP A":
+            store.pin_belief(left.id, reason=reason or "Kept via manual conflict resolution", actor=actor)
+            store.tombstone_belief(right.id, reason=reason or f"Rejected in favor of '{left.claim[:120]}'", actor=actor)
+            for memory_id in list(getattr(right, "source_memory_ids", []) or []):
+                self._annotate_memory_resolution(
+                    memory_id,
+                    conflict_id=conflict_id,
+                    resolution=normalized,
+                    role="loser",
+                    reason=reason,
+                    superseded_by=left.id,
+                    tombstone=True,
+                )
+            for memory_id in list(getattr(left, "source_memory_ids", []) or []):
+                self._annotate_memory_resolution(
+                    memory_id,
+                    conflict_id=conflict_id,
+                    resolution=normalized,
+                    role="winner",
+                    reason=reason,
+                )
+            return {"action": normalized, "winner_belief_id": left.id, "archived_belief_id": right.id}
+
+        if normalized == "KEEP B":
+            store.pin_belief(right.id, reason=reason or "Kept via manual conflict resolution", actor=actor)
+            store.tombstone_belief(left.id, reason=reason or f"Rejected in favor of '{right.claim[:120]}'", actor=actor)
+            for memory_id in list(getattr(left, "source_memory_ids", []) or []):
+                self._annotate_memory_resolution(
+                    memory_id,
+                    conflict_id=conflict_id,
+                    resolution=normalized,
+                    role="loser",
+                    reason=reason,
+                    superseded_by=right.id,
+                    tombstone=True,
+                )
+            for memory_id in list(getattr(right, "source_memory_ids", []) or []):
+                self._annotate_memory_resolution(
+                    memory_id,
+                    conflict_id=conflict_id,
+                    resolution=normalized,
+                    role="winner",
+                    reason=reason,
+                )
+            return {"action": normalized, "winner_belief_id": right.id, "archived_belief_id": left.id}
+
+        if normalized == "ARCHIVE BOTH":
+            store.tombstone_belief(left.id, reason=reason or "Archived via manual conflict resolution", actor=actor)
+            store.tombstone_belief(right.id, reason=reason or "Archived via manual conflict resolution", actor=actor)
+            for memory_id in list(getattr(left, "source_memory_ids", []) or []):
+                self._annotate_memory_resolution(
+                    memory_id,
+                    conflict_id=conflict_id,
+                    resolution=normalized,
+                    role="archived",
+                    reason=reason,
+                    tombstone=True,
+                )
+            for memory_id in list(getattr(right, "source_memory_ids", []) or []):
+                self._annotate_memory_resolution(
+                    memory_id,
+                    conflict_id=conflict_id,
+                    resolution=normalized,
+                    role="archived",
+                    reason=reason,
+                    tombstone=True,
+                )
+            return {"action": normalized, "archived_belief_ids": [left.id, right.id]}
+
+        merged = str(merged_content or "").strip()
+        if not merged:
+            raise ValueError("merged_content is required for MERGE")
+        winner = left if float(getattr(left, "confidence", 0.0)) >= float(getattr(right, "confidence", 0.0)) else right
+        loser = right if winner.id == left.id else left
+        corrected = store.correct_belief(
+            winner.id,
+            merged,
+            reason=reason or "Merged via manual conflict resolution",
+            actor=actor,
+        )
+        if corrected is None:
+            raise ValueError("Failed to create merged belief")
+        _, merged_belief = corrected
+        store.merge_beliefs(
+            merged_belief.id,
+            loser.id,
+            reason=reason or "Merged conflicting beliefs",
+            actor=actor,
+        )
+        merged_result = self.add(
+            merged,
+            user_id=getattr(winner, "user_id", "default"),
+            metadata={
+                "manual_conflict_resolution": {
+                    "conflict_id": conflict_id,
+                    "resolution": normalized,
+                    "reason": reason or "",
+                    "source_belief_ids": [left.id, right.id],
+                    "merged_belief_id": merged_belief.id,
+                }
+            },
+            infer=False,
+            initial_strength=1.0,
+        )
+        merged_memory_id = ((merged_result.get("results") or [{}])[0]).get("id")
+        for memory_id in list(getattr(left, "source_memory_ids", []) or []):
+            self._annotate_memory_resolution(
+                memory_id,
+                conflict_id=conflict_id,
+                resolution=normalized,
+                role="merged-source",
+                reason=reason,
+                superseded_by=merged_belief.id,
+                tombstone=True,
+            )
+        for memory_id in list(getattr(right, "source_memory_ids", []) or []):
+            self._annotate_memory_resolution(
+                memory_id,
+                conflict_id=conflict_id,
+                resolution=normalized,
+                role="merged-source",
+                reason=reason,
+                superseded_by=merged_belief.id,
+                tombstone=True,
+            )
+        if merged_memory_id:
+            self._annotate_memory_resolution(
+                merged_memory_id,
+                conflict_id=conflict_id,
+                resolution=normalized,
+                role="merged-winner",
+                reason=reason,
+            )
+        return {
+            "action": normalized,
+            "merged_belief_id": merged_belief.id,
+            "merged_memory_id": merged_memory_id,
+        }
+
     def _demote_existing(self, memory: Dict[str, Any], reason: str) -> None:
         if not memory:
             return
