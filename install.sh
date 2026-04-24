@@ -21,7 +21,7 @@ DHEE_HOME="$HOME/.dhee"
 VENV_DIR="$DHEE_HOME/.venv"
 BIN_DIR="$HOME/.local/bin"
 MIN_PYTHON="3.9"
-PACKAGE="dhee[app]"
+PACKAGE="dhee[app]>=6.0.1"
 
 # --- Colors ---
 if [ -t 1 ]; then
@@ -73,7 +73,7 @@ fi
 
 # --- Install package ---
 "$VENV_DIR/bin/pip" install --upgrade pip -q 2>/dev/null
-"$VENV_DIR/bin/pip" install --upgrade "$PACKAGE" -q
+"$VENV_DIR/bin/pip" install --upgrade --no-cache-dir "$PACKAGE" -q
 done_ "Installed dhee"
 
 # --- Symlink binaries ---
@@ -128,14 +128,17 @@ NONINTERACTIVE_DONE=0
 if [ -n "${DHEE_PROVIDER:-}" ] && [ -n "${DHEE_API_KEY:-}" ]; then
     info "Non-interactive onboarding for provider: ${DHEE_PROVIDER}"
     if "$VENV_DIR/bin/python" -c "
-import sys
+import os, sys
+from dhee.cli_onboard import _save_provider_in_config
 from dhee.secret_store import store_api_key
 try:
-    store_api_key('${DHEE_PROVIDER}', '${DHEE_API_KEY}', label='installer')
+    provider = os.environ['DHEE_PROVIDER']
+    _save_provider_in_config(provider)
+    store_api_key(provider, os.environ['DHEE_API_KEY'], label='installer')
 except Exception as e:
     print(e, file=sys.stderr); sys.exit(1)
 " >/dev/null 2>&1; then
-        done_ "API key stored for ${DHEE_PROVIDER}"
+        done_ "Provider configured and API key stored for ${DHEE_PROVIDER}"
         NONINTERACTIVE_DONE=1
     else
         warn "Non-interactive key storage failed — falling back to prompt"
@@ -144,7 +147,7 @@ fi
 
 ONBOARD_STATUS=0
 if [ "$NONINTERACTIVE_DONE" = "1" ]; then
-    "$VENV_DIR/bin/dhee" onboard --provider "${DHEE_PROVIDER}" || ONBOARD_STATUS=$?
+    info "Skipping interactive onboarding"
 else
     # Interactive: onboard reads from /dev/tty so this works under curl | sh.
     if [ -r /dev/tty ]; then
