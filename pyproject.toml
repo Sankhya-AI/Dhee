@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dhee"
-version = "6.0.1"
+version = "6.0.2"
 description = "Shared information layer for screen-aware AI agents — real-time collaboration, workspace/project memory, and context routing"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -55,6 +55,7 @@ app = [
     "google-genai>=1.0.0",
     "ollama>=0.4.0",
     "fastapi>=0.100.0",
+    "python-multipart>=0.0.9",
     "uvicorn>=0.20.0",
 ]
 all = [

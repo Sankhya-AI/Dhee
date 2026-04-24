@@ -21,7 +21,7 @@ DHEE_HOME="$HOME/.dhee"
 VENV_DIR="$DHEE_HOME/.venv"
 BIN_DIR="$HOME/.local/bin"
 MIN_PYTHON="3.9"
-PACKAGE="dhee[app]>=6.0.1"
+PACKAGE="dhee[app]>=6.0.2"
 
 # --- Colors ---
 if [ -t 1 ]; then
