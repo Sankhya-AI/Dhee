@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 _MAX_REMEMBER_CHARS = 2000
@@ -97,6 +98,180 @@ def _shared_snapshot(dhee: Any) -> dict[str, Any]:
         return {"task": None, "results": []}
 
 
+def _hook_cwd(payload: Any) -> str:
+    if isinstance(payload, dict):
+        for key in ("cwd", "workspace", "repo", "project_dir"):
+            value = str(payload.get(key) or "").strip()
+            if value:
+                return os.path.abspath(os.path.expanduser(value))
+    return os.getcwd()
+
+
+def _repo_context_for(cwd: str, *, query: str, limit: int = 5) -> list[dict[str, Any]]:
+    """Pull shared entries from the linked repo containing *cwd*.
+
+    Returns ``[]`` when the cwd isn't under a linked repo or repo_link
+    isn't importable. Never raises into the hook host.
+    """
+    if not query or not str(query).strip():
+        return []
+    try:
+        from dhee import repo_link
+
+        return repo_link.search_entries(query, cwd=cwd, limit=limit)
+    except Exception:
+        return []
+
+
+def _discover_repo_config(start: str) -> dict[str, Any]:
+    """Find public .dhee/config.json for repo-link context."""
+    try:
+        root = Path(start).resolve()
+    except Exception:
+        root = Path.cwd()
+    home = Path.home().resolve()
+    for candidate in [root, *root.parents]:
+        if candidate == home:
+            break
+        cfg = candidate / ".dhee" / "config.json"
+        if not cfg.is_file():
+            continue
+        try:
+            data = json.loads(cfg.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        if isinstance(data, dict):
+            os.environ.setdefault("DHEE_REPO_ROOT", str(candidate))
+            return {"repo_root": str(candidate), **data}
+    return {}
+
+
+def _repo_last_session(repo: str) -> dict[str, Any] | None:
+    try:
+        from dhee.core.kernel import get_last_session
+
+        session = get_last_session(
+            agent_id="claude-code",
+            repo=repo,
+            fallback_log_recovery=True,
+            user_id=os.environ.get("DHEE_USER_ID", "default"),
+            requester_agent_id="claude-code-hook",
+        )
+        return session if isinstance(session, dict) else None
+    except Exception:
+        return None
+
+
+# Heading-breadcrumb fragments that mark CLAUDE.md/system-prompt material:
+# style guides, commit conventions, harness boilerplate. Per-turn injection
+# should carry signal about *this* prompt, not the repo's coding style — that
+# belongs in the always-on system context.
+_STYLE_HEADINGS = (
+    "coding style",
+    "naming convention",
+    "commit",
+    "pull request guidelines",
+    "engram continuity",
+    "repository guidelines",
+)
+
+
+def _is_style_chunk(match: Any) -> bool:
+    head = (getattr(match, "heading_breadcrumb", "") or "").lower()
+    if not head:
+        return False
+    return any(needle in head for needle in _STYLE_HEADINGS)
+
+
+def _filter_style_chunks(matches: list) -> list:
+    return [m for m in (matches or []) if not _is_style_chunk(m)]
+
+
+def _looks_like_continue(prompt: str) -> bool:
+    p = (prompt or "").strip().lower()
+    if not p:
+        return False
+    return any(
+        phrase in p
+        for phrase in (
+            "continue",
+            "resume",
+            "pick up",
+            "where we left",
+            "same repo",
+            "last session",
+            "previous session",
+        )
+    )
+
+
+_SHARED_RELEVANCE_THRESHOLD = float(
+    os.environ.get("DHEE_SHARED_RELEVANCE_THRESHOLD", "0.50") or 0.50
+)
+
+
+def _cosine(a, b) -> float:
+    import math
+
+    if not a or not b:
+        return 0.0
+    n = min(len(a), len(b))
+    if n == 0:
+        return 0.0
+    dot = 0.0
+    na = 0.0
+    nb = 0.0
+    for i in range(n):
+        x = float(a[i])
+        y = float(b[i])
+        dot += x * y
+        na += x * x
+        nb += y * y
+    if na <= 0.0 or nb <= 0.0:
+        return 0.0
+    return dot / (math.sqrt(na) * math.sqrt(nb))
+
+
+def _shared_block_is_relevant(
+    dhee: Any,
+    prompt: str,
+    shared: dict[str, Any],
+    *,
+    threshold: float = _SHARED_RELEVANCE_THRESHOLD,
+) -> bool:
+    # Per-turn semantic gate on the <shared> block. Mirrors the doc-chunk
+    # gate at assembler.py:_assemble_docs_only — if the active shared task
+    # has nothing to do with what the user just asked, drop it rather than
+    # injecting a stale title with an empty result feed.
+    task = shared.get("task")
+    if not task:
+        return False
+
+    title = str(task.get("title") or "").strip()
+    last_digest = ""
+    for r in shared.get("results") or []:
+        d = str(r.get("digest") or "")
+        if d:
+            last_digest = d[:200]
+            break
+    summary = (title + " " + last_digest).strip()
+    if not summary:
+        return False
+    if not prompt or not prompt.strip():
+        return False
+
+    try:
+        embedder = dhee.memory.embedder
+        v_prompt = embedder.embed(prompt, memory_action="search")
+        v_task = embedder.embed(summary, memory_action="search")
+    except Exception:
+        # Fail closed — better to drop than re-emit the noise that motivated
+        # this gate in the first place.
+        return False
+
+    return _cosine(v_prompt, v_task) >= threshold
+
+
 def _merge_doc_matches(*groups: list[Any]) -> list[Any]:
     seen: set[tuple[str, int, str]] = set()
     merged: list[Any] = []
@@ -122,6 +297,9 @@ def _merge_doc_matches(*groups: list[Any]) -> list[Any]:
 def handle_session_start(payload: dict[str, Any]) -> dict[str, Any]:
     from dhee.hooks.claude_code.assembler import assemble
     from dhee.hooks.claude_code.ingest import auto_ingest_project
+
+    repo_cfg = _discover_repo_config(_hook_cwd(payload))
+    repo_root = str(repo_cfg.get("repo_root") or _hook_cwd(payload))
 
     dhee = _get_dhee()
 
@@ -159,15 +337,36 @@ def handle_session_start(payload: dict[str, Any]) -> dict[str, Any]:
     doc_matches = _merge_doc_matches(artifact_matches, assembled.doc_matches)
     shared = _shared_snapshot(dhee)
     router_on = os.environ.get("DHEE_ROUTER") == "1"
-    if assembled.is_empty and not doc_matches and not router_on and not shared.get("task"):
+    typed = dict(assembled.typed_cognition or {})
+    # Repo config should bind local shared-context identity silently, but it must not
+    # inject a prior transcript into every fresh session. Continuity is
+    # expensive context, so fetch it when the user asks to continue/resume or
+    # when an admin explicitly enables automatic continuity.
+    should_auto_resume = _looks_like_continue(task_desc) or os.environ.get("DHEE_AUTO_CONTINUITY") == "1"
+    if should_auto_resume and not typed.get("last_session"):
+        last = _repo_last_session(repo_root)
+        if last:
+            typed["last_session"] = last
+
+    repo_entries = _repo_context_for(repo_root, query=task_desc, limit=5)
+
+    if (
+        not doc_matches
+        and not router_on
+        and not shared.get("task")
+        and not typed.get("last_session")
+        and not assembled.has_cognition
+        and not repo_entries
+    ):
         return {}
 
     xml = _render(
-        assembled.typed_cognition,
+        typed,
         task_description=task_desc or None,
         doc_matches=doc_matches,
         shared_task=shared.get("task"),
         shared_task_results=shared.get("results") or [],
+        repo_entries=repo_entries,
     )
     if not xml:
         return {}
@@ -175,18 +374,15 @@ def handle_session_start(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def handle_user_prompt(payload: dict[str, Any]) -> dict[str, Any]:
-    """Per-turn doc-chunk injection.
+    """Per-turn enrichment.
 
-    Searches ingested docs for chunks relevant to THIS specific prompt.
-    Only injects when there's a high-confidence match (score ≥ 0.60).
-    No raw memory recall — that was the v3.3.0 noise source.
-
-    This is where Dhee saves the most tokens: instead of the host
-    carrying 2000 tokens of CLAUDE.md context every turn, Dhee injects
-    ~200 tokens of the specific instructions that apply to what the
-    user just asked.
+    Goal: every prompt arrives with the signal it needs — recent edits
+    in this session, last session for this repo, top personal-memory
+    hits, and high-confidence doc chunks for *this* specific prompt.
+    Style guides and harness boilerplate are filtered out (CLAUDE.md
+    territory, not per-turn). Off-topic prompts inject nothing.
     """
-    from dhee.hooks.claude_code.assembler import assemble_docs_only
+    from dhee.hooks.claude_code.assembler import assemble, assemble_docs_only
 
     if isinstance(payload, dict):
         prompt = str(payload.get("prompt", payload.get("content", "")))
@@ -199,8 +395,11 @@ def handle_user_prompt(payload: dict[str, Any]) -> dict[str, Any]:
         return {}
 
     dhee = _get_dhee()
-    matches = assemble_docs_only(dhee, query=prompt)
-    artifact_matches = []
+    _discover_repo_config(_hook_cwd(payload))
+
+    # ── Doc chunks: gated, style-filtered ────────────────────────────
+    doc_matches = assemble_docs_only(dhee, query=prompt)
+    artifact_matches: list = []
     try:
         artifact_matches = _artifact_manager(dhee).prompt_matches(
             prompt,
@@ -210,16 +409,72 @@ def handle_user_prompt(payload: dict[str, Any]) -> dict[str, Any]:
         )
     except Exception:
         artifact_matches = []
-    matches = _merge_doc_matches(artifact_matches, matches)
+    doc_matches = _merge_doc_matches(artifact_matches, doc_matches)
+    doc_matches = _filter_style_chunks(doc_matches)
+
+    # ── Cognition: memories, insights, beliefs, policies ─────────────
+    # Tight per-turn budget — UserPromptSubmit fires on every message,
+    # so we cap aggressively. The renderer trims further by priority.
+    typed_cognition: dict[str, Any] = {}
+    try:
+        assembled = assemble(
+            dhee,
+            query=prompt,
+            doc_budget_tokens=0,           # docs already pulled above
+            cognition_budget_tokens=500,
+            include_cognition=True,
+        )
+        typed_cognition = assembled.typed_cognition or {}
+    except Exception:
+        typed_cognition = {}
+
+    # ── Edit ledger: this session's file changes (always on) ─────────
+    edits_block = ""
+    try:
+        from dhee.router.edit_ledger import render_block as _render_edits
+
+        edits_block = _render_edits()
+    except Exception:
+        edits_block = ""
+
+    # ── Last session for this repo: continuity even without "continue" ──
+    repo = os.environ.get("DHEE_REPO_ROOT") or os.getcwd()
+    last_session = _repo_last_session(repo)
+    if last_session:
+        typed_cognition.setdefault("last_session", last_session)
+
+    # ── Shared cross-session task (semantic gate already applied) ────
     shared = _shared_snapshot(dhee)
-    if not matches and not shared.get("task"):
+    if shared.get("task") and not _shared_block_is_relevant(dhee, prompt, shared):
+        shared = {"task": None, "results": []}
+
+    repo_entries = _repo_context_for(repo, query=prompt, limit=3)
+
+    has_signal = (
+        bool(doc_matches)
+        or bool(edits_block)
+        or bool(typed_cognition)
+        or bool(shared.get("task"))
+        or bool(repo_entries)
+    )
+    if not has_signal:
         return {}
 
+    # Per-turn caps: aggressive trimming. SessionStart and PreCompact
+    # use the renderer's defaults (1500 tokens, 8 memories) — those fire
+    # rarely. UserPromptSubmit fires every turn, so the budget is half.
     xml = _render(
-        {},
-        doc_matches=matches,
+        typed_cognition,
+        task_description=prompt,
+        max_tokens=900,
+        max_memories=3,
+        max_insights=3,
+        max_intentions=2,
+        doc_matches=doc_matches,
+        edits_block=edits_block or None,
         shared_task=shared.get("task"),
         shared_task_results=shared.get("results") or [],
+        repo_entries=repo_entries,
     )
     if not xml:
         return {}
@@ -537,11 +792,16 @@ def main() -> int:
         return 0
 
     # PreToolUse deny signalling: emit JSON + exit 2 per Claude Code docs.
+    # Mirror the deny reason to stderr so the harness logs a readable line
+    # instead of "PreToolUse:Bash hook error: ... No stderr output" — empty
+    # stderr + exit 2 is misclassified as a crash by Claude Code.
     if (
         event == "PreToolUse"
         and isinstance(result, dict)
         and result.get("permissionDecision") == "deny"
     ):
+        reason = str(result.get("reason") or "router enforcement").strip()
+        sys.stderr.write(f"dhee router deny: {reason}\n")
         return 2
 
     return 0

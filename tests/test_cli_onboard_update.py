@@ -1,9 +1,8 @@
 """Coverage for the installer-facing CLI additions.
 
   - dhee onboard:  provider picker, API-key prompt, config + secret
-    store writes, UI-build auto-detect
-  - dhee update:  editable vs PyPI path, UI rebuild hook
-  - dhee ui --no-open: skips the browser-open side effect
+    store writes, repo-link prompt handoff
+  - dhee update:  editable vs PyPI path
 """
 
 from __future__ import annotations
@@ -11,7 +10,6 @@ from __future__ import annotations
 import io
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
 
 
 def test_onboard_provider_default_and_key_paste(tmp_path, monkeypatch):
@@ -39,7 +37,7 @@ def test_onboard_provider_default_and_key_paste(tmp_path, monkeypatch):
 
     out = tty_out.getvalue()
     assert "Dhee setup" in out
-    assert "dhee ui" in out
+    assert "dhee link" in out
 
 
 def test_onboard_gemini_choice(tmp_path, monkeypatch):
@@ -123,7 +121,6 @@ def test_update_uses_pypi_path_on_non_editable_install(monkeypatch):
     monkeypatch.setattr(cli_update, "_is_editable_install", lambda: False)
     monkeypatch.setattr(cli_update, "_run", _fake_run)
     monkeypatch.setattr(cli_update, "_relink_binaries", lambda: None)
-    monkeypatch.setattr(cli_update, "_rebuild_ui", lambda: None)
     monkeypatch.setattr(cli_update, "_print_current_version", lambda: None)
     monkeypatch.setattr(
         cli_update, "_venv_python", lambda: Path("/tmp/fake/venv/bin/python")
@@ -131,7 +128,7 @@ def test_update_uses_pypi_path_on_non_editable_install(monkeypatch):
 
     cli_update.cmd_update(SimpleNamespace(from_pypi=False))
 
-    # Must have issued the pip upgrade for the app runtime.
+    # Must have issued the pip upgrade for the public runtime.
     pip_upgrades = [r for r in runs if "install" in r and "--upgrade" in r and any("dhee" in piece for piece in r)]
     assert pip_upgrades, f"expected pip upgrade, got {runs}"
 
@@ -144,7 +141,6 @@ def test_update_uses_git_pull_when_editable(monkeypatch, tmp_path):
     monkeypatch.setattr(cli_update, "_project_root_for_editable", lambda: tmp_path)
     monkeypatch.setattr(cli_update, "_run", lambda cmd, cwd=None, check=True: runs.append([str(c) for c in cmd]))
     monkeypatch.setattr(cli_update, "_relink_binaries", lambda: None)
-    monkeypatch.setattr(cli_update, "_rebuild_ui", lambda: None)
     monkeypatch.setattr(cli_update, "_print_current_version", lambda: None)
     monkeypatch.setattr(
         cli_update, "_venv_python", lambda: Path("/tmp/fake/venv/bin/python")
@@ -164,7 +160,6 @@ def test_update_from_pypi_flag_overrides_editable(monkeypatch, tmp_path):
     monkeypatch.setattr(cli_update, "_project_root_for_editable", lambda: tmp_path)
     monkeypatch.setattr(cli_update, "_run", lambda cmd, cwd=None, check=True: runs.append([str(c) for c in cmd]))
     monkeypatch.setattr(cli_update, "_relink_binaries", lambda: None)
-    monkeypatch.setattr(cli_update, "_rebuild_ui", lambda: None)
     monkeypatch.setattr(cli_update, "_print_current_version", lambda: None)
     monkeypatch.setattr(
         cli_update, "_venv_python", lambda: Path("/tmp/fake/venv/bin/python")
@@ -172,111 +167,6 @@ def test_update_from_pypi_flag_overrides_editable(monkeypatch, tmp_path):
 
     cli_update.cmd_update(SimpleNamespace(from_pypi=True))
 
-    # No git pull; pip upgrade the app runtime instead.
+    # No git pull; pip upgrades the public runtime instead.
     assert not any(r[:2] == ["git", "pull"] for r in runs), runs
-    assert any("install" in r and "--upgrade" in r and "dhee[app]" in r for r in runs)
-
-
-def test_ui_auto_open_respects_no_open_flag(monkeypatch):
-    """`dhee ui --no-open` must not schedule the browser open."""
-    scheduled: list = []
-    monkeypatch.setattr(
-        "dhee.ui.cli._schedule_browser_open",
-        lambda url, delay=1.0: scheduled.append(url),
-    )
-
-    fake_uvicorn = MagicMock()
-    fake_server = MagicMock()
-    monkeypatch.setitem(
-        __import__("sys").modules, "uvicorn", SimpleNamespace(run=fake_uvicorn)
-    )
-    # create_app is invoked but we don't want a real FastAPI instance.
-    monkeypatch.setattr("dhee.ui.server.create_app", lambda **kw: fake_server)
-
-    dist_dir = Path(__file__).parent / "_fake_dist"
-    dist_dir.mkdir(exist_ok=True)
-    # Pretend the dist exists so cmd_ui doesn't fall back to dev mode.
-    monkeypatch.setattr(
-        "dhee.ui.cli.Path",
-        lambda *a, **kw: Path(*a, **kw),
-    )
-
-    from dhee.ui.cli import cmd_ui
-
-    args = SimpleNamespace(
-        host="127.0.0.1",
-        port=8080,
-        dev=True,  # dev mode bypasses the dist check
-        verbose=False,
-        no_open=True,
-    )
-    with patch("dhee.ui.cli.subprocess.Popen") as popen:
-        popen.return_value = MagicMock()
-        cmd_ui(args)
-
-    assert scheduled == []  # no browser open when flag is set
-    fake_uvicorn.assert_called_once()
-
-
-def test_ui_auto_open_triggers_by_default(monkeypatch):
-    scheduled: list = []
-    monkeypatch.setattr(
-        "dhee.ui.cli._schedule_browser_open",
-        lambda url, delay=1.0: scheduled.append(url),
-    )
-    fake_uvicorn = MagicMock()
-    fake_server = MagicMock()
-    monkeypatch.setitem(
-        __import__("sys").modules, "uvicorn", SimpleNamespace(run=fake_uvicorn)
-    )
-    monkeypatch.setattr("dhee.ui.server.create_app", lambda **kw: fake_server)
-
-    from dhee.ui.cli import cmd_ui
-
-    args = SimpleNamespace(
-        host="127.0.0.1",
-        port=8080,
-        dev=True,
-        verbose=False,
-        no_open=False,
-    )
-    monkeypatch.delenv("DHEE_UI_NO_OPEN", raising=False)
-    # Ensure DISPLAY is present on linux so the headless-skip doesn't trigger.
-    monkeypatch.setenv("DISPLAY", ":0")
-
-    with patch("dhee.ui.cli.subprocess.Popen") as popen:
-        popen.return_value = MagicMock()
-        cmd_ui(args)
-
-    assert scheduled == ["http://127.0.0.1:8080/"]
-
-
-def test_ui_auto_open_respects_env_var(monkeypatch):
-    """DHEE_UI_NO_OPEN=1 suppresses auto-open even without --no-open."""
-    scheduled: list = []
-    monkeypatch.setattr(
-        "dhee.ui.cli._schedule_browser_open",
-        lambda url, delay=1.0: scheduled.append(url),
-    )
-    fake_uvicorn = MagicMock()
-    fake_server = MagicMock()
-    monkeypatch.setitem(
-        __import__("sys").modules, "uvicorn", SimpleNamespace(run=fake_uvicorn)
-    )
-    monkeypatch.setattr("dhee.ui.server.create_app", lambda **kw: fake_server)
-    monkeypatch.setenv("DHEE_UI_NO_OPEN", "1")
-
-    from dhee.ui.cli import cmd_ui
-
-    args = SimpleNamespace(
-        host="127.0.0.1",
-        port=8080,
-        dev=True,
-        verbose=False,
-        no_open=False,
-    )
-    with patch("dhee.ui.cli.subprocess.Popen") as popen:
-        popen.return_value = MagicMock()
-        cmd_ui(args)
-
-    assert scheduled == []
+    assert any("install" in r and "--upgrade" in r and "dhee" in r for r in runs)

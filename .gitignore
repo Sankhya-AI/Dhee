@@ -1,3 +1,6 @@
+# Private enterprise SKU — never commit to public repo.
+enterprise/
+
 # Python
 __pycache__/
 *.py[cod]
