@@ -5,9 +5,8 @@ Walks the user through:
 
   1. Provider selection (openai default, then gemini, nvidia, ollama)
   2. API key paste (masked echo, stored in the encrypted secret store)
-  3. UI build (runs ``npm install && npm run build`` if ``npm`` is
-     available and the web source ships with this install)
-  4. Final "run ``dhee ui``" handoff
+  3. Optional git repo linking for shared `.dhee/context/`
+  4. Final "run ``dhee link`` / ``dhee handoff``" handoff
 
 The prompts are routed through ``/dev/tty`` so the flow works even when
 the caller is piped — the exact shape ``curl ... | sh`` takes. If the
@@ -20,9 +19,7 @@ from __future__ import annotations
 import argparse
 import io
 import os
-import subprocess
 import sys
-from pathlib import Path
 from typing import Optional, Tuple
 
 from dhee.cli_config import PROVIDER_DEFAULTS, load_config, save_config
@@ -129,70 +126,71 @@ def _save_provider_in_config(provider: str) -> None:
     save_config(config)
 
 
-def _build_ui_if_possible(tty_out: io.TextIOBase) -> bool:
-    """Try to build the Sankhya SPA if the source tree ships with this
-    install. Returns True when a usable dist exists at the end.
-    """
-    web_dir = Path(__file__).parent / "ui" / "web"
-    dist = web_dir / "dist"
+def _link_repo(path: str) -> Tuple[bool, str]:
+    """Run ``repo_link.link()`` on *path*. Returns (ok, message)."""
+    from dhee import repo_link
 
-    if dist.exists() and any(dist.iterdir()):
-        _print(tty_out, "UI bundle already built — skipping.")
-        return True
-
-    if not (web_dir / "package.json").exists():
-        _print(
-            tty_out,
-            "UI source isn't packaged with this install. `dhee ui` will use the "
-            "prebuilt bundle shipped with the PyPI release.",
-        )
-        return False
-
-    npm = _find_npm()
-    if not npm:
-        _print(
-            tty_out,
-            "npm not found. Skipping UI build — install Node.js and run `dhee "
-            "ui-build` later, or just run `dhee ui` which hot-builds in dev mode.",
-        )
-        return False
-
-    _print(tty_out, "Building the Sankhya web UI (one-time: ~30 s)…")
-    env = os.environ.copy()
-    env.setdefault("CI", "1")  # suppress prompts, enable non-TTY npm logs
     try:
-        subprocess.check_call(
-            [npm, "install", "--no-fund", "--no-audit", "--silent"],
-            cwd=str(web_dir),
-            env=env,
-        )
-        subprocess.check_call(
-            [npm, "run", "build", "--silent"],
-            cwd=str(web_dir),
-            env=env,
-        )
-    except subprocess.CalledProcessError as exc:
-        _print(tty_out, f"UI build failed ({exc}). Run `dhee ui-build` to retry.")
-        return False
-    _print(tty_out, "✓ UI built.")
-    return True
+        info = repo_link.link(path)
+    except ValueError as exc:
+        return False, str(exc)
+    except Exception as exc:  # noqa: BLE001
+        return False, f"link error: {exc}"
+    return True, (
+        f"linked {info['repo_root']} (id={str(info.get('repo_id') or '')[:12]}) — "
+        f"hooks: {', '.join(info.get('hooks') or []) or 'none'}"
+    )
 
 
-def _find_npm() -> Optional[str]:
-    for candidate in ("npm",):
-        try:
-            subprocess.check_output([candidate, "--version"], stderr=subprocess.DEVNULL)
-            return candidate
-        except (OSError, subprocess.CalledProcessError):
+def _link_repos_interactive(
+    tty_in: io.TextIOBase, tty_out: io.TextIOBase
+) -> int:
+    """Prompt the user for git repo paths to link.
+
+    No-op on empty input. Each line links one repo via
+    ``repo_link.link()``; non-git paths print a one-line warning and
+    move on. Returns the number of successful links.
+    """
+    _print(tty_out, "")
+    _print(
+        tty_out,
+        "Which git repos do you want to share AI-coding context for?",
+    )
+    _print(
+        tty_out,
+        "Paste an absolute path per line. Linking creates `<repo>/.dhee/`",
+    )
+    _print(
+        tty_out,
+        "and installs git hooks so context flows through `git push`/`pull`.",
+    )
+    _print(tty_out, "Press Enter on an empty line to finish (you can run `dhee link` later).")
+    _print(tty_out, "")
+
+    linked = 0
+    while True:
+        raw = _ask(tty_in, tty_out, "repo path (blank to finish): ").strip()
+        if not raw:
+            break
+        path = os.path.abspath(os.path.expanduser(raw))
+        if not os.path.isdir(path):
+            _print(tty_out, f"  ✗ {path} is not a directory; skipped.")
             continue
-    # Common absolute paths that may not be on PATH during install
-    for path in ("/usr/local/bin/npm", "/opt/homebrew/bin/npm"):
-        if os.path.isfile(path):
-            return path
-    return None
+        ok, message = _link_repo(path)
+        marker = "✓" if ok else "✗"
+        _print(tty_out, f"  {marker} {message}")
+        if ok:
+            linked += 1
+    return linked
 
 
-def run_onboard(*, provider_default: Optional[str] = None, skip_ui_build: bool = False) -> int:
+def run_onboard(
+    *,
+    provider_default: Optional[str] = None,
+    skip_ui_build: bool = False,  # Deprecated no-op; kept for old installers.
+    link_paths: Optional[list[str]] = None,
+    skip_link_prompt: bool = False,
+) -> int:
     tty_in, tty_out = _open_tty()
     if tty_in is None or tty_out is None:
         sys.stderr.write(
@@ -235,13 +233,25 @@ def run_onboard(*, provider_default: Optional[str] = None, skip_ui_build: bool =
             else:
                 _print(tty_out, "No key provided; skipping.")
 
-        _print(tty_out, "")
-        if not skip_ui_build:
-            _build_ui_if_possible(tty_out)
+        # ── Repo linking — the "share context across teammates" step ─
+        if link_paths:
+            _print(tty_out, "")
+            for path in link_paths:
+                resolved = os.path.abspath(os.path.expanduser(path))
+                ok, message = _link_repo(resolved)
+                marker = "✓" if ok else "✗"
+                _print(tty_out, f"  {marker} {message}")
+        elif not skip_link_prompt:
+            _link_repos_interactive(tty_in, tty_out)
 
         _print(tty_out, "")
-        _print(tty_out, "Done. Launch the UI at any time:")
-        _print(tty_out, "  dhee ui")
+        _print(tty_out, "Done. Dhee Developer Brain is ready.")
+        _print(tty_out, "Link more repos later with:")
+        _print(tty_out, "  dhee link <path>")
+        _print(tty_out, "Check shared-context conflicts with:")
+        _print(tty_out, "  dhee context check")
+        _print(tty_out, "Recover compact continuity with:")
+        _print(tty_out, "  dhee handoff")
         _print(tty_out, "")
         _print(tty_out, "Update to the latest release:")
         _print(tty_out, "  dhee update")
@@ -272,7 +282,7 @@ def run_onboard(*, provider_default: Optional[str] = None, skip_ui_build: bool =
 def register(sub: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
     p = sub.add_parser(
         "onboard",
-        help="Interactive provider + API key setup (provider picker, key paste, UI build)",
+        help="Interactive provider + API key setup plus optional repo linking",
     )
     p.add_argument(
         "--provider",
@@ -282,13 +292,29 @@ def register(sub: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None
     p.add_argument(
         "--skip-ui-build",
         action="store_true",
-        help="Don't try to build the Sankhya web UI.",
+        help="Deprecated no-op kept for old installers.",
+    )
+    p.add_argument(
+        "--link",
+        action="append",
+        metavar="PATH",
+        help=(
+            "Link this git repo non-interactively (repeatable). "
+            "Skips the interactive repo prompt."
+        ),
+    )
+    p.add_argument(
+        "--skip-link-prompt",
+        action="store_true",
+        help="Skip the 'which git repos to link?' step entirely.",
     )
     p.set_defaults(
         func=lambda args: sys.exit(
             run_onboard(
                 provider_default=getattr(args, "provider", None),
                 skip_ui_build=bool(getattr(args, "skip_ui_build", False)),
+                link_paths=list(getattr(args, "link", None) or []) or None,
+                skip_link_prompt=bool(getattr(args, "skip_link_prompt", False)),
             )
         )
     )

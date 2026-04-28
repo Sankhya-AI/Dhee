@@ -1,4 +1,4 @@
-"""`dhee update` — pull the latest release + rebuild the web UI.
+"""`dhee update` — pull the latest Dhee Developer Brain release.
 
 Two upgrade paths, auto-detected:
 
@@ -9,9 +9,8 @@ Two upgrade paths, auto-detected:
      runs ``git pull --ff-only`` in the detected project root and then
      ``pip install -e .`` inside the venv.
 
-Either way we finish with a UI rebuild so the shipped ``dist/`` matches
-the code you just pulled — this is the piece that makes ``dhee update``
-feel complete rather than "upgraded but UI is stale".
+Either way we finish by relinking console scripts so the local curl-installed
+runtime stays usable.
 """
 
 from __future__ import annotations
@@ -24,7 +23,7 @@ from pathlib import Path
 from typing import Optional
 
 
-PACKAGE_NAME = "dhee[app]"
+PACKAGE_NAME = "dhee"
 
 
 def _venv_python() -> Path:
@@ -119,29 +118,6 @@ def _relink_binaries() -> None:
         pass
 
 
-def _rebuild_ui() -> None:
-    """Rebuild the Sankhya SPA. No-op when npm / source is unavailable."""
-    from dhee.cli_onboard import _build_ui_if_possible, _open_tty
-
-    _tty_in, tty_out = _open_tty()
-    target = tty_out
-    if target is None:
-        class _Stdout:
-            def write(self, text: str) -> None:
-                sys.stdout.write(text)
-
-            def flush(self) -> None:
-                sys.stdout.flush()
-
-        target = _Stdout()  # type: ignore[assignment]
-    _build_ui_if_possible(target)  # type: ignore[arg-type]
-    if _tty_in is not None and _tty_in is not sys.stdin:
-        try:
-            _tty_in.close()
-        except Exception:
-            pass
-
-
 def cmd_update(args: argparse.Namespace) -> None:
     """Upgrade Dhee in-place, source OR wheel."""
     _print_current_version()
@@ -163,9 +139,6 @@ def cmd_update(args: argparse.Namespace) -> None:
 
     _relink_binaries()
 
-    print("Rebuilding the web UI…")
-    _rebuild_ui()
-
     try:
         from importlib.metadata import version
 
@@ -177,13 +150,13 @@ def cmd_update(args: argparse.Namespace) -> None:
     except Exception:
         latest = "(unknown)"
     print(f"\n✓ Dhee updated → {latest}")
-    print("Launch the UI: dhee ui")
+    print("Next: dhee link /path/to/repo  |  dhee handoff")
 
 
 def register(sub: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
     p = sub.add_parser(
         "update",
-        help="Update Dhee (pip install --upgrade) and rebuild the web UI",
+        help="Update Dhee Developer Brain",
     )
     p.add_argument(
         "--from-pypi",

@@ -1,27 +1,27 @@
 #!/bin/sh
-# Dhee installer — one command, interactive provider + key setup + UI.
+# Dhee Developer Brain installer — one command, local memory + repo context.
 #
 #   curl -fsSL https://raw.githubusercontent.com/Sankhya-AI/Dhee/main/install.sh | sh
 #
 # What it does:
 #   1. Creates ~/.dhee with a hidden Python venv
-#   2. Installs the dhee package (app runtime + hosted providers)
+#   2. Installs the dhee package
 #   3. Symlinks `dhee` and `dhee-mcp` into ~/.local/bin
 #   4. Wires Claude Code (hooks + MCP + router) if available
-#   5. Runs `dhee onboard` — interactive provider picker, API key paste,
-#      and web UI build
+#   5. Runs `dhee onboard` — provider picker, API key paste,
+#      and optional git repo linking
 #
 # Non-interactive: pass DHEE_PROVIDER=openai DHEE_API_KEY=sk-... to skip
 # the prompts entirely (CI-friendly).
 #
-# Requires: Python 3.9+  (Claude Code CLI + Node.js optional)
+# Requires: Python 3.9+  (Claude Code CLI optional)
 set -e
 
 DHEE_HOME="$HOME/.dhee"
 VENV_DIR="$DHEE_HOME/.venv"
 BIN_DIR="$HOME/.local/bin"
 MIN_PYTHON="3.9"
-PACKAGE="dhee[app]>=6.0.2"
+PACKAGE="dhee>=6.1.0"
 
 # --- Colors ---
 if [ -t 1 ]; then
@@ -121,9 +121,7 @@ fi
 
 # --- Onboarding (interactive provider + key) ---
 # If the caller set DHEE_PROVIDER + DHEE_API_KEY we stash the key
-# non-interactively, then ask `dhee onboard --provider ... --skip-ui-build`
-# to only do the provider save and UI build (it won't re-prompt for the
-# key because one is already stored).
+# non-interactively and skip the prompt.
 NONINTERACTIVE_DONE=0
 if [ -n "${DHEE_PROVIDER:-}" ] && [ -n "${DHEE_API_KEY:-}" ]; then
     info "Non-interactive onboarding for provider: ${DHEE_PROVIDER}"
@@ -161,8 +159,8 @@ fi
 
 # --- Done ---
 printf "\n${BOLD}${GREEN}Dhee is ready.${RESET}\n"
-printf "  Launch the UI: ${BOLD}dhee ui${RESET}  ${DIM}(opens in your browser)${RESET}\n"
+printf "  Link a repo:   ${BOLD}dhee link /path/to/repo${RESET}\n"
 printf "  Update later:  ${BOLD}dhee update${RESET}\n\n"
-printf "${DIM}  Inspect:   dhee router status | dhee router stats${RESET}\n"
-printf "${DIM}  Opt out:   dhee router disable${RESET}\n"
+printf "${DIM}  Inspect:   dhee links | dhee context check${RESET}\n"
+printf "${DIM}  Memory:    dhee recall \"what changed?\" | dhee handoff${RESET}\n"
 printf "${DIM}  Remove:    dhee uninstall-hooks && rm -rf ~/.dhee${RESET}\n\n"

@@ -38,6 +38,7 @@ def render_context(
     edits_block: str | None = None,
     shared_task: dict[str, Any] | None = None,
     shared_task_results: list[dict[str, Any]] | None = None,
+    repo_entries: list[dict[str, Any]] | None = None,
 ) -> str:
     """Render Dhee context dict as flat XML for Claude Code injection.
 
@@ -46,6 +47,7 @@ def render_context(
     sections: list[tuple[int, list[str]]] = [
         (120, _router_block()),
         (115, _edits_section(edits_block)),
+        (113, _repo_context_block(repo_entries)),
         (110, _docs_block(doc_matches)),
         (105, _shared_task_block(shared_task, shared_task_results)),
         (100, _session_block(ctx.get("last_session"))),
@@ -65,15 +67,26 @@ def render_context(
 
     budget_chars = int(max_tokens * CHARS_PER_TOKEN)
 
+    # Short single-line task descriptions ride as a root attribute (compact).
+    # Anything longer or multi-line goes into a <task> child element so the
+    # full prompt survives verbatim instead of being truncated.
     attrs = ""
+    task_block: list[str] = []
     if task_description:
-        attrs = f' task="{_esc_attr(task_description[:120])}"'
+        td = str(task_description)
+        if "\n" not in td and len(td) <= 200:
+            attrs = f' task="{_esc_attr(td)}"'
+        else:
+            task_block = [f"<task>{_xml_escape(td)}</task>"]
     attrs += ' v="1"'
 
     open_tag = f"<dhee{attrs}>"
     close_tag = "</dhee>"
     body: list[str] = [open_tag]
     used = len(open_tag) + len(close_tag) + 1
+    if task_block:
+        body.extend(task_block)
+        used += sum(len(line) + 1 for line in task_block)
 
     included_any = False
     for _priority, lines in non_empty:
@@ -137,6 +150,30 @@ def _docs_block(doc_matches: list | None) -> list[str]:
         score_attr = _score_attr(score)
         a = f"{attrs} {score_attr}" if attrs else score_attr
         items.append(_tag("doc", a, text))
+    return items
+
+
+def _repo_context_block(repo_entries: list[dict[str, Any]] | None) -> list[str]:
+    """Repo-shared context entries (from <repo>/.dhee/context/entries.jsonl).
+
+    Compact: one ``<repo …>`` element per entry with title and a short
+    snippet of the body. Keeps the per-turn budget honest while still
+    surfacing what teammates have promoted into the repo.
+    """
+    if not repo_entries:
+        return []
+    items: list[str] = []
+    for r in repo_entries[:5]:
+        if not isinstance(r, dict):
+            continue
+        title = str(r.get("title") or "").strip()
+        body = str(r.get("memory") or r.get("content") or "").strip()
+        kind = str(r.get("kind") or "")
+        if not (title or body):
+            continue
+        snippet = body[:200].replace("\n", " ")
+        attrs = _attrs(kind=kind, title=title)
+        items.append(_tag("repo", attrs, snippet))
     return items
 
 

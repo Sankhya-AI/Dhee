@@ -72,6 +72,204 @@ def cmd_setup(args: argparse.Namespace) -> None:
     run_setup()
 
 
+# ---------------------------------------------------------------------------
+# repo-link commands — personal vs repo context
+# ---------------------------------------------------------------------------
+
+
+def cmd_link(args: argparse.Namespace) -> None:
+    """Link a git repo: create <repo>/.dhee/, install hooks, register."""
+    from dhee import repo_link
+
+    info = repo_link.link(args.path or ".")
+    if args.json:
+        _json_out(info)
+        return
+    print(f"Linked {info['repo_root']}")
+    print(f"  repo_id      {info['repo_id']}")
+    print(f"  hooks        {', '.join(info['hooks']) or 'none'}")
+    manifest = info.get("manifest") or {}
+    print(f"  entries      {manifest.get('entry_count', 0)}")
+
+
+def cmd_unlink(args: argparse.Namespace) -> None:
+    """Unlink a git repo from this machine."""
+    from dhee import repo_link
+
+    info = repo_link.unlink(args.path or ".", remove_hooks=not args.keep_hooks)
+    if args.json:
+        _json_out(info)
+        return
+    if info.get("removed"):
+        print(f"Unlinked {info['repo_root']}")
+        if info.get("hooks_removed"):
+            print(f"  removed hooks: {', '.join(info['hooks_removed'])}")
+    else:
+        print(f"{info['repo_root']} was not linked on this machine.")
+
+
+def cmd_links(args: argparse.Namespace) -> None:
+    """List linked repos on this machine."""
+    from dhee import repo_link
+
+    repos = repo_link.list_links()
+    if args.json:
+        _json_out(repos)
+        return
+    if not repos:
+        print("No repos linked. Run `dhee link` inside one.")
+        return
+    for path, meta in sorted(repos.items()):
+        repo_id = meta.get("repo_id", "")[:12]
+        print(f"  {path}  ({repo_id})")
+
+
+def cmd_promote(args: argparse.Namespace) -> None:
+    """Copy a personal memory into a linked repo's shared context."""
+    from dhee import repo_link
+
+    memory = _get_memory()
+    entry, repo_root = repo_link.promote(
+        args.memory_id, memory=memory, repo=args.repo,
+        kind=args.kind, title=args.title,
+    )
+    if args.json:
+        _json_out({
+            "entry": entry.to_json(),
+            "repo_root": str(repo_root),
+        })
+        return
+    print(f"Promoted to {repo_root}")
+    print(f"  entry_id  {entry.id}")
+    print(f"  kind      {entry.kind}")
+    print(f"  title     {entry.title}")
+
+
+def cmd_demote(args: argparse.Namespace) -> None:
+    """Copy a repo entry into personal memory as a learning."""
+    from dhee import repo_link
+
+    memory = _get_memory()
+    new_id, entry = repo_link.demote(
+        args.entry_id, memory=memory, repo=args.repo, user_id=args.user_id,
+    )
+    if args.json:
+        _json_out({"memory_id": new_id, "entry": entry.to_json()})
+        return
+    print(f"Demoted entry {entry.id} → personal memory {new_id or '(unknown)'}")
+
+
+def cmd_context(args: argparse.Namespace) -> None:
+    """Inspect or refresh a linked repo's shared context."""
+    from dhee import repo_link
+
+    action = args.context_action or "list"
+    repo_root = repo_link._resolve_repo(args.repo) if args.repo else repo_link.repo_for_path(os.getcwd())
+    if action == "refresh":
+        results = repo_link.refresh(repo=args.repo)
+        if args.json:
+            _json_out(results)
+            return
+        if not results:
+            if not args.quiet:
+                print("Nothing to refresh.")
+            return
+        if args.quiet:
+            return
+        for r in results:
+            m = r.get("manifest") or {}
+            print(
+                f"  {r['repo_root']}  entries={m.get('entry_count', 0)} "
+                f"tombstones={m.get('tombstones', 0)} conflicts={m.get('conflicts', 0)}"
+            )
+        return
+
+    if action == "check":
+        try:
+            result = repo_link.check(repo=args.repo)
+        except ValueError as exc:
+            if args.json:
+                _json_out({"ok": False, "error": str(exc)})
+            elif not args.quiet:
+                print(str(exc))
+            sys.exit(1)
+        if args.json:
+            _json_out(result)
+            return
+        conflicts = result.get("conflicts") or []
+        if conflicts:
+            if not args.quiet:
+                print(f"Dhee context has {len(conflicts)} unresolved conflict(s):")
+                for conflict in conflicts:
+                    print(f"  {conflict.get('entry_id')}  heads={conflict.get('head_count')}")
+                print("Resolve the conflicting context heads before pushing.")
+            sys.exit(1)
+        if not args.quiet:
+            manifest = result.get("manifest") or {}
+            print(
+                f"Dhee context OK: entries={manifest.get('entry_count', 0)} "
+                f"conflicts={manifest.get('conflicts', 0)}"
+            )
+        return
+
+    if repo_root is None:
+        print("Not inside a linked repo. Run `dhee link` here, or pass --repo.")
+        sys.exit(1)
+
+    if action == "list":
+        entries = repo_link.list_entries(repo_root)
+        if args.json:
+            _json_out([e.to_json() for e in entries])
+            return
+        if not entries:
+            print(f"No entries in {repo_root}/.dhee/context/")
+            return
+        for e in entries:
+            print(f"  [{e.id[:14]}] {e.kind:<10} {e.title or '(untitled)'}")
+        print(f"\n  {len(entries)} entry/entries in {repo_root}")
+        return
+
+    if action == "show":
+        if not args.entry_id:
+            print("Pass an entry id: dhee context show <entry_id>")
+            sys.exit(1)
+        entry = repo_link.get_entry(repo_root, args.entry_id)
+        if entry is None:
+            print(f"Entry {args.entry_id!r} not found.")
+            sys.exit(1)
+        if args.json:
+            _json_out(entry.to_json())
+            return
+        print(f"id        {entry.id}")
+        print(f"kind      {entry.kind}")
+        print(f"title     {entry.title}")
+        print(f"created   {entry.created_at}  by {entry.created_by}")
+        if entry.deleted:
+            print("status    DELETED (tombstoned)")
+        if entry.source_memory_id:
+            print(f"source    personal memory {entry.source_memory_id}")
+        print()
+        print(entry.content)
+        return
+
+    if action == "delete":
+        if not args.entry_id:
+            print("Pass an entry id: dhee context delete <entry_id>")
+            sys.exit(1)
+        tomb = repo_link.tombstone_entry(repo_root, args.entry_id)
+        if args.json:
+            _json_out({"tombstoned": tomb.to_json() if tomb else None})
+            return
+        if tomb is None:
+            print("Already gone or not found.")
+        else:
+            print(f"Tombstoned {tomb.id}. Commit .dhee/ to share the deletion.")
+        return
+
+    print(f"Unknown context action: {action}")
+    sys.exit(1)
+
+
 def cmd_add(args: argparse.Namespace) -> None:
     """Add a memory."""
     memory = _get_memory()
@@ -95,27 +293,44 @@ def cmd_add(args: argparse.Namespace) -> None:
 
 
 def cmd_search(args: argparse.Namespace) -> None:
-    """Search memories."""
+    """Search memories.
+
+    Fuses personal memory results with shared entries from any linked
+    repo containing the cwd, so the user sees both their own memories
+    and the repo-shared context in one ranked list.
+    """
+    from dhee import repo_link
+
     memory = _get_memory()
     result = memory.search(
         query=args.query,
         user_id=args.user_id,
         limit=args.limit,
     )
+
+    base_results = result.get("results", []) if isinstance(result, dict) else []
+    fused = repo_link.fuse_search_results(
+        args.query, base_results, cwd=os.getcwd(), limit=args.limit,
+    )
+
     if args.json:
-        _json_out(result)
-    else:
-        results = result.get("results", [])
-        if not results:
-            print("No results found.")
-            return
-        for r in results:
-            score = r.get("composite_score", r.get("score", 0))
-            layer = r.get("layer", "sml")
-            mem = r.get("memory", r.get("details", ""))
-            mid = r.get("id", "")[:8]
-            print(f"  [{mid}] ({layer}, {score:.3f}) {mem}")
-        print(f"\n  {len(results)} result(s)")
+        out = dict(result) if isinstance(result, dict) else {}
+        out["results"] = fused
+        _json_out(out)
+        return
+
+    if not fused:
+        print("No results found.")
+        return
+    for r in fused:
+        score = r.get("composite_score", r.get("score", 0))
+        layer = r.get("layer", "sml")
+        mem = r.get("memory", r.get("details", ""))
+        mid = (r.get("id") or "")[:8]
+        src = r.get("source", "personal")
+        tag = "repo " if src == "repo" else "self "
+        print(f"  [{mid}] {tag}({layer}, {score:.3f}) {mem}")
+    print(f"\n  {len(fused)} result(s)")
 
 
 def cmd_list(args: argparse.Namespace) -> None:
@@ -1561,6 +1776,57 @@ def build_parser() -> argparse.ArgumentParser:
     p_handoff.add_argument("--output", "-o", help="Optional path to write the handoff JSON")
     p_handoff.add_argument("--json", action="store_true", help="JSON output")
 
+    # link / unlink / links — personal vs repo context
+    p_link = sub.add_parser(
+        "link",
+        help="Link a git repo: create <repo>/.dhee/, install hooks, share context via git",
+    )
+    p_link.add_argument("path", nargs="?", default=".", help="Repo path (default: cwd)")
+    p_link.add_argument("--json", action="store_true", help="JSON output")
+
+    p_unlink = sub.add_parser(
+        "unlink", help="Remove this repo from the local link registry"
+    )
+    p_unlink.add_argument("path", nargs="?", default=".", help="Repo path (default: cwd)")
+    p_unlink.add_argument("--keep-hooks", action="store_true", help="Leave the git hooks in place")
+    p_unlink.add_argument("--json", action="store_true", help="JSON output")
+
+    p_links = sub.add_parser("links", help="List repos linked on this machine")
+    p_links.add_argument("--json", action="store_true", help="JSON output")
+
+    # promote / demote — move things between personal and repo context
+    p_promote = sub.add_parser(
+        "promote",
+        help="Copy a personal memory into a linked repo's shared context",
+    )
+    p_promote.add_argument("memory_id", help="Personal memory id")
+    p_promote.add_argument("--repo", help="Target repo path (default: linked repo containing cwd)")
+    p_promote.add_argument("--kind", default="learning", help="Entry kind (learning, decision, file_note, ...)")
+    p_promote.add_argument("--title", help="Override the inferred entry title")
+    p_promote.add_argument("--json", action="store_true", help="JSON output")
+
+    p_demote = sub.add_parser(
+        "demote", help="Copy a repo entry into personal memory as a learning"
+    )
+    p_demote.add_argument("entry_id", help="Repo entry id")
+    p_demote.add_argument("--repo", help="Source repo path (default: linked repo containing cwd)")
+    p_demote.add_argument("--user-id", default="default", help="User ID")
+    p_demote.add_argument("--json", action="store_true", help="JSON output")
+
+    # context — inspect / refresh a repo's shared context
+    p_context = sub.add_parser("context", help="Inspect or refresh a linked repo's shared context")
+    p_context.add_argument(
+        "context_action",
+        nargs="?",
+        choices=["list", "show", "delete", "refresh", "check"],
+        default="list",
+        help="Subcommand (default: list)",
+    )
+    p_context.add_argument("entry_id", nargs="?", help="Entry id for show/delete")
+    p_context.add_argument("--repo", help="Repo path (default: linked repo containing cwd)")
+    p_context.add_argument("--quiet", action="store_true", help="No output on refresh (for git hooks)")
+    p_context.add_argument("--json", action="store_true", help="JSON output")
+
     # thread-state
     p_thread = sub.add_parser("thread-state", help="Read or update live thread continuity state")
     p_thread.add_argument("--thread-id", required=True, help="Harness or app thread identifier")
@@ -1635,7 +1901,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_install.add_argument(
         "--harness",
-        choices=["all", "claude_code", "codex", "gstack"],
+        choices=["all", "claude_code", "codex", "gstack", "cursor"],
         default=None,
         help="Which harnesses to configure (default: all if no positional target given)",
     )
@@ -1659,7 +1925,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_harness.add_argument(
         "--harness",
-        choices=["all", "claude_code", "codex", "gstack"],
+        choices=["all", "claude_code", "codex", "gstack", "cursor"],
         default="all",
         help="Harness target",
     )
@@ -1821,19 +2087,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_qr.add_argument("--share", action="store_true", help="Emit customer-shareable redacted Markdown")
     p_qr.add_argument("--json", action="store_true", help="JSON output")
 
-    # benchmark
-    sub.add_parser("benchmark", help="Run performance benchmarks")
 
     # uninstall
     sub.add_parser("uninstall", help="Remove ~/.dhee directory")
-
-    # ui — Sankhya web frontend
-    try:
-        from dhee.ui.cli import register as _register_ui
-
-        _register_ui(sub)
-    except Exception:
-        pass
 
     # onboard — interactive provider + key wizard (called by install.sh)
     try:
@@ -1843,7 +2099,7 @@ def build_parser() -> argparse.ArgumentParser:
     except Exception:
         pass
 
-    # update — pull latest release + rebuild UI
+    # update — pull latest release
     try:
         from dhee.cli_update import register as _register_update
 
@@ -1869,6 +2125,12 @@ COMMAND_MAP = {
     "import": cmd_import,
     "why": cmd_why,
     "handoff": cmd_handoff,
+    "link": cmd_link,
+    "unlink": cmd_unlink,
+    "links": cmd_links,
+    "promote": cmd_promote,
+    "demote": cmd_demote,
+    "context": cmd_context,
     "thread-state": cmd_thread_state,
     "shared-task": cmd_shared_task,
     "status": cmd_status,

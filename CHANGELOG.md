@@ -4,6 +4,44 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased — Developer Brain split
+
+- Public Dhee is now positioned and packaged as **Dhee Developer Brain**:
+  local memory, handoff, harness setup, and git-backed repo context.
+- Removed the public web UI package and `dhee ui` command surface. The
+  enterprise dashboard and commercial code now live in the private
+  `dhee-enterprise` repository.
+- Added repo-shared context commands: `dhee link`, `dhee unlink`,
+  `dhee links`, `dhee promote`, `dhee demote`, and `dhee context`.
+- Repo-shared context uses append-only `.dhee/context/entries.jsonl` with
+  conflict detection for concurrent developer edits.
+
+## [6.1.0] - 2026-04-24 — Injection cleanup
+
+Three surgical fixes to the `<dhee v="1">` UserPromptSubmit injection so
+stale and irrelevant context never leaks into a turn.
+
+- `dhee/db/sqlite_analytics.py` — new `close_stale_shared_tasks()` bulk
+  closes any `status='active'` row whose `updated_at` is older than the
+  configured window (default 24h). ISO-8601 strings sort lexicographically
+  in SQLite, so the comparison is index-friendly with no per-row parsing.
+- `dhee/core/shared_tasks.py` — `shared_task_snapshot()` now calls the
+  bulk close before resolving, and adds a strict repo filter via
+  `_task_matches_repo()` so a task anchored on a sibling repo never
+  surfaces in the active workspace's snapshot.
+- `dhee/router/edit_ledger.py` — `record()` now stamps `DHEE_SESSION_ID`
+  and the recording cwd; `summarise()` filters by session, repo, and a
+  6-hour freshness window, and unconditionally drops `/tmp/`,
+  `/private/tmp/`, and `/var/folders/` paths. Backward-compat: rows
+  missing the new fields lapse out via the freshness window.
+- `dhee/hooks/claude_code/__main__.py` — `handle_user_prompt` now gates
+  the `<shared>` block on per-turn embedder cosine similarity between
+  the prompt and the task title + last result digest. Default threshold
+  0.50, override via `DHEE_SHARED_RELEVANCE_THRESHOLD`. Fails closed on
+  embedder errors — better to drop than re-emit the noise.
+- Tests: `tests/test_oss_61_quickfix.py` covers the three fixes
+  end-to-end (auto-close, repo filter, ledger filters, relevance gate).
+
 ## [5.1.0] - 2026-04-21 — gstack adapter
 
 Third first-class harness target: `dhee install gstack`. gstack (Garry
