@@ -1,0 +1,234 @@
+from __future__ import annotations
+
+import pytest
+
+from dhee.core.learnings import LearningExchange
+from dhee.fs import ContextWorkspace
+from dhee.fs.types import DheeFSEntry, DheeMount
+
+
+def make_workspace(tmp_path, **kwargs):
+    exchange = kwargs.pop("learning_exchange", None) or LearningExchange(data_dir=tmp_path / "learnings")
+    return ContextWorkspace(
+        repo=str(tmp_path),
+        user_id="test-user",
+        agent_id="test-agent",
+        learning_exchange=exchange,
+        **kwargs,
+    )
+
+
+def test_shell_lists_learning_status_dirs(tmp_path):
+    ws = make_workspace(tmp_path)
+
+    result = ws.execute("ls /learnings")
+
+    assert result.ok
+    assert "candidates/" in result.stdout
+    assert "promoted/" in result.stdout
+    assert result.data["entries"][0]["kind"] == "dir"
+
+
+def test_shell_cat_grep_and_why_learning(tmp_path):
+    exchange = LearningExchange(data_dir=tmp_path / "learnings")
+    candidate = exchange.submit(
+        title="Parser debugging",
+        body="When parser errors look impossible, inspect the generated token stream first.",
+        kind="workflow",
+        source_agent_id="hermes",
+        source_harness="test",
+        confidence=0.8,
+    )
+    ws = make_workspace(tmp_path, learning_exchange=exchange)
+
+    cat_result = ws.execute(f"cat /learnings/candidates/{candidate.id}.md")
+    grep_result = ws.execute("grep token /learnings/candidates")
+    why_result = ws.execute(f"why /learnings/candidates/{candidate.id}.md")
+
+    assert cat_result.ok
+    assert "# Parser debugging" in cat_result.stdout
+    assert grep_result.ok
+    assert candidate.id in grep_result.stdout
+    assert why_result.ok
+    assert "source_agent_id: hermes" in why_result.stdout
+
+
+def test_promote_moves_candidate_to_promoted(tmp_path):
+    exchange = LearningExchange(data_dir=tmp_path / "learnings")
+    candidate = exchange.submit(
+        title="Use focused tests",
+        body="Run the narrow test first before broad regression suites.",
+        confidence=0.2,
+    )
+    ws = make_workspace(tmp_path, learning_exchange=exchange)
+
+    result = ws.execute(f"promote /learnings/candidates/{candidate.id}.md")
+
+    assert result.ok
+    assert exchange.get(candidate.id).status == "promoted"
+    assert candidate.id in ws.execute("ls /learnings/promoted").stdout
+
+
+def test_promote_accepts_dhee_prefixed_learning_path(tmp_path):
+    exchange = LearningExchange(data_dir=tmp_path / "learnings")
+    candidate = exchange.submit(title="Alias path", body="Dhee-prefixed paths should work.")
+    ws = make_workspace(tmp_path, learning_exchange=exchange)
+
+    result = ws.execute(f"promote /dhee/learnings/candidates/{candidate.id}.md")
+
+    assert result.ok
+    assert exchange.get(candidate.id).status == "promoted"
+
+
+def test_learning_paths_reject_trailing_garbage(tmp_path):
+    exchange = LearningExchange(data_dir=tmp_path / "learnings")
+    candidate = exchange.submit(title="Strict paths", body="Trailing segments should not alias a learning.")
+    ws = make_workspace(tmp_path, learning_exchange=exchange)
+
+    result = ws.execute(f"cat /learnings/candidates/{candidate.id}.md/extra")
+
+    assert result.ok is False
+    assert result.exit_code == 2
+
+
+def test_single_path_commands_reject_extra_arguments(tmp_path):
+    ws = make_workspace(tmp_path)
+
+    result = ws.execute("cat /learnings /handoff")
+
+    assert result.ok is False
+    assert "exactly one path" in result.stderr
+
+
+def test_reject_accepts_quoted_reason(tmp_path):
+    exchange = LearningExchange(data_dir=tmp_path / "learnings")
+    candidate = exchange.submit(title="Too broad", body="This should not be promoted yet.")
+    ws = make_workspace(tmp_path, learning_exchange=exchange)
+
+    result = ws.execute(f'reject /learnings/candidates/{candidate.id}.md "needs better evidence"')
+
+    assert result.ok
+    rejected = exchange.get(candidate.id)
+    assert rejected.status == "rejected"
+    assert rejected.rejected_reason == "needs better evidence"
+
+
+def test_longest_prefix_mount_resolution(tmp_path):
+    class TestPtrMount(DheeMount):
+        prefix = "/router/ptr"
+
+        def list(self, path):
+            return [DheeFSEntry(name="sentinel", path="/router/ptr/sentinel")]
+
+    ws = make_workspace(tmp_path)
+    ws.mounts.append(TestPtrMount(ws))
+
+    assert ws.resolve_mount("/router/ptr/R-abc123def4").prefix == "/router/ptr"
+
+
+def test_router_pointer_read_round_trips_raw_content(tmp_path, monkeypatch):
+    monkeypatch.setenv("DHEE_ROUTER_PTR_DIR", str(tmp_path / "ptrs"))
+    monkeypatch.setenv("DHEE_ROUTER_SESSION_ID", "test-session")
+    from dhee.router import ptr_store
+
+    stored = ptr_store.store("raw pointer content", tool="Read", meta={"test": True})
+    ws = make_workspace(tmp_path)
+
+    result = ws.execute(f"cat /router/ptr/{stored.ptr}")
+
+    assert result.ok
+    assert result.stdout == "raw pointer content"
+    records = ptr_store.iter_expansion_records()
+    assert any(row["ptr"] == stored.ptr and row.get("tool") == "dhee_shell" for row in records)
+
+
+class FakeArtifactDB:
+    def list_artifacts(self, **_kwargs):
+        return [
+            {
+                "artifact_id": "art_1",
+                "filename": "notes.md",
+                "mime_type": "text/markdown",
+                "lifecycle_state": "indexed",
+                "extraction_count": 1,
+            }
+        ]
+
+    def get_artifact(self, artifact_id):
+        if artifact_id != "art_1":
+            return None
+        return {
+            "artifact_id": "art_1",
+            "filename": "notes.md",
+            "mime_type": "text/markdown",
+            "lifecycle_state": "indexed",
+            "extractions": [{"extraction_source": "host", "extracted_text": "Auth migration notes"}],
+            "chunks": [{"chunk_index": 0, "content": "Auth migration chunk"}],
+        }
+
+
+def test_artifacts_mount_exposes_existing_artifacts(tmp_path):
+    ws = make_workspace(tmp_path, db=FakeArtifactDB())
+
+    listing = ws.execute("ls /artifacts")
+    content = ws.execute("cat /artifacts/art_1.md")
+
+    assert listing.ok
+    assert "art_1.md" in listing.stdout
+    assert content.ok
+    assert "Auth migration notes" in content.stdout
+
+
+def test_mcp_shell_handler_returns_cli_shape(tmp_path, monkeypatch):
+    pytest.importorskip("mcp")
+    monkeypatch.setenv("DHEE_DATA_DIR", str(tmp_path / "data"))
+    import dhee.mcp_slim as slim
+
+    monkeypatch.setattr(slim, "_get_db", lambda: None)
+
+    result = slim._handle_dhee_shell(
+        {
+            "command": "ls /learnings",
+            "repo": str(tmp_path),
+            "user_id": "test-user",
+            "agent_id": "test-agent",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["exit_code"] == 0
+    assert "stdout" in result
+    assert "entries" in result["data"]
+
+
+class FakeContextSource:
+    name = "slack"
+
+    def list(self, path):
+        return [DheeFSEntry(name="engineering.md", path="/sources/slack/engineering.md")]
+
+    def read(self, path):
+        if path == "/sources/slack/engineering.md":
+            return "Parser outage notes from Slack"
+        return "Slack source root"
+
+    def search(self, path, query):
+        return [{"path": "/sources/slack/engineering.md", "text": "Parser outage notes from Slack"}]
+
+
+def test_sources_root_delegates_to_registered_context_sources(tmp_path):
+    ws = make_workspace(tmp_path, context_sources=[FakeContextSource()])
+
+    root = ws.execute("ls /sources")
+    listing = ws.execute("ls /sources/slack")
+    content = ws.execute("cat /sources/slack/engineering.md")
+    grep = ws.execute("grep outage /sources/slack")
+
+    assert root.ok
+    assert "slack/" in root.stdout
+    assert listing.ok
+    assert "engineering.md" in listing.stdout
+    assert content.ok
+    assert "Parser outage notes" in content.stdout
+    assert grep.ok
+    assert "Parser outage" in grep.stdout

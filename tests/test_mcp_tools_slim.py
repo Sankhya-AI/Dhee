@@ -32,6 +32,7 @@ EXPECTED_TOOL_NAMES = {
     "dhee_submit_learning",
     "dhee_search_learnings",
     "dhee_promote_learning",
+    "dhee_shell",
     "dhee_list_assets",
     "dhee_get_asset",
     "dhee_sync_codex_artifacts",

@@ -373,7 +373,6 @@ class CoreMemory:
             mem_meta = mem.get("metadata") or {}
             if isinstance(mem_meta, str):
                 try:
-                    import json
                     mem_meta = json.loads(mem_meta)
                 except Exception:
                     mem_meta = {}

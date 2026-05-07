@@ -84,6 +84,38 @@ def cmd_setup(args: argparse.Namespace) -> None:
     run_setup()
 
 
+def cmd_shell(args: argparse.Namespace) -> None:
+    """Run a DheeFS virtual shell command."""
+    from dhee.fs import ContextWorkspace
+
+    command = " ".join(getattr(args, "shell_command", []) or []).strip()
+    if not command:
+        print("Error: shell command is required", file=sys.stderr)
+        sys.exit(2)
+
+    repo = getattr(args, "repo", None)
+    if repo is None:
+        repo = os.getcwd()
+    workspace = ContextWorkspace(
+        repo=repo,
+        user_id=getattr(args, "user_id", "default"),
+        agent_id=getattr(args, "agent_id", None) or "cli",
+        db=_get_db(),
+        workspace_id=getattr(args, "workspace_id", None) or os.path.abspath(os.path.expanduser(repo)),
+    )
+    result = workspace.execute(command)
+    if getattr(args, "json", False):
+        _json_out(result.to_dict())
+    else:
+        stream = sys.stderr if result.exit_code else sys.stdout
+        if result.stdout:
+            print(result.stdout, file=stream)
+        elif result.stderr:
+            print(result.stderr, file=sys.stderr)
+    if result.exit_code:
+        sys.exit(result.exit_code)
+
+
 # ---------------------------------------------------------------------------
 # repo-link commands — personal vs repo context
 # ---------------------------------------------------------------------------
@@ -2073,6 +2105,18 @@ def build_parser() -> argparse.ArgumentParser:
     # setup
     sub.add_parser("setup", help="Interactive setup wizard")
 
+    # shell — DheeFS virtual learning/context space
+    p_shell = sub.add_parser(
+        "shell",
+        help="Run a DheeFS virtual shell command, e.g. `dhee shell \"ls /learnings\"`",
+    )
+    p_shell.add_argument("shell_command", nargs=argparse.REMAINDER, help="Command to run in DheeFS")
+    p_shell.add_argument("--repo", help="Repository/workspace root (default: cwd)")
+    p_shell.add_argument("--workspace-id", help="Explicit workspace id override")
+    p_shell.add_argument("--user-id", default="default", help="User ID")
+    p_shell.add_argument("--agent-id", default="cli", help="Agent ID for mutating commands")
+    p_shell.add_argument("--json", action="store_true", help="JSON output")
+
     # remember / add (aliases)
     p_remember = sub.add_parser("remember", help="Store a fact or preference")
     p_remember.add_argument("text", help="Memory content")
@@ -2625,6 +2669,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 COMMAND_MAP = {
     "setup": cmd_setup,
+    "shell": cmd_shell,
     "remember": cmd_add,   # alias
     "add": cmd_add,
     "recall": cmd_search,  # alias

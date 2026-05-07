@@ -28,6 +28,7 @@
 <p align="center">
   <a href="#what-is-dhee">What is Dhee</a> ·
   <a href="#shared-agent-learning">Shared Agent Learning</a> ·
+  <a href="#dheefs">DheeFS</a> ·
   <a href="#quick-start">Quick Start</a> ·
   <a href="#repo-shared-context">Repo-Shared Context</a> ·
   <a href="#benchmarks">Benchmarks</a> ·
@@ -96,6 +97,41 @@ This is the product contract: **with Dhee, a learning proven in one agent can be
 - **Claude Code native:** Dhee uses Claude Code hooks, MCP, and router enforcement. This is the strongest integration surface.
 - **Codex native:** Codex does not expose Claude-style pre-tool hooks here. Dhee uses the closest native Codex surfaces: `~/.codex/config.toml`, global `~/.codex/AGENTS.md`, MCP server instructions, and Codex session-stream auto-sync.
 - **Promotion gate:** Imported Hermes skills and session traces are candidates by default. Rejected or archived learnings remain auditable but are excluded from retrieval.
+
+---
+
+## <span id="dheefs">DheeFS — one local learning space every agent already understands</span>
+
+Agents already understand files and shell verbs. DheeFS exposes Dhee's memory, router, handoff, artifacts, shared tasks, and learning exchange as one virtual context space:
+
+```bash
+dhee shell "ls /learnings"
+dhee shell "cat /handoff/latest.md"
+dhee shell "grep parser /learnings/promoted"
+dhee shell "cat /router/ptr/R-abc123"
+```
+
+The first version is a virtual shell, not FUSE. It intentionally supports a small approved command set: `ls`, `cat`, `grep`, `why`, `promote`, `reject`, `broadcast`, `provision`, and `snapshot`. The same surface is available through MCP as `dhee_shell(command)` and through Python:
+
+```python
+from dhee import ContextWorkspace
+
+result = ContextWorkspace(repo=".").execute("provision 'fix parser bug'")
+print(result.stdout)
+```
+
+External systems such as Slack, Gmail, and Notion are future **context sources** under `/sources`, not generic remote action backends. They can sync and search evidence into Dhee artifacts, learnings, and handoffs without making the core install depend on SaaS SDKs.
+
+```text
+/learnings   candidates, promoted, rejected, archived
+/handoff     latest repo/session continuity
+/router/ptr  raw pointer lookup when explicitly requested
+/artifacts   host-parsed files and chunks
+/repo        .dhee/context decisions and conventions
+/agents      Hermes, Claude Code, Codex views
+/shared      inbox, broadcasts, shared task results
+/sources     optional future Slack/Gmail/Notion context mounts
+```
 
 ---
 
@@ -402,6 +438,13 @@ git clone https://github.com/Sankhya-AI/Dhee.git
 cd Dhee && ./scripts/bootstrap_dev_env.sh
 source .venv-dhee/bin/activate
 pytest
+```
+
+For the same full-suite path CI expects, including the local Rust acceleration
+extension and async test plugin:
+
+```bash
+./scripts/verify_full_suite.sh
 ```
 
 ---

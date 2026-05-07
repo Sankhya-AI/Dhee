@@ -222,6 +222,25 @@ TOOLS = [
         },
     ),
     Tool(
+        name="dhee_shell",
+        description=(
+            "Run one approved DheeFS virtual shell command over Dhee's learning/context space. "
+            "Supports ls, cat, grep, why, promote, reject, broadcast, provision, and snapshot. "
+            "No bash pipes or native filesystem access."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "DheeFS command, e.g. `ls /learnings`"},
+                "repo": {"type": "string", "description": "Repo/workspace path"},
+                "workspace_id": {"type": "string", "description": "Explicit workspace id override"},
+                "user_id": {"type": "string", "description": "User identifier (default: default)"},
+                "agent_id": {"type": "string", "description": "Agent identity for mutating commands"},
+            },
+            "required": ["command"],
+        },
+    ),
+    Tool(
         name="dhee_inbox",
         description=(
             "Fetch unread live shared-context broadcasts for this active agent. "
@@ -671,6 +690,22 @@ def _handle_dhee_promote_learning(args: Dict[str, Any]) -> Dict[str, Any]:
     return {"learning": candidate.to_dict()}
 
 
+def _handle_dhee_shell(args: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee.fs import ContextWorkspace
+
+    repo = args.get("repo")
+    if repo:
+        repo = os.path.abspath(str(repo))
+    workspace = ContextWorkspace(
+        repo=repo,
+        user_id=str(args.get("user_id") or "default"),
+        agent_id=_default_agent_id(args),
+        db=_get_db(),
+        workspace_id=args.get("workspace_id") or repo,
+    )
+    return workspace.execute(str(args.get("command") or "")).to_dict()
+
+
 def _handle_checkpoint(args: Dict[str, Any]) -> Dict[str, Any]:
     """Session lifecycle. Delegates to DheePlugin.checkpoint()."""
     summary = args.get("summary", "")
@@ -787,6 +822,7 @@ HANDLERS = {
     "dhee_submit_learning": _handle_dhee_submit_learning,
     "dhee_search_learnings": _handle_dhee_search_learnings,
     "dhee_promote_learning": _handle_dhee_promote_learning,
+    "dhee_shell": _handle_dhee_shell,
     "dhee_inbox": _handle_dhee_inbox,
     "dhee_broadcast": _handle_dhee_broadcast,
     "checkpoint": _handle_checkpoint,

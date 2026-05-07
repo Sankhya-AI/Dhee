@@ -741,6 +741,25 @@ TOOLS = [
         },
     ),
     Tool(
+        name="dhee_shell",
+        description=(
+            "Run one approved DheeFS virtual shell command over Dhee's learning/context space. "
+            "Supports ls, cat, grep, why, promote, reject, broadcast, provision, and snapshot. "
+            "No bash pipes or native filesystem access."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "DheeFS command, e.g. `cat /handoff/latest.md`"},
+                "repo": {"type": "string", "description": "Repo/workspace path"},
+                "workspace_id": {"type": "string", "description": "Explicit workspace id override"},
+                "user_id": {"type": "string", "description": "User identifier (default: default)"},
+                "agent_id": {"type": "string", "description": "Agent identity for mutating commands"},
+            },
+            "required": ["command"],
+        },
+    ),
+    Tool(
         name="dhee_list_assets",
         description=(
             "List host-parsed artifacts stored by Dhee. Returns compact "
@@ -1538,6 +1557,22 @@ def _handle_dhee_promote_learning(_memory, arguments: Dict[str, Any]) -> Dict[st
     return {"learning": candidate.to_dict()}
 
 
+def _handle_dhee_shell(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee.fs import ContextWorkspace
+
+    repo = arguments.get("repo")
+    if repo:
+        repo = os.path.abspath(str(repo))
+    workspace = ContextWorkspace(
+        repo=repo,
+        user_id=_default_user_id(arguments),
+        agent_id=_default_agent_id(arguments),
+        db=get_db(),
+        workspace_id=arguments.get("workspace_id") or repo,
+    )
+    return workspace.execute(str(arguments.get("command") or "")).to_dict()
+
+
 def _handle_dhee_list_assets(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
     _maybe_sync_codex_runtime(arguments)
     db = get_db()
@@ -2025,6 +2060,7 @@ HANDLERS = {
     "dhee_submit_learning": _handle_dhee_submit_learning,
     "dhee_search_learnings": _handle_dhee_search_learnings,
     "dhee_promote_learning": _handle_dhee_promote_learning,
+    "dhee_shell": _handle_dhee_shell,
     "dhee_list_assets": _handle_dhee_list_assets,
     "dhee_get_asset": _handle_dhee_get_asset,
     "dhee_sync_codex_artifacts": _handle_dhee_sync_codex_artifacts,
@@ -2045,7 +2081,7 @@ HANDLERS = {
 _MEMORY_FREE_TOOLS = {
     "get_last_session", "save_session_digest",
     "record_outcome", "reflect", "store_intention",
-    "dhee_submit_learning", "dhee_search_learnings", "dhee_promote_learning",
+    "dhee_submit_learning", "dhee_search_learnings", "dhee_promote_learning", "dhee_shell",
     "dhee_list_assets", "dhee_get_asset", "dhee_sync_codex_artifacts", "dhee_why", "dhee_thread_state", "dhee_shared_task", "dhee_shared_task_results", "dhee_inbox", "dhee_broadcast", "dhee_handoff",
     "dhee_read", "dhee_bash", "dhee_agent", "dhee_grep", "dhee_expand_result",
 }
