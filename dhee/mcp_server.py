@@ -30,6 +30,11 @@ Tools:
 27. dhee_sync_codex_artifacts — Ingest Codex session logs into the artifact store
 28. dhee_why              — Explain memory/artifact provenance and lineage
 29. dhee_handoff          — Emit a structured resume snapshot for a new harness
+30. dhee_inbox            — Fetch unread live shared-context broadcasts
+31. dhee_broadcast        — Publish live shared context to the workspace line
+32. dhee_submit_learning  — Submit an auditable learning candidate
+33. dhee_search_learnings — Search promoted learnings or candidates on request
+34. dhee_promote_learning — Promote a learning after gate/approval
 """
 
 import json
@@ -51,6 +56,24 @@ from dhee.configs.base import (
 )
 
 logger = logging.getLogger(__name__)
+
+_MCP_CONTEXT_FIRST_INSTRUCTIONS = (
+    "Dhee is the native memory, context-router, and shared continuity layer. "
+    "For substantive repo/workspace tasks, consult Dhee before reconstructing "
+    "context from files or shell output: call dhee_handoff with the absolute "
+    "repo path, then inspect dhee_shared_task and dhee_shared_task_results for "
+    "active shared work, then call dhee_inbox for unread live broadcasts. "
+    "When the user says continue, resume, previous, shared "
+    "context, or UI context, treat Dhee handoff/shared-task results as the "
+    "source of continuity. Use dhee_broadcast to send live context another "
+    "agent or project must see immediately. Search promoted playbooks with "
+    "dhee_search_learnings when prior Dhee/Hermes evolution may apply. Prefer "
+    "dhee_read, dhee_grep, and dhee_bash for large reusable reads/searches/"
+    "commands so raw output stays behind pointers. When DHEE_HARNESS=codex, "
+    "Dhee also syncs Codex session logs before context/collaboration reads so "
+    "Codex native tool progress becomes shared Dhee context without a separate "
+    "middleman agent."
+)
 
 
 def _default_user_id(args: Dict[str, Any]) -> str:
@@ -85,13 +108,19 @@ def _maybe_sync_codex_runtime(arguments: Dict[str, Any]) -> Dict[str, Any] | Non
     collaboration / handoff / artifact queries so the next MCP round sees
     post-tool results without a manual sync step.
     """
+    harness_arg = arguments.get("harness")
     harness = str(
-        arguments.get("harness")
+        harness_arg
         or os.environ.get("DHEE_HARNESS")
         or os.environ.get("DHEE_AGENT_ID")
         or ""
     ).strip().lower()
     if harness != "codex":
+        return None
+    auto_sync = arguments.get("codex_auto_sync")
+    if auto_sync is None:
+        auto_sync = os.environ.get("DHEE_CODEX_AUTO_SYNC")
+    if harness_arg is None and str(auto_sync or "").strip().lower() not in {"1", "true", "yes", "on"}:
         return None
     try:
         from dhee.core.artifacts import ArtifactManager
@@ -273,7 +302,7 @@ def get_buddhi():
 
 # ── MCP Server ──
 
-server = Server("dhee")
+server = Server("dhee", instructions=_MCP_CONTEXT_FIRST_INSTRUCTIONS)
 
 # Tool definitions — growing contract, keep tests in sync
 TOOLS = [
@@ -305,7 +334,13 @@ TOOLS = [
     ),
     Tool(
         name="search_memory",
-        description="Search memory for relevant memories by semantic query. The UserPromptSubmit hook handles background search automatically — call this tool only for explicit user recall requests such as 'what did we discuss about X?' or 'recall my preference for Y'.",
+        description=(
+            "Search memory for relevant memories by semantic query. Use before "
+            "local reconstruction when prior repo/user context may exist, and "
+            "for explicit user recall requests such as 'what did we discuss "
+            "about X?' or 'recall my preference for Y'. The Claude Code "
+            "UserPromptSubmit hook also handles background search automatically."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -352,19 +387,31 @@ TOOLS = [
     ),
     Tool(
         name="dhee_context",
-        description="HyperAgent session bootstrap. Call at conversation start to get EVERYTHING: performance trends, synthesized insights from prior runs, relevant skills, pending intentions, proactive warnings, and top memories. This single call turns any agent into a HyperAgent with persistent memory and self-improvement awareness.",
+        description=(
+            "HyperAgent session bootstrap. Call at conversation start, before "
+            "local reconstruction, to get performance trends, synthesized "
+            "insights from prior runs, relevant skills, pending intentions, "
+            "proactive warnings, and top memories. This single call turns any "
+            "agent into a HyperAgent with persistent memory and self-improvement awareness."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
                 "user_id": {"type": "string", "description": "User identifier to load context for (default: 'default')"},
                 "task_description": {"type": "string", "description": "What the agent is about to work on — used to filter relevant insights, skills, and performance history"},
+                "repo": {"type": "string", "description": "Optional repo/workspace root to scope promoted learnings"},
                 "limit": {"type": "integer", "description": "Maximum number of memories to return (default: 10)"},
             },
         },
     ),
     Tool(
         name="get_last_session",
-        description="Get the most recent session digest to continue where the last agent left off. Returns full handoff context including linked memories.",
+        description=(
+            "Get the most recent session digest to continue where the last "
+            "agent left off. Search this before local reconstruction when a "
+            "repo task may have prior context. Returns full handoff context "
+            "including linked memories."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -644,6 +691,56 @@ TOOLS = [
         },
     ),
     Tool(
+        name="dhee_submit_learning",
+        description="Submit an auditable Dhee learning candidate. Candidates are never injected into context until promoted.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Short learning title"},
+                "body": {"type": "string", "description": "Reusable tactic, skill, outcome, or playbook"},
+                "kind": {"type": "string", "enum": ["skill", "heuristic", "policy", "contrast", "memory", "workflow", "playbook"], "description": "Learning kind"},
+                "source_agent_id": {"type": "string", "description": "Agent that discovered the learning"},
+                "source_harness": {"type": "string", "description": "Harness that produced the learning"},
+                "task_type": {"type": "string", "description": "Task category"},
+                "repo": {"type": "string", "description": "Optional repo/workspace root"},
+                "scope": {"type": "string", "enum": ["personal", "repo", "workspace"], "description": "Desired scope after promotion"},
+                "confidence": {"type": "number", "description": "Initial confidence 0.0-1.0"},
+                "utility": {"type": "number", "description": "Initial utility 0.0-1.0"},
+                "evidence": {"type": "array", "items": {"type": "object"}, "description": "Supporting evidence records"},
+            },
+            "required": ["title", "body"],
+        },
+    ),
+    Tool(
+        name="dhee_search_learnings",
+        description="Search promoted Dhee learnings. Set include_candidates=true only for explicit review or approval workflows.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Learning search query"},
+                "task_type": {"type": "string", "description": "Optional task type filter"},
+                "repo": {"type": "string", "description": "Optional repo/workspace root"},
+                "status": {"type": "string", "enum": ["candidate", "promoted", "rejected", "archived"], "description": "Status filter when candidates are included"},
+                "include_candidates": {"type": "boolean", "description": "Include candidate learnings in search"},
+                "limit": {"type": "integer", "description": "Maximum results (default 10)"},
+            },
+        },
+    ),
+    Tool(
+        name="dhee_promote_learning",
+        description="Promote a learning after gate/approval. Repo and workspace promotions require explicit approval.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "learning_id": {"type": "string", "description": "Learning candidate id"},
+                "scope": {"type": "string", "enum": ["personal", "repo", "workspace"], "description": "Promotion scope"},
+                "repo": {"type": "string", "description": "Repo root when scope=repo"},
+                "approved_by": {"type": "string", "description": "Approval identity for repo/workspace or manual promotion"},
+            },
+            "required": ["learning_id"],
+        },
+    ),
+    Tool(
         name="dhee_list_assets",
         description=(
             "List host-parsed artifacts stored by Dhee. Returns compact "
@@ -798,10 +895,66 @@ TOOLS = [
         },
     ),
     Tool(
+        name="dhee_inbox",
+        description=(
+            "Fetch unread live shared-context broadcasts for this active agent. "
+            "Call this after dhee_handoff/shared-task checks and after substantial "
+            "tool work on shared tasks; the response includes a signal when another "
+            "party has broadcast context that must be read before continuing."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string", "description": "Repo/workspace path used to resolve the live workspace"},
+                "workspace_id": {"type": "string", "description": "Explicit workspace id or path override"},
+                "project_id": {"type": "string", "description": "Optional project/channel scope"},
+                "channel": {"type": "string", "description": "Optional channel filter"},
+                "consumer_id": {"type": "string", "description": "Stable consumer id; defaults to agent/session identity"},
+                "agent_id": {"type": "string", "description": "Agent identity for own-message filtering"},
+                "harness": {"type": "string", "description": "Harness/runtime id, e.g. codex or claude-code"},
+                "session_id": {"type": "string", "description": "Native active session id"},
+                "limit": {"type": "integer", "description": "Maximum unread messages to return (default 10, max 50)"},
+                "mark_read": {"type": "boolean", "description": "Mark returned messages as read (default true)"},
+                "include_own": {"type": "boolean", "description": "Include messages emitted by this same agent/session"},
+                "user_id": {"type": "string", "description": "User identifier (default: 'default')"},
+            },
+        },
+    ),
+    Tool(
+        name="dhee_broadcast",
+        description=(
+            "Publish live shared context to the workspace line so other active "
+            "agents and UI subscribers receive it immediately. Use for handoffs, "
+            "discoveries, blocker notices, and cross-project messages that should "
+            "not wait for session end."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "body": {"type": "string", "description": "Broadcast body/message"},
+                "title": {"type": "string", "description": "Short title"},
+                "repo": {"type": "string", "description": "Repo/workspace path used to resolve the live workspace"},
+                "workspace_id": {"type": "string", "description": "Explicit workspace id or path override"},
+                "project_id": {"type": "string", "description": "Source project id"},
+                "target_project_id": {"type": "string", "description": "Optional target project id"},
+                "channel": {"type": "string", "description": "Optional channel, defaults to project/workspace"},
+                "message_kind": {"type": "string", "description": "Kind label, default broadcast"},
+                "session_id": {"type": "string", "description": "Native active session id"},
+                "task_id": {"type": "string", "description": "Related shared task id"},
+                "metadata": {"type": "object", "description": "Optional JSON metadata"},
+                "agent_id": {"type": "string", "description": "Agent identity publishing the broadcast"},
+                "harness": {"type": "string", "description": "Harness/runtime id, e.g. codex or claude-code"},
+                "user_id": {"type": "string", "description": "User identifier (default: 'default')"},
+            },
+            "required": ["body"],
+        },
+    ),
+    Tool(
         name="dhee_handoff",
         description=(
             "Emit a structured handoff snapshot for cross-harness or cross-machine "
-            "resume. Prefers live thread state when `thread_id` is provided; "
+            "resume. Use this before shell/file exploration on substantive "
+            "repo tasks. Prefers live thread state when `thread_id` is provided; "
             "otherwise falls back to the latest session digest plus active "
             "tasks/intentions, recent memories, and recent artifacts. Read-only and no-LLM."
         ),
@@ -1041,7 +1194,18 @@ def _handle_dhee_context(memory, args):
         task_description=task_description,
         memory=memory,
     )
-    return hyper_ctx.to_dict()
+    result = hyper_ctx.to_dict()
+    try:
+        from dhee.core.learnings import LearningExchange
+        result["learnings"] = LearningExchange().search(
+            query=task_description or "",
+            repo=args.get("repo"),
+            status="promoted",
+            limit=max(1, min(10, int(args.get("limit", 5) or 5))),
+        )
+    except Exception:
+        result["learnings"] = []
+    return result
 
 
 def _handle_get_last_session(_memory, args):
@@ -1325,6 +1489,53 @@ def _handle_store_intention(_memory, arguments: Dict[str, Any]) -> Dict[str, Any
         action_type=arguments.get("action_type", "remind"),
     )
     return {"stored": True, "intention": intention.to_dict()}
+
+
+def _handle_dhee_submit_learning(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee.core.learnings import LearningExchange
+
+    exchange = LearningExchange()
+    candidate = exchange.submit(
+        title=str(arguments.get("title") or ""),
+        body=str(arguments.get("body") or ""),
+        kind=str(arguments.get("kind") or "heuristic"),
+        source_agent_id=str(arguments.get("source_agent_id") or _default_agent_id(arguments)),
+        source_harness=str(arguments.get("source_harness") or os.environ.get("DHEE_HARNESS") or "mcp"),
+        task_type=arguments.get("task_type"),
+        repo=arguments.get("repo"),
+        scope=str(arguments.get("scope") or "personal"),
+        confidence=float(arguments.get("confidence", 0.5) or 0.5),
+        utility=float(arguments.get("utility", 0.0) or 0.0),
+        evidence=arguments.get("evidence") or [],
+        metadata={"user_id": _default_user_id(arguments)},
+    )
+    return {"learning": candidate.to_dict()}
+
+
+def _handle_dhee_search_learnings(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee.core.learnings import LearningExchange
+
+    rows = LearningExchange().search(
+        query=arguments.get("query") or "",
+        task_type=arguments.get("task_type"),
+        repo=arguments.get("repo"),
+        status=str(arguments.get("status") or "promoted"),
+        include_candidates=bool(arguments.get("include_candidates", False)),
+        limit=_bounded_limit(arguments, "limit", 10, 50),
+    )
+    return {"count": len(rows), "results": rows}
+
+
+def _handle_dhee_promote_learning(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee.core.learnings import LearningExchange
+
+    candidate = LearningExchange().promote(
+        str(arguments.get("learning_id") or ""),
+        scope=str(arguments.get("scope") or "personal"),
+        repo=arguments.get("repo"),
+        approved_by=arguments.get("approved_by"),
+    )
+    return {"learning": candidate.to_dict()}
 
 
 def _handle_dhee_list_assets(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -1697,6 +1908,70 @@ def _handle_dhee_shared_task_results(_memory, arguments: Dict[str, Any]) -> Dict
     }
 
 
+def _bounded_limit(arguments: Dict[str, Any], name: str, default: int, upper: int) -> int:
+    try:
+        return max(1, min(upper, int(arguments.get(name, default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _handle_dhee_inbox(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    _maybe_sync_codex_runtime(arguments)
+    from dhee.core.live_context import live_context_inbox
+
+    repo = arguments.get("repo")
+    if repo:
+        repo = os.path.abspath(str(repo))
+    return live_context_inbox(
+        get_db(),
+        user_id=_default_user_id(arguments),
+        repo=repo,
+        cwd=repo,
+        workspace_id=arguments.get("workspace_id") or repo,
+        project_id=arguments.get("project_id"),
+        channel=arguments.get("channel"),
+        consumer_id=arguments.get("consumer_id"),
+        agent_id=str(arguments.get("agent_id") or _default_agent_id(arguments)),
+        harness=str(arguments.get("harness") or os.environ.get("DHEE_HARNESS") or _default_agent_id(arguments)),
+        runtime_id=str(arguments.get("harness") or os.environ.get("DHEE_HARNESS") or _default_agent_id(arguments)),
+        session_id=arguments.get("session_id"),
+        native_session_id=arguments.get("session_id"),
+        limit=_bounded_limit(arguments, "limit", 10, 50),
+        mark_read=bool(arguments.get("mark_read", True)),
+        include_own=bool(arguments.get("include_own", False)),
+    )
+
+
+def _handle_dhee_broadcast(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    _maybe_sync_codex_runtime(arguments)
+    from dhee.core.live_context import broadcast_live_context
+
+    metadata = arguments.get("metadata")
+    if metadata is not None and not isinstance(metadata, dict):
+        return {"error": "metadata must be an object"}
+    repo = arguments.get("repo")
+    if repo:
+        repo = os.path.abspath(str(repo))
+    return broadcast_live_context(
+        get_db(),
+        user_id=_default_user_id(arguments),
+        body=str(arguments.get("body") or ""),
+        title=arguments.get("title"),
+        repo=repo,
+        cwd=repo,
+        workspace_id=arguments.get("workspace_id") or repo,
+        project_id=arguments.get("project_id"),
+        target_project_id=arguments.get("target_project_id"),
+        channel=arguments.get("channel"),
+        message_kind=str(arguments.get("message_kind") or "broadcast"),
+        session_id=arguments.get("session_id"),
+        task_id=arguments.get("task_id"),
+        metadata=metadata or {},
+        agent_id=str(arguments.get("agent_id") or _default_agent_id(arguments)),
+        harness=str(arguments.get("harness") or os.environ.get("DHEE_HARNESS") or _default_agent_id(arguments)),
+    )
+
+
 def _handle_dhee_read(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
     from dhee.router.handlers import handle_dhee_read
     return handle_dhee_read(arguments)
@@ -1747,6 +2022,9 @@ HANDLERS = {
     "record_outcome": _handle_record_outcome,
     "reflect": _handle_reflect,
     "store_intention": _handle_store_intention,
+    "dhee_submit_learning": _handle_dhee_submit_learning,
+    "dhee_search_learnings": _handle_dhee_search_learnings,
+    "dhee_promote_learning": _handle_dhee_promote_learning,
     "dhee_list_assets": _handle_dhee_list_assets,
     "dhee_get_asset": _handle_dhee_get_asset,
     "dhee_sync_codex_artifacts": _handle_dhee_sync_codex_artifacts,
@@ -1754,6 +2032,8 @@ HANDLERS = {
     "dhee_thread_state": _handle_dhee_thread_state,
     "dhee_shared_task": _handle_dhee_shared_task,
     "dhee_shared_task_results": _handle_dhee_shared_task_results,
+    "dhee_inbox": _handle_dhee_inbox,
+    "dhee_broadcast": _handle_dhee_broadcast,
     "dhee_handoff": _handle_dhee_handoff,
     "dhee_read": _handle_dhee_read,
     "dhee_bash": _handle_dhee_bash,
@@ -1765,7 +2045,8 @@ HANDLERS = {
 _MEMORY_FREE_TOOLS = {
     "get_last_session", "save_session_digest",
     "record_outcome", "reflect", "store_intention",
-    "dhee_list_assets", "dhee_get_asset", "dhee_sync_codex_artifacts", "dhee_why", "dhee_thread_state", "dhee_shared_task", "dhee_shared_task_results", "dhee_handoff",
+    "dhee_submit_learning", "dhee_search_learnings", "dhee_promote_learning",
+    "dhee_list_assets", "dhee_get_asset", "dhee_sync_codex_artifacts", "dhee_why", "dhee_thread_state", "dhee_shared_task", "dhee_shared_task_results", "dhee_inbox", "dhee_broadcast", "dhee_handoff",
     "dhee_read", "dhee_bash", "dhee_agent", "dhee_grep", "dhee_expand_result",
 }
 

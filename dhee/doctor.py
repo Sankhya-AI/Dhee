@@ -418,7 +418,7 @@ def _capabilities_section(router: dict[str, Any]) -> dict[str, Any]:
         "on SESSION_END — ships via dhee.harness.{base,claude_code,codex}",
         "M6.2 Multi-harness install: dhee install --harness {all,claude_code,codex}, "
         "dhee harness status/enable/disable; shared ~/.dhee kernel, Claude Code "
-        "via native hooks+MCP+router, Codex via MCP config + AGENTS.override.md "
+        "via native hooks+MCP+router, Codex via MCP config + AGENTS.md "
         "(dhee/harness/install.py)",
         "M6.3 Live Codex event-stream ingestion: dhee/core/codex_stream.py "
         "incrementally tails ~/.codex/sessions/**.jsonl with a persisted cursor, "

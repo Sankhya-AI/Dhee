@@ -159,8 +159,9 @@ fi
 
 # --- Done ---
 printf "\n${BOLD}${GREEN}Dhee is ready.${RESET}\n"
-printf "  Link a repo:   ${BOLD}dhee link /path/to/repo${RESET}\n"
-printf "  Update later:  ${BOLD}dhee update${RESET}\n\n"
-printf "${DIM}  Inspect:   dhee links | dhee context check${RESET}\n"
-printf "${DIM}  Memory:    dhee recall \"what changed?\" | dhee handoff${RESET}\n"
+printf "  Wire up a repo:  ${BOLD}cd /path/to/repo && dhee init${RESET}\n"
+printf "  Update later:    ${BOLD}dhee update${RESET}\n\n"
+printf "${DIM}  Status:    dhee status            (savings + brain health)${RESET}\n"
+printf "${DIM}  Recall:    dhee recall \"<query>\"   (your personal cross-repo brain)${RESET}\n"
+printf "${DIM}  Inbox:     dhee inbox             (live broadcasts from your other agents)${RESET}\n"
 printf "${DIM}  Remove:    dhee uninstall-hooks && rm -rf ~/.dhee${RESET}\n\n"

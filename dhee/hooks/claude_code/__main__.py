@@ -98,6 +98,251 @@ def _shared_snapshot(dhee: Any) -> dict[str, Any]:
         return {"task": None, "results": []}
 
 
+def _hook_session_id(payload: Any) -> str | None:
+    if isinstance(payload, dict):
+        for key in ("session_id", "native_session_id", "transcript_path"):
+            value = str(payload.get(key) or "").strip()
+            if value:
+                return value
+    for key in ("CLAUDE_SESSION_ID", "DHEE_SESSION_ID"):
+        value = str(os.environ.get(key) or "").strip()
+        if value:
+            return value
+    return None
+
+
+def _live_inbox_snapshot(
+    dhee: Any,
+    payload: Any,
+    *,
+    limit: int = 5,
+    mark_read: bool = True,
+) -> dict[str, Any]:
+    """Unread workspace-line messages for this Claude Code session."""
+    try:
+        from dhee.core.live_context import live_context_inbox
+
+        cwd = _hook_cwd(payload)
+        session_id = _hook_session_id(payload)
+        return live_context_inbox(
+            dhee._engram.memory.db,
+            user_id=os.environ.get("DHEE_USER_ID", "default"),
+            repo=cwd,
+            cwd=cwd,
+            workspace_id=cwd,
+            agent_id=os.environ.get("DHEE_AGENT_ID", "claude-code"),
+            harness=os.environ.get("DHEE_HARNESS", "claude-code"),
+            runtime_id=os.environ.get("DHEE_HARNESS", "claude-code"),
+            session_id=session_id,
+            native_session_id=session_id,
+            limit=limit,
+            mark_read=mark_read,
+            include_own=False,
+        )
+    except Exception:
+        return {"messages": [], "count": 0, "signal": ""}
+
+
+# Workspace-line message kinds that are *mechanical mirrors* of a tool
+# call (raw Read/Bash/Grep echoes — own or peer). These have no semantic
+# relationship to the calling agent's current task: they turn the live
+# block into a wall of shell commands that increases tokens without
+# helping. The PostToolUse injection drops them by default; the only
+# escape hatch is when a mirror's ``source_path`` overlaps the file the
+# caller just touched (e.g. a teammate's recent edit to the same file).
+#
+# Both ``tool.native_*`` (host-emitted) and ``tool.routed_*`` (Dhee
+# router-emitted) variants are listed here. Forgetting the routed
+# variants is the single biggest source of "Dhee echoes my own calls
+# back at me" complaints — keep this set in sync with the kind strings
+# emitted by ``dhee/router/handlers.py`` and the Codex/Claude Code
+# adapters.
+_NOISY_MIRROR_KINDS: frozenset[str] = frozenset({
+    # Native host tool calls (mirrored from Codex into our workspace line)
+    "tool.native_bash",
+    "tool.native_read",
+    "tool.native_grep",
+    "tool.native_glob",
+    "tool.native_write",
+    "tool.native_edit",
+    "tool.codexexec",
+    # Dhee router-routed tool calls (our own dhee_bash / dhee_read / etc).
+    "tool.routed_bash",
+    "tool.routed_read",
+    "tool.routed_grep",
+    "tool.routed_glob",
+    "tool.routed_write",
+    "tool.routed_edit",
+})
+
+
+# Tool calls where the user/agent is *producing* (writing) rather than
+# *consuming* (reading) context. PostToolUse for these should not inject
+# the live inbox at all — the edit's own diff is the answer; appending
+# unrelated broadcasts is pure tax. The inbox stays unread for a future
+# Read/Bash where new context can actually inform the next step.
+_WRITE_TOOL_NAMES: frozenset[str] = frozenset({
+    "Edit",
+    "Write",
+    "MultiEdit",
+    "NotebookEdit",
+})
+
+
+def _post_tool_path(payload: Any) -> str:
+    """Pull the path the caller just edited/read, when present.
+
+    Used to keep mechanical mirror broadcasts iff they touched the same
+    file the caller is working on.
+    """
+    if not isinstance(payload, dict):
+        return ""
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return ""
+    raw = tool_input.get("file_path") or tool_input.get("path") or ""
+    return os.path.abspath(os.path.expanduser(str(raw))) if raw else ""
+
+
+def _msg_kind(msg: Any) -> str:
+    if not isinstance(msg, dict):
+        return ""
+    for key in ("kind", "message_kind", "packet_kind"):
+        value = str(msg.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _msg_source_path(msg: Any) -> str:
+    if not isinstance(msg, dict):
+        return ""
+    for key in ("source_path", "path", "file_path"):
+        value = str(msg.get(key) or "").strip()
+        if value:
+            return value
+    metadata = msg.get("metadata") if isinstance(msg.get("metadata"), dict) else None
+    if isinstance(metadata, dict):
+        for key in ("source_path", "path", "file_path"):
+            value = str(metadata.get(key) or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def _filter_live_messages(messages: list[Any], current_path: str) -> list[Any]:
+    """Drop mechanical mirror broadcasts that don't touch the current path.
+
+    Two kinds of message survive the filter:
+
+    * Anything whose kind is NOT in ``_NOISY_MIRROR_KINDS`` — those are
+      intentional broadcasts (handoffs, results, explicit context).
+    * Mirror events whose ``source_path`` overlaps ``current_path``,
+      because then they're plausibly related to what we're doing.
+
+    The filter is conservative on the keep side: when ``current_path``
+    is empty (e.g. PostToolUse for a Bash call) we keep mirror events
+    that share the cwd with the caller, and otherwise drop them.
+    """
+    if not messages:
+        return []
+    cur = (current_path or "").strip()
+    cur_lower = cur.lower()
+    cwd = os.getcwd().lower()
+    kept: list[Any] = []
+    for msg in messages:
+        kind = _msg_kind(msg).lower()
+        if kind not in _NOISY_MIRROR_KINDS:
+            kept.append(msg)
+            continue
+        # Mechanical mirror — only keep if it likely relates to the
+        # caller's current work.
+        source = _msg_source_path(msg).lower()
+        if not source:
+            continue
+        if cur_lower and (cur_lower in source or source in cur_lower):
+            kept.append(msg)
+            continue
+        if not cur_lower and cwd and source.startswith(cwd):
+            kept.append(msg)
+    return kept
+
+
+def _render_live_inbox(dhee: Any, payload: Any, *, task_description: str | None = None) -> dict[str, Any]:
+    """Inject only relevant unread broadcasts on PostToolUse.
+
+    Two filters run in order:
+
+    1. **Tool-class gate** — for write tools (Edit, Write, MultiEdit,
+       NotebookEdit) we never inject. The diff *is* the context the
+       agent just produced; piling on unrelated broadcasts increases
+       tokens without helping. Broadcasts stay unread for a future
+       Read/Bash where they can inform the next decision.
+    2. **Per-message relevance** — drop mechanical tool-call mirrors
+       (own or peer) unless their ``source_path`` overlaps the file the
+       caller just touched. Intentional broadcasts (handoffs, results,
+       team notes) always pass through.
+    """
+    # Tool-class gate: PostToolUse on write tools is producer-side. The
+    # Edit is the context. Skip the injection entirely.
+    if isinstance(payload, dict):
+        tool_name = str(payload.get("tool_name") or "").strip()
+        if tool_name in _WRITE_TOOL_NAMES:
+            return {}
+
+    # Pull a wider window from the workspace line so the relevance
+    # filter has something to work with, but still don't *mark* more
+    # than we plan to keep — if we drop everything as noise, the
+    # broadcasts stay unread for a more relevant consumer next turn.
+    inbox = _live_inbox_snapshot(dhee, payload, limit=10, mark_read=False)
+    messages = inbox.get("messages") or []
+    if not messages:
+        return {}
+
+    current_path = _post_tool_path(payload)
+    filtered = _filter_live_messages(messages, current_path)
+    if not filtered:
+        # Honest empty: keep everything unread for a future turn.
+        return {}
+
+    # Mark only the kept messages read so the noisy ones get another
+    # chance with a more relevant consumer.
+    try:
+        from dhee.core.live_context import live_context_inbox
+
+        cwd = _hook_cwd(payload)
+        session_id = _hook_session_id(payload)
+        kept_ids = {str(m.get("id") or "") for m in filtered if isinstance(m, dict)}
+        if kept_ids:
+            live_context_inbox(
+                dhee._engram.memory.db,
+                user_id=os.environ.get("DHEE_USER_ID", "default"),
+                repo=cwd,
+                cwd=cwd,
+                workspace_id=cwd,
+                agent_id=os.environ.get("DHEE_AGENT_ID", "claude-code"),
+                harness=os.environ.get("DHEE_HARNESS", "claude-code"),
+                runtime_id=os.environ.get("DHEE_HARNESS", "claude-code"),
+                session_id=session_id,
+                native_session_id=session_id,
+                limit=len(kept_ids),
+                mark_read=True,
+                include_own=False,
+            )
+    except Exception:
+        pass
+
+    xml = _render(
+        {},
+        task_description=task_description,
+        max_tokens=700,
+        live_messages=filtered[:5],
+    )
+    if not xml:
+        return {}
+    return {"systemMessage": xml}
+
+
 def _hook_cwd(payload: Any) -> str:
     if isinstance(payload, dict):
         for key in ("cwd", "workspace", "repo", "project_dir"):
@@ -336,13 +581,18 @@ def handle_session_start(payload: dict[str, Any]) -> dict[str, Any]:
             artifact_matches = []
     doc_matches = _merge_doc_matches(artifact_matches, assembled.doc_matches)
     shared = _shared_snapshot(dhee)
+    live = _live_inbox_snapshot(dhee, payload, limit=5, mark_read=True)
     router_on = os.environ.get("DHEE_ROUTER") == "1"
     typed = dict(assembled.typed_cognition or {})
-    # Repo config should bind local shared-context identity silently, but it must not
-    # inject a prior transcript into every fresh session. Continuity is
-    # expensive context, so fetch it when the user asks to continue/resume or
-    # when an admin explicitly enables automatic continuity.
-    should_auto_resume = _looks_like_continue(task_desc) or os.environ.get("DHEE_AUTO_CONTINUITY") == "1"
+    # Native Claude Code should search Dhee's repo continuity before the
+    # model starts reconstructing context from files. Users can still opt out
+    # by setting DHEE_AUTO_CONTINUITY=0.
+    auto_continuity = str(os.environ.get("DHEE_AUTO_CONTINUITY", "1")).strip().lower()
+    should_auto_resume = (
+        _looks_like_continue(task_desc)
+        or auto_continuity not in {"0", "false", "no", "off"}
+        or os.environ.get("DHEE_SHARED_CONTEXT_FIRST") == "1"
+    )
     if should_auto_resume and not typed.get("last_session"):
         last = _repo_last_session(repo_root)
         if last:
@@ -354,6 +604,7 @@ def handle_session_start(payload: dict[str, Any]) -> dict[str, Any]:
         not doc_matches
         and not router_on
         and not shared.get("task")
+        and not live.get("messages")
         and not typed.get("last_session")
         and not assembled.has_cognition
         and not repo_entries
@@ -367,6 +618,7 @@ def handle_session_start(payload: dict[str, Any]) -> dict[str, Any]:
         shared_task=shared.get("task"),
         shared_task_results=shared.get("results") or [],
         repo_entries=repo_entries,
+        live_messages=live.get("messages") or [],
     )
     if not xml:
         return {}
@@ -448,6 +700,9 @@ def handle_user_prompt(payload: dict[str, Any]) -> dict[str, Any]:
     if shared.get("task") and not _shared_block_is_relevant(dhee, prompt, shared):
         shared = {"task": None, "results": []}
 
+    # ── Live workspace broadcasts: direct, not semantic recall ────────
+    live = _live_inbox_snapshot(dhee, payload, limit=5, mark_read=True)
+
     repo_entries = _repo_context_for(repo, query=prompt, limit=3)
 
     has_signal = (
@@ -455,6 +710,7 @@ def handle_user_prompt(payload: dict[str, Any]) -> dict[str, Any]:
         or bool(edits_block)
         or bool(typed_cognition)
         or bool(shared.get("task"))
+        or bool(live.get("messages"))
         or bool(repo_entries)
     )
     if not has_signal:
@@ -475,6 +731,7 @@ def handle_user_prompt(payload: dict[str, Any]) -> dict[str, Any]:
         shared_task=shared.get("task"),
         shared_task_results=shared.get("results") or [],
         repo_entries=repo_entries,
+        live_messages=live.get("messages") or [],
     )
     if not xml:
         return {}
@@ -546,6 +803,26 @@ def handle_post_tool(payload: dict[str, Any]) -> dict[str, Any]:
         except Exception:
             pass
 
+    # File-read counter: per-(repo_id, path) hot-files signal. Personal
+    # data — never leaves ~/.dhee. Powers `dhee init` first-light hints
+    # and the "files this dev keeps reaching for" signal at SessionStart.
+    if success and tool_name == "Read" and isinstance(tool_input, dict):
+        try:
+            from dhee.core import file_read_tracker
+            from dhee import repo_link as _repo_link
+
+            read_path = str(tool_input.get("file_path") or tool_input.get("path") or "").strip()
+            if read_path:
+                repo_root = _repo_link.repo_for_path(read_path)
+                repo_id = ""
+                if repo_root is not None:
+                    links = _repo_link.list_links()
+                    repo_id = str(((links.get(str(repo_root)) or {}).get("repo_id")) or "")
+                if repo_id:
+                    file_read_tracker.record_read(repo_id=repo_id, path=read_path)
+        except Exception:
+            pass
+
     # Phase 7: record successful edits into the per-session ledger for
     # PreCompact dedup. Best-effort, never fails the hook.
     if success and tool_name in {"Edit", "Write", "MultiEdit", "NotebookEdit"}:
@@ -564,6 +841,29 @@ def handle_post_tool(payload: dict[str, Any]) -> dict[str, Any]:
                 )
             if path:
                 _record_edit(tool_name, path, new_content)
+
+            # Refresh the per-file baseline so the next read of this file
+            # diffs against what we just wrote, not the pre-edit state.
+            # Without this, subsequent reads would emit a misleading
+            # "changed since baseline" delta against content the agent
+            # itself produced.
+            if path and new_content:
+                try:
+                    from dhee.core import file_baseline
+                    from dhee import repo_link as _repo_link
+
+                    repo_root = _repo_link.repo_for_path(path)
+                    if repo_root is not None:
+                        links = _repo_link.list_links()
+                        repo_id = str(((links.get(str(repo_root)) or {}).get("repo_id")) or "")
+                        if repo_id:
+                            file_baseline.update_after_write(
+                                repo_id=repo_id,
+                                source_path=path,
+                                content=new_content,
+                            )
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -574,11 +874,15 @@ def handle_post_tool(payload: dict[str, Any]) -> dict[str, Any]:
         success=success,
     )
     if signal is None:
-        return {}
+        try:
+            return _render_live_inbox(_get_dhee(), payload, task_description=f"after {tool_name}")
+        except Exception:
+            return {}
 
     content, metadata = signal
     metadata = {"source": "claude_code_hook", **metadata}
 
+    dhee = None
     try:
         dhee = _get_dhee()
         dhee.remember(
@@ -631,7 +935,12 @@ def handle_post_tool(payload: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         pass
 
-    return {}
+    try:
+        if dhee is None:
+            dhee = _get_dhee()
+        return _render_live_inbox(dhee, payload, task_description=f"after {tool_name}")
+    except Exception:
+        return {}
 
 
 def handle_pre_compact(payload: dict[str, Any]) -> dict[str, Any]:
@@ -661,7 +970,8 @@ def handle_pre_compact(payload: dict[str, Any]) -> dict[str, Any]:
         edits_block = ""
 
     shared = _shared_snapshot(dhee)
-    if assembled.is_empty and not edits_block and not shared.get("task"):
+    live = _live_inbox_snapshot(dhee, payload, limit=5, mark_read=True)
+    if assembled.is_empty and not edits_block and not shared.get("task") and not live.get("messages"):
         return {}
 
     xml = _render(
@@ -670,6 +980,7 @@ def handle_pre_compact(payload: dict[str, Any]) -> dict[str, Any]:
         edits_block=edits_block or None,
         shared_task=shared.get("task"),
         shared_task_results=shared.get("results") or [],
+        live_messages=live.get("messages") or [],
     )
     if not xml:
         return {}

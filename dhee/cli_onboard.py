@@ -142,46 +142,121 @@ def _link_repo(path: str) -> Tuple[bool, str]:
     )
 
 
-def _link_repos_interactive(
+def _init_repo(path: str) -> Tuple[bool, str]:
+    """Run ``repo_link.init()`` on *path*. Returns (ok, message).
+
+    Onboard treats `init` as the canonical wire-up. Falls back to a
+    plain `link` if init fails (e.g. embeddings provider not yet set —
+    the user can re-run `dhee init` after setting their key).
+    """
+    from dhee import repo_link
+
+    try:
+        info = repo_link.init(path)
+    except ValueError as exc:
+        return False, str(exc)
+    except Exception as exc:  # noqa: BLE001
+        return False, f"init error: {exc}"
+    ingest = info.get("ingest") or {}
+    cm = info.get("claude_md") or {}
+    cm_state = "created" if cm.get("created") else ("updated" if cm.get("updated") else "unchanged")
+    chunks = int(ingest.get("chunks_stored", 0) or 0)
+    parts = [f"linked {info['repo_root']}", f"CLAUDE.md {cm_state}"]
+    if ingest.get("status") == "ok":
+        parts.append(f"indexed {ingest.get('files_indexed', 0)} doc(s) → {chunks} chunk(s)")
+    elif ingest.get("status") == "skipped":
+        parts.append("markdown skipped (no provider key yet)")
+    return True, " · ".join(parts)
+
+
+def _looks_like_git_repo(path: str) -> bool:
+    """Quick check that *path* is inside a git checkout.
+
+    Walks up to 6 levels looking for a ``.git`` entry — works inside
+    nested subdirectories without shelling out to git.
+    """
+    p = os.path.abspath(os.path.expanduser(path))
+    for _ in range(6):
+        if os.path.exists(os.path.join(p, ".git")):
+            return True
+        parent = os.path.dirname(p)
+        if parent == p:
+            return False
+        p = parent
+    return False
+
+
+def _init_repos_interactive(
     tty_in: io.TextIOBase, tty_out: io.TextIOBase
 ) -> int:
-    """Prompt the user for git repo paths to link.
+    """Offer to wire up the cwd's git repo (if any), then any extras.
 
-    No-op on empty input. Each line links one repo via
-    ``repo_link.link()``; non-git paths print a one-line warning and
-    move on. Returns the number of successful links.
+    Replaces the previous "paste a path per line" prompt with a more
+    direct flow:
+
+    1. If cwd is inside a git checkout, ask once: wire it up?
+    2. Then accept additional paths (one per line, blank to finish) for
+       any other repos the dev wants to wire up right now.
+
+    Returns the number of successful inits.
     """
+    initialised = 0
+    cwd = os.getcwd()
+    cwd_is_git = _looks_like_git_repo(cwd)
+
     _print(tty_out, "")
+    _print(tty_out, "Wire up a git repo for shared developer-brain context?")
     _print(
         tty_out,
-        "Which git repos do you want to share AI-coding context for?",
+        "  `dhee init` creates `<repo>/.dhee/`, installs git hooks, indexes the",
     )
     _print(
         tty_out,
-        "Paste an absolute path per line. Linking creates `<repo>/.dhee/`",
+        "  repo's markdown, and adds a small `## Dhee` section to CLAUDE.md.",
     )
-    _print(
-        tty_out,
-        "and installs git hooks so context flows through `git push`/`pull`.",
-    )
-    _print(tty_out, "Press Enter on an empty line to finish (you can run `dhee link` later).")
+    _print(tty_out, "  You can also run `dhee init` from any git repo later.")
     _print(tty_out, "")
 
-    linked = 0
+    if cwd_is_git:
+        prompt = f"Wire up the current directory ({cwd})? [Y/n]: "
+        choice = _ask(tty_in, tty_out, prompt).strip().lower()
+        if choice in ("", "y", "yes"):
+            ok, message = _init_repo(cwd)
+            marker = "✓" if ok else "✗"
+            _print(tty_out, f"  {marker} {message}")
+            if ok:
+                initialised += 1
+
+    _print(tty_out, "")
+    _print(
+        tty_out,
+        "Wire up another repo? (paste absolute path, blank to finish):",
+    )
     while True:
-        raw = _ask(tty_in, tty_out, "repo path (blank to finish): ").strip()
+        raw = _ask(tty_in, tty_out, "repo path: ").strip()
         if not raw:
             break
         path = os.path.abspath(os.path.expanduser(raw))
         if not os.path.isdir(path):
             _print(tty_out, f"  ✗ {path} is not a directory; skipped.")
             continue
-        ok, message = _link_repo(path)
+        if not _looks_like_git_repo(path):
+            _print(tty_out, f"  ✗ {path} is not inside a git repo; run `git init` first.")
+            continue
+        ok, message = _init_repo(path)
         marker = "✓" if ok else "✗"
         _print(tty_out, f"  {marker} {message}")
         if ok:
-            linked += 1
-    return linked
+            initialised += 1
+
+    return initialised
+
+
+def _link_repos_interactive(
+    tty_in: io.TextIOBase, tty_out: io.TextIOBase
+) -> int:
+    """Back-compat thin wrapper around the init-based flow."""
+    return _init_repos_interactive(tty_in, tty_out)
 
 
 def run_onboard(
@@ -233,28 +308,28 @@ def run_onboard(
             else:
                 _print(tty_out, "No key provided; skipping.")
 
-        # ── Repo linking — the "share context across teammates" step ─
+        # ── Repo wire-up — the "share context across teammates" step ─
         if link_paths:
             _print(tty_out, "")
             for path in link_paths:
                 resolved = os.path.abspath(os.path.expanduser(path))
-                ok, message = _link_repo(resolved)
+                ok, message = _init_repo(resolved)
                 marker = "✓" if ok else "✗"
                 _print(tty_out, f"  {marker} {message}")
         elif not skip_link_prompt:
-            _link_repos_interactive(tty_in, tty_out)
+            _init_repos_interactive(tty_in, tty_out)
 
         _print(tty_out, "")
         _print(tty_out, "Done. Dhee Developer Brain is ready.")
-        _print(tty_out, "Link more repos later with:")
-        _print(tty_out, "  dhee link <path>")
-        _print(tty_out, "Check shared-context conflicts with:")
-        _print(tty_out, "  dhee context check")
-        _print(tty_out, "Recover compact continuity with:")
-        _print(tty_out, "  dhee handoff")
         _print(tty_out, "")
-        _print(tty_out, "Update to the latest release:")
-        _print(tty_out, "  dhee update")
+        _print(tty_out, "Wire up more repos any time:")
+        _print(tty_out, "  cd <repo> && dhee init")
+        _print(tty_out, "Check savings + brain health:")
+        _print(tty_out, "  dhee status")
+        _print(tty_out, "Search your personal cross-repo brain:")
+        _print(tty_out, "  dhee recall \"<query>\"")
+        _print(tty_out, "")
+        _print(tty_out, "Update to the latest release:  dhee update")
         _print(tty_out, "")
         return 0
     finally:

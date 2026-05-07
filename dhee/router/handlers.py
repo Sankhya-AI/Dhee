@@ -131,6 +131,7 @@ def _publish_shared_result(
     ptr: str | None = None,
     artifact_id: str | None = None,
     metadata: Dict[str, Any],
+    baseline_content: str | None = None,
 ) -> None:
     db = _route_db()
     if db is None:
@@ -153,6 +154,7 @@ def _publish_shared_result(
         thread_id=ctx["thread_id"],
         harness=ctx["harness"],
         agent_id=ctx["agent_id"],
+        baseline_content=baseline_content,
     )
 
 
@@ -393,6 +395,9 @@ def handle_dhee_read(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "kind": d.kind,
             "inlined": inlined,
         },
+        # Hash this routed_read against the per-file baseline so a second
+        # read of the same unchanged file produces no broadcast at all.
+        baseline_content=content,
     )
     return {
         "ptr": stored.ptr,
@@ -442,8 +447,7 @@ def handle_dhee_bash(arguments: Dict[str, Any]) -> Dict[str, Any]:
     timed_out = False
     try:
         proc = subprocess.run(
-            cmd,
-            shell=True,
+            [os.environ.get("SHELL") or "/bin/sh", "-lc", cmd],
             cwd=cwd,
             capture_output=True,
             timeout=timeout,

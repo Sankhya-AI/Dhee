@@ -30,6 +30,18 @@ def _json_out(data: Any) -> None:
     print(json.dumps(data, indent=2, default=str))
 
 
+def _compact_int(n: int) -> str:
+    """Format ``n`` as a short human number (12.3K, 4.6M)."""
+    n = int(n or 0)
+    if n < 1000:
+        return str(n)
+    if n < 1_000_000:
+        return f"{n/1000:.1f}K"
+    if n < 1_000_000_000:
+        return f"{n/1_000_000:.1f}M"
+    return f"{n/1_000_000_000:.1f}B"
+
+
 def _get_memory(config: Optional[Dict] = None):
     """Lazy-load a Memory instance from CLI config."""
     from dhee.cli_config import get_memory_instance
@@ -90,6 +102,166 @@ def cmd_link(args: argparse.Namespace) -> None:
     print(f"  hooks        {', '.join(info['hooks']) or 'none'}")
     manifest = info.get("manifest") or {}
     print(f"  entries      {manifest.get('entry_count', 0)}")
+
+
+def cmd_init(args: argparse.Namespace) -> None:
+    """One-command on-ramp: link + index markdown + write CLAUDE.md + first-light.
+
+    Run from inside any git checkout. Idempotent — safe to re-run.
+    """
+    from dhee import repo_link
+
+    try:
+        info = repo_link.init(
+            args.path or ".",
+            max_chunks=int(getattr(args, "max_chunks", 200) or 200),
+            skip_ingest=bool(getattr(args, "skip_ingest", False)),
+            skip_first_light=bool(getattr(args, "skip_first_light", False)),
+        )
+    except ValueError as exc:
+        print(str(exc))
+        sys.exit(1)
+
+    if args.json:
+        _json_out(info)
+        return
+
+    repo_root = info["repo_root"]
+    print(f"Dhee initialised in {repo_root}")
+    print(f"  repo_id          {info.get('repo_id', '')}")
+
+    hooks = info.get("hooks") or []
+    print(f"  git hooks        {', '.join(hooks) if hooks else 'none'}")
+
+    cm = info.get("claude_md") or {}
+    if cm.get("created"):
+        cm_label = "created"
+    elif cm.get("updated"):
+        cm_label = "updated"
+    else:
+        cm_label = "unchanged"
+    print(f"  CLAUDE.md        {cm_label}  ({cm.get('path', '')})")
+
+    ingest = info.get("ingest") or {}
+    status = ingest.get("status", "skipped")
+    if status == "ok":
+        bits = [
+            f"indexed {ingest.get('files_indexed', 0)}",
+            f"unchanged {ingest.get('files_unchanged', 0)}",
+            f"chunks +{ingest.get('chunks_stored', 0)}",
+        ]
+        chunks_replaced = int(ingest.get("chunks_replaced", 0) or 0)
+        files_pruned = int(ingest.get("files_pruned", 0) or 0)
+        chunks_pruned = int(ingest.get("chunks_pruned", 0) or 0)
+        if chunks_replaced:
+            bits.append(f"replaced {chunks_replaced}")
+        if files_pruned or chunks_pruned:
+            bits.append(f"pruned {files_pruned} file(s) / {chunks_pruned} chunk(s)")
+        print(f"  markdown         {', '.join(bits)}")
+    elif status == "skipped":
+        reason = ingest.get("reason", "")
+        if reason == "memory_unavailable":
+            print("  markdown         skipped — provider/API key not configured (run `dhee onboard`)")
+        elif reason == "skip_ingest":
+            print("  markdown         skipped (--skip-ingest)")
+        else:
+            print(f"  markdown         skipped ({reason})")
+    elif status == "error":
+        print(f"  markdown         error — {ingest.get('reason', 'unknown')}: {ingest.get('detail', '')}")
+    else:
+        print(f"  markdown         {status}")
+
+    print(f"  linked repos     {info.get('linked_repos', 0)} on this machine")
+
+    fl = info.get("first_light") or {}
+    hits = fl.get("hits") or []
+    print()
+    if hits:
+        print("First light — what your brain already knows about this work:")
+        for hit in hits:
+            text = (hit.get("text") or "").strip().splitlines()
+            head = text[0] if text else ""
+            head = (head[:140] + "…") if len(head) > 140 else head
+            src = hit.get("source_path") or ""
+            tag = f"  [{hit.get('score', 0):.2f}]"
+            if src:
+                # Show just the basename + parent so the line stays short.
+                from pathlib import Path as _Path
+                src_short = "/".join(_Path(src).parts[-2:])
+                print(f"{tag} {head}")
+                print(f"        ↳ {src_short}")
+            else:
+                print(f"{tag} {head}")
+    else:
+        if fl.get("status") == "skipped":
+            print("First light — skipped.")
+        else:
+            print(
+                "First light — no cross-repo learnings yet. They'll appear as you "
+                "work and `dhee promote` adds shared entries."
+            )
+
+    print()
+    print("Next:")
+    print("  dhee status            see savings + brain health")
+    print("  dhee recall \"<query>\"  search your personal brain")
+    print("  dhee inbox             live broadcasts from your other agents")
+
+
+def cmd_inbox(args: argparse.Namespace) -> None:
+    """Show live shared-context broadcasts for this dev's active agents.
+
+    Mirrors the MCP `dhee_inbox` semantics: returns unread messages on
+    the workspace line, marks them read by default, scoped to the
+    workspace inferred from cwd or --repo.
+    """
+    from dhee.core.live_context import live_context_inbox
+
+    db = _get_db()
+    try:
+        result = live_context_inbox(
+            db,
+            user_id=args.user_id,
+            repo=args.repo,
+            cwd=os.getcwd() if not args.repo else None,
+            workspace_id=args.workspace_id,
+            channel=args.channel,
+            consumer_id=args.consumer_id or "cli",
+            agent_id="cli",
+            harness="cli",
+            limit=int(args.limit),
+            mark_read=not args.peek,
+            include_own=bool(args.include_own),
+        )
+    except Exception as exc:
+        if args.json:
+            _json_out({"error": str(exc)})
+            sys.exit(1)
+        print(f"inbox unavailable: {exc}")
+        sys.exit(1)
+
+    if args.json:
+        _json_out(result)
+        return
+
+    messages = result.get("messages") or []
+    if not messages:
+        if not args.quiet:
+            print("Inbox empty. (No unread broadcasts on this workspace line.)")
+        return
+
+    print(f"Inbox · {len(messages)} unread · workspace={result.get('workspace_id') or '(none)'}")
+    print()
+    for msg in messages:
+        title = (msg.get("title") or "").strip() or "(untitled)"
+        body = (msg.get("body") or "").strip()
+        first_line = body.splitlines()[0] if body else ""
+        head = (first_line[:160] + "…") if len(first_line) > 160 else first_line
+        sender = msg.get("agent_id") or msg.get("harness") or "?"
+        ch = msg.get("channel") or "default"
+        print(f"  · {title}  [{sender} → {ch}]")
+        if head:
+            print(f"      {head}")
 
 
 def cmd_unlink(args: argparse.Namespace) -> None:
@@ -298,39 +470,70 @@ def cmd_search(args: argparse.Namespace) -> None:
     Fuses personal memory results with shared entries from any linked
     repo containing the cwd, so the user sees both their own memories
     and the repo-shared context in one ranked list.
+
+    Applies the same threshold filter as the MCP recall tool so the dev
+    and the agent see consistent results. Default threshold 0.6 (env:
+    DHEE_RECALL_THRESHOLD; flag: --threshold).
     """
     from dhee import repo_link
+    from dhee.mcp_slim import _recall_why
+
+    threshold = float(getattr(args, "threshold", None) or os.environ.get("DHEE_RECALL_THRESHOLD") or 0.6)
 
     memory = _get_memory()
+    raw_limit = min(max(args.limit * 3, args.limit), 30)
     result = memory.search(
         query=args.query,
         user_id=args.user_id,
-        limit=args.limit,
+        limit=raw_limit,
     )
 
     base_results = result.get("results", []) if isinstance(result, dict) else []
     fused = repo_link.fuse_search_results(
-        args.query, base_results, cwd=os.getcwd(), limit=args.limit,
+        args.query, base_results, cwd=os.getcwd(), limit=raw_limit,
     )
+
+    kept: list = []
+    dropped = 0
+    for r in fused:
+        score = float(r.get("composite_score", r.get("score", 0)) or 0)
+        if threshold > 0 and score < threshold:
+            dropped += 1
+            continue
+        r["why"] = _recall_why(args.query, r.get("memory", "") or "")
+        kept.append(r)
+        if len(kept) >= args.limit:
+            break
 
     if args.json:
         out = dict(result) if isinstance(result, dict) else {}
-        out["results"] = fused
+        out["results"] = kept
+        out["threshold"] = round(threshold, 3)
+        out["dropped_below_threshold"] = dropped
         _json_out(out)
         return
 
-    if not fused:
-        print("No results found.")
+    if not kept:
+        if dropped:
+            print(
+                f"No results above threshold {threshold:.2f} "
+                f"({dropped} candidate(s) dropped). "
+                "Use --threshold 0 or DHEE_RECALL_THRESHOLD=0 to inspect them."
+            )
+        else:
+            print("No results found.")
         return
-    for r in fused:
+    for r in kept:
         score = r.get("composite_score", r.get("score", 0))
         layer = r.get("layer", "sml")
         mem = r.get("memory", r.get("details", ""))
         mid = (r.get("id") or "")[:8]
         src = r.get("source", "personal")
         tag = "repo " if src == "repo" else "self "
-        print(f"  [{mid}] {tag}({layer}, {score:.3f}) {mem}")
-    print(f"\n  {len(fused)} result(s)")
+        why = r.get("why") or ""
+        why_suffix = f"  ↳ matched: {why}" if why else ""
+        print(f"  [{mid}] {tag}({layer}, {score:.3f}) {mem}{why_suffix}")
+    print(f"\n  {len(kept)} result(s)" + (f", {dropped} dropped < {threshold:.2f}" if dropped else ""))
 
 
 def cmd_list(args: argparse.Namespace) -> None:
@@ -850,11 +1053,18 @@ def cmd_checkpoint(args: argparse.Namespace) -> None:
 
 
 def cmd_status(args: argparse.Namespace) -> None:
-    """Show version, config, DB size, detected agents."""
+    """Show version, config, DB size, detected agents, and brain health.
+
+    The brain-health headline is the dev's daily proof: how many tokens
+    Dhee saved them, how many repos are wired in, how the router is
+    performing. We render it first because it's the answer to "is this
+    thing actually doing anything?".
+    """
     from dhee import __version__
     from dhee.cli_config import CONFIG_DIR, CONFIG_PATH, load_config
     from dhee.cli_mcp import detect_agents
     from dhee.harness.install import harness_status
+    from dhee import repo_link
 
     config = load_config()
     provider = config.get("provider", "not configured")
@@ -874,6 +1084,35 @@ def cmd_status(args: argparse.Namespace) -> None:
         else:
             db_sizes[label] = None
 
+    # Brain-health stats (best-effort; never blocks status output).
+    router_stats: Dict[str, Any] = {}
+    try:
+        from dhee.router import stats as _router_stats
+
+        rs = _router_stats.compute_stats()
+        router_stats = rs.to_dict() if hasattr(rs, "to_dict") else dict(rs)
+    except Exception:
+        router_stats = {}
+
+    linked_repos: Dict[str, Any] = {}
+    try:
+        linked_repos = repo_link.list_links()
+    except Exception:
+        linked_repos = {}
+
+    # Field names mirror RouterStats.to_dict() in dhee/router/stats.py.
+    saved_tokens = int(router_stats.get("est_tokens_diverted", 0) or 0)
+    router_calls = int(router_stats.get("total_calls", 0) or 0)
+    sessions_observed = int(router_stats.get("sessions", 0) or 0)
+    expansions = int(router_stats.get("expansion_calls", 0) or 0)
+    # ``expansion_rate`` is already pre-computed as a 0..1 ratio.
+    expansion_rate_ratio = float(router_stats.get("expansion_rate", 0.0) or 0.0)
+    expansion_rate = (
+        expansion_rate_ratio * 100.0
+        if expansion_rate_ratio
+        else (expansions / router_calls * 100.0 if router_calls else 0.0)
+    )
+
     if args.json:
         _json_out({
             "version": __version__,
@@ -883,10 +1122,38 @@ def cmd_status(args: argparse.Namespace) -> None:
             "agents": agents,
             "native_harnesses": native_harnesses,
             "db_sizes": db_sizes,
+            "brain_health": {
+                "saved_tokens": saved_tokens,
+                "router_calls": router_calls,
+                "sessions": sessions_observed,
+                "expansion_rate_pct": round(expansion_rate, 1),
+                "linked_repos": len(linked_repos),
+            },
         })
         return
 
     print(f"  dhee v{__version__}")
+
+    # Headline — the daily proof line. Honest empty when no router calls
+    # have been observed yet.
+    if router_calls:
+        print(
+            f"  Saved {_compact_int(saved_tokens)} tokens · "
+            f"{router_calls} router calls · {sessions_observed} sessions · "
+            f"{len(linked_repos)} repos linked"
+        )
+        # Model-impact line — what's measured today, what's pending.
+        impact_bits = [
+            f"expansion rate {expansion_rate:.1f}%" + (" (good)" if expansion_rate < 15 else " (review)"),
+            "digest-helpfulness eval: pending",
+        ]
+        print(f"  {' · '.join(impact_bits)}")
+    else:
+        print(
+            f"  No router activity yet · {len(linked_repos)} repo(s) linked · "
+            "savings appear after your first agent session"
+        )
+
     print(f"  Provider: {provider}")
     print(f"  Packages: {', '.join(packages) if packages else 'none'}")
     print(f"  Config:   {CONFIG_PATH}")
@@ -910,9 +1177,17 @@ def cmd_status(args: argparse.Namespace) -> None:
 
     print("  Native harnesses:")
     for name, state in native_harnesses.items():
-        label = "Claude Code" if name == "claude_code" else "Codex"
+        label = {
+            "claude_code": "Claude Code",
+            "codex": "Codex",
+            "hermes": "Hermes",
+            "gstack": "gstack",
+            "cursor": "Cursor",
+        }.get(name, name)
         enabled = "on" if state.get("enabled_in_config") else "off"
         bound = "ready" if state.get("mcp_registered") else "not configured"
+        if name == "codex" and state.get("native"):
+            bound = f"native/{state.get('native_level') or 'ready'}"
         print(f"    {label}: {enabled} ({bound})")
 
 
@@ -982,7 +1257,7 @@ def cmd_install_hooks(args: argparse.Namespace) -> None:
         enable_router=enable_router,
     )
 
-    labels = {"claude_code": "Claude Code", "codex": "Codex", "gstack": "gstack"}
+    labels = {"claude_code": "Claude Code", "codex": "Codex", "gstack": "gstack", "hermes": "Hermes", "cursor": "Cursor"}
     for name, result in results.items():
         label = labels.get(name, name)
         print(f"  {label}: {result.action}")
@@ -1097,6 +1372,136 @@ def cmd_adapters(args: argparse.Namespace) -> None:
             return
         print("  gstack manifest cleared." if removed else "  gstack manifest already absent.")
         return
+
+
+def cmd_hermes(args: argparse.Namespace) -> None:
+    """Install, inspect, or sync the Dhee Hermes memory provider."""
+    from dhee.integrations import hermes as hermes_integration
+
+    action = getattr(args, "hermes_action", None) or "status"
+    if action == "install":
+        result = hermes_integration.install_provider(
+            hermes_home_path=getattr(args, "hermes_home", None),
+            enable=bool(getattr(args, "enable", False)),
+            dhee_data_dir=getattr(args, "dhee_data_dir", None),
+            offline=bool(getattr(args, "offline", False)),
+            sync_on_start=bool(getattr(args, "sync_on_start", False)),
+            sync_existing=not bool(getattr(args, "no_sync", False)),
+            promote_imported=bool(getattr(args, "promote_imported", True)),
+        )
+        if args.json:
+            _json_out(result)
+            return
+        print(f"  Hermes provider installed: {result['plugin_dir']}")
+        print(f"  Dhee config: {result['provider_config']}")
+        if result.get("enabled"):
+            print(f"  Enabled in Hermes config: {result['hermes_config']}")
+            if result.get("backup"):
+                print(f"  Backup: {result['backup']}")
+        else:
+            print("  Not enabled yet. Re-run with --enable to set memory.provider=dhee.")
+        sync = result.get("sync") or {}
+        if sync:
+            print(f"  Synced Hermes learnings: {sync.get('imported_count', 0)} imported, {sync.get('skipped_count', 0)} skipped")
+        return
+
+    if action == "sync":
+        result = hermes_integration.sync_hermes(
+            hermes_home_path=getattr(args, "hermes_home", None),
+            repo=getattr(args, "repo", None),
+            user_id=getattr(args, "user_id", "default"),
+            dry_run=bool(getattr(args, "dry_run", False)),
+            dhee_data_dir=getattr(args, "dhee_data_dir", None),
+            promote=bool(getattr(args, "promote", False)),
+        )
+        if args.json:
+            _json_out(result)
+            return
+        verb = "Would import" if getattr(args, "dry_run", False) else "Imported"
+        print(f"  {verb} {result.get('imported_count', 0)} Hermes learning candidate(s)")
+        if result.get("skipped_count"):
+            print(f"  Skipped {result.get('skipped_count')} already-imported item(s)")
+        return
+
+    result = hermes_integration.provider_status(getattr(args, "hermes_home", None))
+    detected = hermes_integration.detect_hermes(getattr(args, "hermes_home", None))
+    if args.json:
+        result["detected"] = detected
+        _json_out(result)
+        return
+    print(f"  Hermes home:      {result['hermes_home']}")
+    print(f"  Hermes detected:  {'yes' if detected.get('installed') else 'no'}")
+    if detected.get("binary"):
+        print(f"  Hermes binary:    {detected['binary']}")
+    print(f"  Provider install: {'yes' if result['plugin_installed'] else 'no'}")
+    print(f"  Active provider:  {result.get('active_provider') or '(none)'}")
+    print(f"  Dhee data dir:    {result['dhee_data_dir']}")
+    print(f"  Learning store:   {result['learning_store']}")
+    if result.get("last_sync"):
+        print(f"  Last sync:        {result['last_sync']}")
+
+
+def cmd_learn(args: argparse.Namespace) -> None:
+    """Manage Dhee learning candidates and promoted playbooks."""
+    from dhee.core.learnings import LearningExchange
+
+    exchange = LearningExchange()
+    action = getattr(args, "learn_action", None) or "search"
+    if action == "promote":
+        if not args.learning_id:
+            raise ValueError("learn promote requires a learning_id")
+        candidate = exchange.promote(
+            args.learning_id,
+            scope=args.scope,
+            repo=getattr(args, "repo", None),
+            approved_by=getattr(args, "approved_by", None) or "cli",
+        )
+        if args.json:
+            _json_out(candidate.to_dict())
+            return
+        print(f"  Promoted learning {candidate.id}")
+        print(f"  Scope: {candidate.scope}")
+        if candidate.repo:
+            print(f"  Repo:  {candidate.repo}")
+        return
+
+    if action == "reject":
+        if not args.learning_id:
+            raise ValueError("learn reject requires a learning_id")
+        candidate = exchange.reject(args.learning_id, reason=getattr(args, "reason", None))
+        if args.json:
+            _json_out(candidate.to_dict())
+            return
+        print(f"  Rejected learning {candidate.id}")
+        return
+
+    if action == "archive":
+        if not args.learning_id:
+            raise ValueError("learn archive requires a learning_id")
+        candidate = exchange.archive(args.learning_id)
+        if args.json:
+            _json_out(candidate.to_dict())
+            return
+        print(f"  Archived learning {candidate.id}")
+        return
+
+    query = getattr(args, "query", "") or ""
+    if not query and getattr(args, "learning_id", None):
+        query = args.learning_id
+    rows = exchange.search(
+        query=query,
+        status=getattr(args, "status", "promoted"),
+        include_candidates=bool(getattr(args, "include_candidates", False)),
+        limit=getattr(args, "limit", 10),
+    )
+    if args.json:
+        _json_out({"count": len(rows), "results": rows})
+        return
+    if not rows:
+        print("  No learnings found.")
+        return
+    for row in rows:
+        print(f"  [{row.get('status')}] {row.get('id')} {row.get('title')}")
 
 
 def cmd_purge_legacy_noise(args: argparse.Namespace) -> None:
@@ -1684,12 +2089,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_recall.add_argument("query", help="What you're trying to remember")
     p_recall.add_argument("--user-id", default="default", help="User ID")
     p_recall.add_argument("--limit", type=int, default=10, help="Max results")
+    p_recall.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help="Drop results below this score (default: 0.6, env: DHEE_RECALL_THRESHOLD; 0 to disable)",
+    )
     p_recall.add_argument("--json", action="store_true", help="JSON output")
 
     p_search = sub.add_parser("search", help="Search memories (alias for recall)")
     p_search.add_argument("query", help="Search query")
     p_search.add_argument("--user-id", default="default", help="User ID")
     p_search.add_argument("--limit", type=int, default=10, help="Max results")
+    p_search.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help="Drop results below this score (default: 0.6, env: DHEE_RECALL_THRESHOLD; 0 to disable)",
+    )
     p_search.add_argument("--json", action="store_true", help="JSON output")
 
     # checkpoint
@@ -1775,6 +2192,60 @@ def build_parser() -> argparse.ArgumentParser:
     p_handoff.add_argument("--intention-limit", type=int, default=5, help="Active intentions to include")
     p_handoff.add_argument("--output", "-o", help="Optional path to write the handoff JSON")
     p_handoff.add_argument("--json", action="store_true", help="JSON output")
+
+    # init — one-command on-ramp: link + index markdown + CLAUDE.md + first-light
+    p_init = sub.add_parser(
+        "init",
+        help="One-command on-ramp: wire this git repo into your developer brain",
+    )
+    p_init.add_argument("path", nargs="?", default=".", help="Repo path (default: cwd)")
+    p_init.add_argument(
+        "--max-chunks",
+        type=int,
+        default=200,
+        help="Cap markdown chunk indexing at this many chunks (default: 200)",
+    )
+    p_init.add_argument(
+        "--skip-ingest",
+        action="store_true",
+        help="Skip the markdown ingest step (link + CLAUDE.md only)",
+    )
+    p_init.add_argument(
+        "--skip-first-light",
+        action="store_true",
+        help="Skip the post-init brain digest",
+    )
+    p_init.add_argument("--json", action="store_true", help="JSON output")
+
+    # inbox — live shared-context broadcasts
+    p_inbox = sub.add_parser(
+        "inbox",
+        help="Show unread live broadcasts from your other agent sessions",
+    )
+    p_inbox.add_argument("--user-id", default="default", help="User ID")
+    p_inbox.add_argument("--repo", help="Workspace path override (default: cwd's linked repo)")
+    p_inbox.add_argument("--workspace-id", help="Explicit workspace id override")
+    p_inbox.add_argument("--channel", help="Filter to a single channel")
+    p_inbox.add_argument("--consumer-id", help="Stable consumer id (default: 'cli')")
+    p_inbox.add_argument(
+        "--limit", type=int, default=10, help="Max messages to fetch (default: 10)"
+    )
+    p_inbox.add_argument(
+        "--peek",
+        action="store_true",
+        help="Read without marking the messages read (default: mark read)",
+    )
+    p_inbox.add_argument(
+        "--include-own",
+        action="store_true",
+        help="Include broadcasts published by this same agent",
+    )
+    p_inbox.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress 'Inbox empty' line for scripts",
+    )
+    p_inbox.add_argument("--json", action="store_true", help="JSON output")
 
     # link / unlink / links — personal vs repo context
     p_link = sub.add_parser(
@@ -1895,13 +2366,13 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         default=None,
         help=(
-            "Optional shortcut: 'claude_code', 'codex', 'gstack', or 'all'. "
+            "Optional shortcut: 'claude_code', 'codex', 'hermes', 'gstack', or 'all'. "
             "Equivalent to --harness. Enables `dhee install gstack`."
         ),
     )
     p_install.add_argument(
         "--harness",
-        choices=["all", "claude_code", "codex", "gstack", "cursor"],
+        choices=["all", "claude_code", "codex", "hermes", "gstack", "cursor"],
         default=None,
         help="Which harnesses to configure (default: all if no positional target given)",
     )
@@ -1925,7 +2396,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_harness.add_argument(
         "--harness",
-        choices=["all", "claude_code", "codex", "gstack", "cursor"],
+        choices=["all", "claude_code", "codex", "hermes", "gstack", "cursor"],
         default="all",
         help="Harness target",
     )
@@ -1935,6 +2406,48 @@ def build_parser() -> argparse.ArgumentParser:
         help="For `harness enable`: leave Claude Code router disabled",
     )
     p_harness.add_argument("--json", action="store_true", help="JSON output")
+
+    # hermes — native MemoryProvider install/sync/status
+    p_hermes = sub.add_parser("hermes", help="Install or inspect the Hermes MemoryProvider")
+    p_hermes.add_argument(
+        "hermes_action",
+        nargs="?",
+        choices=["install", "status", "sync"],
+        default="status",
+        help="Subcommand",
+    )
+    p_hermes.add_argument("--hermes-home", dest="hermes_home", help="Hermes profile root (default: HERMES_HOME or ~/.hermes)")
+    p_hermes.add_argument("--dhee-data-dir", dest="dhee_data_dir", help="Dhee data directory for provider config")
+    p_hermes.add_argument("--enable", action="store_true", help="For install: set memory.provider=dhee after backing up config.yaml")
+    p_hermes.add_argument("--offline", action="store_true", help="For install: use Dhee's offline provider")
+    p_hermes.add_argument("--sync-on-start", action="store_true", help="For install: import Hermes files as candidates at provider startup")
+    p_hermes.add_argument("--no-sync", action="store_true", help="For install: skip immediate import of existing Hermes memory/skills/sessions")
+    p_hermes.add_argument("--promote", action="store_true", help="For sync: promote imported Hermes learnings immediately")
+    p_hermes.add_argument("--no-promote-imported", dest="promote_imported", action="store_false", default=True, help="For install: import Hermes history as candidates instead of promoted playbooks")
+    p_hermes.add_argument("--dry-run", action="store_true", help="For sync: show candidates without writing them")
+    p_hermes.add_argument("--repo", help="For sync: repo path to stamp on imported candidates")
+    p_hermes.add_argument("--user-id", default="default", help="User ID")
+    p_hermes.add_argument("--json", action="store_true", help="JSON output")
+
+    # learn — gated learning promotion
+    p_learn = sub.add_parser("learn", help="Search and promote Dhee learning candidates")
+    p_learn.add_argument(
+        "learn_action",
+        nargs="?",
+        choices=["search", "promote", "reject", "archive"],
+        default="search",
+        help="Subcommand",
+    )
+    p_learn.add_argument("learning_id", nargs="?", help="Learning id for promote/reject/archive")
+    p_learn.add_argument("--query", default="", help="For search: query text")
+    p_learn.add_argument("--status", default="promoted", choices=["candidate", "promoted", "rejected", "archived"], help="For search: status filter")
+    p_learn.add_argument("--include-candidates", action="store_true", help="For search: include candidates in results")
+    p_learn.add_argument("--limit", type=int, default=10, help="For search: max results")
+    p_learn.add_argument("--scope", choices=["personal", "repo", "workspace"], default="personal", help="For promote: target scope")
+    p_learn.add_argument("--repo", help="For promote: repo path when scope=repo")
+    p_learn.add_argument("--approved-by", default="cli", help="For promote: approval identity")
+    p_learn.add_argument("--reason", help="For reject: reason")
+    p_learn.add_argument("--json", action="store_true", help="JSON output")
 
     # adapters (third-party memory ingestors)
     p_adapters = sub.add_parser(
@@ -2125,6 +2638,8 @@ COMMAND_MAP = {
     "import": cmd_import,
     "why": cmd_why,
     "handoff": cmd_handoff,
+    "init": cmd_init,
+    "inbox": cmd_inbox,
     "link": cmd_link,
     "unlink": cmd_unlink,
     "links": cmd_links,
@@ -2144,6 +2659,8 @@ COMMAND_MAP = {
     "decades-eval": cmd_decades_eval,
     "install": cmd_install_hooks,
     "harness": cmd_harness,
+    "hermes": cmd_hermes,
+    "learn": cmd_learn,
     "adapters": cmd_adapters,
     "uninstall-hooks": cmd_uninstall_hooks,
     "purge-legacy-noise": cmd_purge_legacy_noise,

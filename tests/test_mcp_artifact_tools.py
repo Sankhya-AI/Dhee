@@ -13,6 +13,7 @@ from dhee.db.sqlite import SQLiteManager
 
 @pytest.fixture
 def temp_db(tmp_path, monkeypatch):
+    monkeypatch.setenv("DHEE_CODEX_AUTO_SYNC", "0")
     db = SQLiteManager(str(tmp_path / "history.db"))
     monkeypatch.setattr(mcp_server, "_db", db)
     monkeypatch.setattr(mcp_server, "get_db", lambda: db)
@@ -142,19 +143,32 @@ def test_dhee_why_explains_memory_and_artifact(tmp_path, temp_db):
     )
     assert stored is not None
 
-    memories = temp_db.get_all_memories(user_id="default", limit=50)
-    artifact_chunk = next(
-        row for row in memories if (row.get("metadata") or {}).get("kind") == "artifact_chunk"
+    chunk = temp_db.get_artifact_chunks(stored["artifact_id"])[0]
+    chunk_memory_id = temp_db.add_memory(
+        {
+            "id": "mem-artifact-chunk",
+            "memory": chunk["content"],
+            "user_id": "default",
+            "metadata": {
+                "kind": "artifact_chunk",
+                "artifact_id": stored["artifact_id"],
+                "extraction_id": stored["extraction_id"],
+                "source_path": str(paper),
+                "chunk_index": chunk["chunk_index"],
+            },
+            "categories": ["artifact_chunk", "why.pdf"],
+            "content_hash": "why-chunk-hash",
+        }
     )
     temp_db.add_distillation_provenance(
-        semantic_memory_id=artifact_chunk["id"],
-        episodic_memory_ids=[artifact_chunk["id"]],
+        semantic_memory_id=chunk_memory_id,
+        episodic_memory_ids=[chunk_memory_id],
         run_id="why-run-1",
     )
 
     explained_memory = mcp_server._handle_dhee_why(
         None,
-        {"identifier": artifact_chunk["id"], "history_limit": 5},
+        {"identifier": chunk_memory_id, "history_limit": 5},
     )
     assert explained_memory["kind"] == "memory"
     assert explained_memory["artifact"]["artifact_id"] == stored["artifact_id"]
@@ -203,8 +217,16 @@ def test_dhee_handoff_returns_structured_snapshot(tmp_path, temp_db, monkeypatch
         lambda args: "default",
     )
     monkeypatch.setattr(
-        "dhee.core.handoff_snapshot.get_last_session",
-        lambda **_: {"id": "sess-handoff", "task_summary": "Resume here", "todos": ["continue work"]},
+        "dhee.core.handoff_snapshot.resolve_continuity",
+        lambda *_, **__: {
+            "continuity_source": "last_session",
+            "thread_state": None,
+            "last_session": {
+                "id": "sess-handoff",
+                "task_summary": "Resume here",
+                "todos": ["continue work"],
+            },
+        },
     )
 
     result = mcp_server._handle_dhee_handoff(None, {"repo": str(tmp_path)})

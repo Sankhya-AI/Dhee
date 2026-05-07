@@ -37,7 +37,9 @@ def test_onboard_provider_default_and_key_paste(tmp_path, monkeypatch):
 
     out = tty_out.getvalue()
     assert "Dhee setup" in out
-    assert "dhee link" in out
+    # Onboard now points devs at `dhee init` (link + index + CLAUDE.md +
+    # first-light digest) rather than the lower-level `dhee link`.
+    assert "dhee init" in out
 
 
 def test_onboard_gemini_choice(tmp_path, monkeypatch):

@@ -400,6 +400,11 @@ class ArtifactManager:
                 },
                 harness=harness or None,
                 agent_id=harness or None,
+                # The extracted text is the file's content as the agent
+                # saw it. Hash it through the per-file baseline so a
+                # second identical read produces no broadcast and a
+                # changed read emits a small delta.
+                baseline_content=extracted_text,
             )
         except Exception:
             pass

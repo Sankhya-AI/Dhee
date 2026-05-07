@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 
 from dhee.core import shared_tasks
+from dhee.core.live_context import broadcast_live_context, live_context_inbox
 from dhee.core.workspace_line import emit_agent_activity, resolve_workspace_and_project
 from dhee.db.sqlite import SQLiteManager
 
@@ -180,6 +181,32 @@ def test_emit_no_workspace_resolved_is_silent(tmp_path):
     assert row is None
 
 
+def test_emit_auto_creates_workspace_for_real_cli_path(tmp_path):
+    db = SQLiteManager(str(tmp_path / "history.db"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    source = repo / "main.py"
+    source.write_text("print('hi')\n", encoding="utf-8")
+
+    row = emit_agent_activity(
+        db,
+        tool_name="Read",
+        packet_kind="hook_post_tool",
+        digest="read main.py",
+        cwd=str(repo),
+        source_path=str(source),
+        source_event_id="auto-ws-1",
+        harness="codex",
+        agent_id="codex",
+    )
+
+    assert row is not None
+    assert row["workspace_id"]
+    workspace = db.get_workspace(row["workspace_id"], user_id="default")
+    assert workspace is not None
+    assert workspace["root_path"] == str(repo)
+
+
 def test_emit_distinct_events_are_not_deduped(tmp_path):
     db = SQLiteManager(str(tmp_path / "history.db"))
     ws_id, _ = _seed_workspace(db, root_path=str(tmp_path))
@@ -330,3 +357,53 @@ def test_emit_survives_missing_shared_task_context(tmp_path):
     assert row is not None
     assert row["workspace_id"] == ws_id
     assert row["channel"] == "workspace"
+
+
+def test_live_broadcast_delivers_once_per_agent_consumer(tmp_path):
+    db = SQLiteManager(str(tmp_path / "history.db"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    sent = broadcast_live_context(
+        db,
+        repo=str(repo),
+        body="Claude found the API contract in server.py; use /api/workspaces/{id}/line/stream.",
+        title="API contract",
+        agent_id="claude-code",
+        harness="claude-code",
+        session_id="claude-1",
+    )
+    assert sent["ok"] is True
+    assert sent["workspace_id"]
+
+    codex = live_context_inbox(
+        db,
+        repo=str(repo),
+        agent_id="codex",
+        harness="codex",
+        session_id="codex-1",
+        mark_read=True,
+    )
+    assert codex["count"] == 1
+    assert "Read before continuing" in codex["signal"]
+    assert codex["messages"][0]["title"] == "API contract"
+
+    again = live_context_inbox(
+        db,
+        repo=str(repo),
+        agent_id="codex",
+        harness="codex",
+        session_id="codex-1",
+        mark_read=True,
+    )
+    assert again["count"] == 0
+
+    own = live_context_inbox(
+        db,
+        repo=str(repo),
+        agent_id="claude-code",
+        harness="claude-code",
+        session_id="claude-1",
+        mark_read=True,
+    )
+    assert own["count"] == 0

@@ -29,6 +29,9 @@ EXPECTED_TOOL_NAMES = {
     "record_outcome",
     "reflect",
     "store_intention",
+    "dhee_submit_learning",
+    "dhee_search_learnings",
+    "dhee_promote_learning",
     "dhee_list_assets",
     "dhee_get_asset",
     "dhee_sync_codex_artifacts",
@@ -36,6 +39,8 @@ EXPECTED_TOOL_NAMES = {
     "dhee_thread_state",
     "dhee_shared_task",
     "dhee_shared_task_results",
+    "dhee_inbox",
+    "dhee_broadcast",
     "dhee_handoff",
     # Router tools (digest-at-source wrappers)
     "dhee_read",
@@ -58,6 +63,15 @@ class TestMCPToolsSlim:
     def test_no_duplicate_tool_names(self):
         tool_names = [t.name for t in mcp_server.TOOLS]
         assert len(tool_names) == len(set(tool_names)), "Duplicate tool names found"
+
+    def test_server_advertises_context_first_instructions(self):
+        instructions = getattr(mcp_server.server, "instructions", "") or ""
+        assert "consult Dhee before reconstructing" in instructions
+        assert "dhee_handoff" in instructions
+        assert "dhee_shared_task_results" in instructions
+        assert "dhee_inbox" in instructions
+        assert "dhee_search_learnings" in instructions
+        assert "Codex session logs" in instructions
 
     def test_tools_have_input_schemas(self):
         for tool in mcp_server.TOOLS:
