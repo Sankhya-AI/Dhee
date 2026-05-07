@@ -468,7 +468,7 @@ class LearningExchange:
         candidates: List[LearningCandidate] = []
         skipped: List[Dict[str, str]] = []
 
-        for path, kind, title in self._hermes_source_files(root):
+        for path, kind, title, allow_instant_promotion in self._hermes_source_files(root):
             text = _safe_read(path)
             if not text:
                 continue
@@ -480,7 +480,7 @@ class LearningExchange:
                 task_type="hermes_import",
                 repo=repo,
                 source_path=path,
-                promote=promote,
+                promote=bool(promote and allow_instant_promotion),
             ))
 
         for path in self._hermes_agent_skill_files(root):
@@ -495,7 +495,7 @@ class LearningExchange:
                 task_type="hermes_skill",
                 repo=repo,
                 source_path=path,
-                promote=promote,
+                promote=False,
             ))
 
         for title, body, source_path in self._hermes_session_summaries(root, limit=session_limit):
@@ -507,29 +507,40 @@ class LearningExchange:
                 task_type="hermes_session",
                 repo=repo,
                 source_path=source_path,
-                promote=promote,
+                promote=False,
             ))
 
-        existing_hashes = self._source_hashes()
+        existing_by_hash = self._source_hash_map()
         imported: List[LearningCandidate] = []
+        updated: List[LearningCandidate] = []
         for candidate in candidates:
             source_hash = _evidence_hash(candidate)
-            if source_hash in existing_hashes:
+            existing = existing_by_hash.get(source_hash)
+            if existing:
+                if not dry_run:
+                    changed = self._apply_import_policy(existing, candidate)
+                    if changed:
+                        updated.append(changed)
                 skipped.append({"id": candidate.id, "reason": "already_imported", "source_hash": source_hash})
                 continue
             if dry_run:
                 imported.append(candidate)
             else:
                 imported.append(self._upsert(candidate))
-                existing_hashes.add(source_hash)
+                existing_by_hash[source_hash] = candidate
 
         return {
             "hermes_home": str(root),
             "dry_run": bool(dry_run),
             "promote": bool(promote),
             "imported_count": len(imported),
+            "promoted_count": sum(1 for c in imported if c.status == "promoted"),
+            "candidate_count": sum(1 for c in imported if c.status == "candidate"),
+            "rejected_count": sum(1 for c in imported if c.status == "rejected"),
+            "updated_policy_count": len(updated),
             "skipped_count": len(skipped),
             "candidates": [c.compact(max_body_chars=800) for c in imported],
+            "updated": [c.compact(max_body_chars=800) for c in updated],
             "skipped": skipped,
         }
 
@@ -574,22 +585,49 @@ class LearningExchange:
             metadata={"approved_by": "hermes_import"} if promote and status == "promoted" else {},
         )
 
-    def _source_hashes(self) -> set[str]:
-        hashes = set()
+    def _source_hash_map(self) -> Dict[str, LearningCandidate]:
+        by_hash: Dict[str, LearningCandidate] = {}
         for candidate in self.list():
             source_hash = _evidence_hash(candidate)
             if source_hash:
-                hashes.add(source_hash)
-        return hashes
+                by_hash[source_hash] = candidate
+        return by_hash
+
+    def _apply_import_policy(
+        self,
+        existing: LearningCandidate,
+        desired: LearningCandidate,
+    ) -> Optional[LearningCandidate]:
+        if not _evidence_hash(existing):
+            return None
+        approved_by = str((existing.metadata or {}).get("approved_by") or "")
+        if existing.status == "promoted" and desired.status != "promoted" and approved_by != "hermes_import":
+            return None
+        if approved_by and approved_by != "hermes_import":
+            return None
+        if existing.status == desired.status:
+            return None
+
+        existing.status = desired.status
+        existing.rejected_reason = desired.rejected_reason
+        if desired.status == "promoted":
+            existing.promoted_at = existing.promoted_at or _now()
+            existing.utility = max(existing.utility, desired.utility)
+            existing.metadata["approved_by"] = "hermes_import"
+        else:
+            existing.promoted_at = None
+            existing.utility = min(existing.utility, desired.utility)
+            existing.metadata.pop("approved_by", None)
+        return self._upsert(existing)
 
     @staticmethod
-    def _hermes_source_files(root: Path) -> List[Tuple[Path, str, str]]:
+    def _hermes_source_files(root: Path) -> List[Tuple[Path, str, str, bool]]:
         return [
-            (root / "SOUL.md", "workflow", "Hermes SOUL.md"),
-            (root / "MEMORY.md", "memory", "Hermes MEMORY.md"),
-            (root / "USER.md", "memory", "Hermes USER.md"),
-            (root / "memories" / "MEMORY.md", "memory", "Hermes memories/MEMORY.md"),
-            (root / "memories" / "USER.md", "memory", "Hermes memories/USER.md"),
+            (root / "SOUL.md", "workflow", "Hermes SOUL.md", False),
+            (root / "MEMORY.md", "memory", "Hermes MEMORY.md", True),
+            (root / "USER.md", "memory", "Hermes USER.md", True),
+            (root / "memories" / "MEMORY.md", "memory", "Hermes memories/MEMORY.md", True),
+            (root / "memories" / "USER.md", "memory", "Hermes memories/USER.md", True),
         ]
 
     @staticmethod

@@ -58,7 +58,7 @@ def install_provider(
 ) -> Dict[str, Any]:
     """Install the Dhee Hermes memory provider scaffold."""
     home = hermes_home(hermes_home_path)
-    plugin_dir = home / "plugins" / "dhee"
+    plugin_dir = _provider_plugin_dir(home)
     plugin_dir.mkdir(parents=True, exist_ok=True)
 
     init_path = plugin_dir / "__init__.py"
@@ -134,6 +134,7 @@ def install_provider(
         "enabled": enabled,
         "hermes_home": str(home),
         "plugin_dir": str(plugin_dir),
+        "legacy_plugin_dir": str(_legacy_provider_plugin_dir(home)),
         "provider_config": str(config_path),
         "hermes_config": str(hermes_config_path),
         "backup": str(backup_path) if backup_path else None,
@@ -144,7 +145,8 @@ def install_provider(
 
 def provider_status(hermes_home_path: Optional[str] = None) -> Dict[str, Any]:
     home = hermes_home(hermes_home_path)
-    plugin_dir = home / "plugins" / "dhee"
+    plugin_dir = _provider_plugin_dir(home)
+    legacy_plugin_dir = _legacy_provider_plugin_dir(home)
     config_path = home / "config.yaml"
     provider_config = home / "dhee.json"
     config = _read_yaml(config_path)
@@ -164,6 +166,8 @@ def provider_status(hermes_home_path: Optional[str] = None) -> Dict[str, Any]:
         "hermes_home": str(home),
         "plugin_installed": (plugin_dir / "__init__.py").exists() and (plugin_dir / "plugin.yaml").exists(),
         "plugin_dir": str(plugin_dir),
+        "legacy_plugin_installed": (legacy_plugin_dir / "__init__.py").exists(),
+        "legacy_plugin_dir": str(legacy_plugin_dir),
         "active_provider": active_provider,
         "enabled": active_provider == "dhee",
         "dhee_data_dir": data_dir,
@@ -172,6 +176,16 @@ def provider_status(hermes_home_path: Optional[str] = None) -> Dict[str, Any]:
         "last_sync": learning_path.stat().st_mtime if learning_path.exists() else None,
         "learning_store": str(learning_path),
     }
+
+
+def _provider_plugin_dir(home: Path) -> Path:
+    """Canonical Hermes MemoryProvider plugin location."""
+    return home / "plugins" / "memory" / "dhee"
+
+
+def _legacy_provider_plugin_dir(home: Path) -> Path:
+    """Previous Dhee pre-release install location, kept visible for migration checks."""
+    return home / "plugins" / "dhee"
 
 
 def disable_provider(hermes_home_path: Optional[str] = None) -> Dict[str, Any]:

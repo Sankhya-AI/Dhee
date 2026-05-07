@@ -151,10 +151,12 @@ def test_install_all_auto_configures_detected_hermes(tmp_path, monkeypatch):
 
     hermes = results["hermes"]
     assert hermes.action == "enabled"
-    assert (hermes_home / "plugins" / "dhee" / "__init__.py").exists()
+    assert (hermes_home / "plugins" / "memory" / "dhee" / "__init__.py").exists()
     config = yaml.safe_load((hermes_home / "config.yaml").read_text(encoding="utf-8"))
     assert config["memory"]["provider"] == "dhee"
     assert hermes.details["imported_learnings"] == 1
+    assert hermes.details["promoted_learnings"] == 1
+    assert hermes.details["candidate_learnings"] == 0
 
     status = harness_status(harness="hermes")["hermes"]
     assert status["installed"] is True
