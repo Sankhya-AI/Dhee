@@ -48,15 +48,19 @@ def _flag_file() -> Path:
 _HEAVY_BASH_PATTERNS = [
     (re.compile(r"\bgit\s+(log|diff|show|blame)\b"), "git log/diff/show/blame"),
     (re.compile(r"\bgrep\s+[^|]*-[A-Za-z]*r"), "grep -r (recursive)"),
-    (re.compile(r"\brg\b"), "ripgrep"),
-    (re.compile(r"\bfind\s+[/\.]"), "find across a tree"),
-    (re.compile(r"\bls\s+[^|]*-[A-Za-z]*R"), "ls -R"),
-    (re.compile(r"\btree\b"), "tree"),
-    (re.compile(r"\bpytest\b"), "pytest"),
-    (re.compile(r"\bnpm\s+(test|run)\b"), "npm test/run"),
-    (re.compile(r"\bcargo\s+(build|test)\b"), "cargo build/test"),
-    (re.compile(r"\bcurl\b"), "curl (HTTP fetch)"),
-    (re.compile(r"\btail\s+-f\b"), "tail -f"),
+    # `\b` treats `-` and `.` as word boundaries, so `\bword\b` matches inside
+    # `word-suffix`, `word.method`, `pkg-word`. Anchor with shell separators
+    # instead so `tree-sitter`, `pkg.cargo`, `treelib`, `ripgrep_setup`, etc.
+    # don't fire false positives. Each tool ends at whitespace, pipe, or EOL.
+    (re.compile(r"(?:^|[\s|;&])rg(?:\s|$)"), "ripgrep"),
+    (re.compile(r"(?:^|[\s|;&])find\s+[/\.]"), "find across a tree"),
+    (re.compile(r"(?:^|[\s|;&])ls\s+[^|]*-[A-Za-z]*R"), "ls -R"),
+    (re.compile(r"(?:^|[\s|;&])tree(?:\s|$)"), "tree"),
+    (re.compile(r"(?:^|[\s|;&])pytest(?:\s|$)"), "pytest"),
+    (re.compile(r"(?:^|[\s|;&])npm\s+(test|run)(?:\s|$)"), "npm test/run"),
+    (re.compile(r"(?:^|[\s|;&])cargo\s+(build|test)(?:\s|$)"), "cargo build/test"),
+    (re.compile(r"(?:^|[\s|;&])curl(?:\s|$)"), "curl (HTTP fetch)"),
+    (re.compile(r"(?:^|[\s|;&])tail\s+-f\b"), "tail -f"),
 ]
 
 
@@ -171,6 +175,24 @@ def _evaluate_read(inp: dict[str, Any]) -> dict[str, Any]:
 
 _QUOTED_REGION = re.compile(r"'[^']*'|\"[^\"]*\"")
 
+# A reducer pipe bounds the producer's output. If a heavy command is
+# already piped through one of these, the context blast-radius is
+# capped — let it through.
+_REDUCER_PIPE = re.compile(
+    r"\|\s*(?:"
+    r"head\s+(?:-[A-Za-z]*\s*)?-?\d+"          # | head 50, | head -n 50
+    r"|tail\s+(?:-[A-Za-z]*\s*)?-?\d+"          # | tail -20
+    r"|wc(?:\s|$)"                               # | wc / | wc -l
+    r"|grep\s+-c\b"                              # | grep -c pattern
+    r"|sort\s*(?:\|.*)?\|\s*(?:head|tail)\s"     # | sort | head
+    r")"
+)
+
+# Explicit per-command bypass: the model (or user) can prepend a
+# ``# dhee:bypass`` comment to opt out for one invocation. Useful when
+# the command is genuinely small but matches a heuristic.
+_BYPASS_TOKEN = re.compile(r"#\s*dhee\s*:\s*bypass\b")
+
 
 def _strip_quoted(cmd: str) -> str:
     """Replace quoted substrings with spaces so heavy-pattern regexes
@@ -179,17 +201,30 @@ def _strip_quoted(cmd: str) -> str:
     return _QUOTED_REGION.sub(lambda m: " " * len(m.group(0)), cmd)
 
 
+def _is_output_bounded(cmd: str) -> bool:
+    """Return True when the command pipes its producer into a bounded
+    reducer (head/tail/wc/grep -c). When that's the case the heavy
+    pattern can't actually flood the context."""
+    return bool(_REDUCER_PIPE.search(cmd))
+
+
 def _evaluate_bash(inp: dict[str, Any]) -> dict[str, Any]:
     cmd = inp.get("command")
     if not isinstance(cmd, str) or not cmd.strip():
+        return {}
+    if _BYPASS_TOKEN.search(cmd):
+        return {}
+    if _is_output_bounded(cmd):
         return {}
     scan = _strip_quoted(cmd)
     for rx, label in _HEAVY_BASH_PATTERNS:
         if rx.search(scan):
             reason = f"Router enforcement: command matches heavy-output class ({label})."
             steer = (
-                f"Call mcp__dhee__dhee_bash(command={cmd!r}) instead. It "
-                "digests the output by class and stores raw under a ptr."
+                f"Call mcp__dhee__dhee_bash(command={cmd!r}) instead, or pipe "
+                "the producer through a bounded reducer (e.g. ``| tail -50``, "
+                "``| head -n 50``, ``| wc -l``). For a one-off bypass, append "
+                "``# dhee:bypass`` to the command."
             )
             return _deny(reason, steer)
     return {}

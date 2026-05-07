@@ -68,6 +68,7 @@ class DheePlugin:
         self._user_id = user_id
         self._offline = offline
         self._active_trajectories: Dict[str, Any] = {}
+        self._learning_exchange = None
 
         # Resolve provider
         if offline and provider is None:
@@ -124,6 +125,14 @@ class DheePlugin:
     def memory(self):
         """Expose the configured runtime memory engine for advanced integrations."""
         return self._engram.memory
+
+    @property
+    def learning_exchange(self):
+        """Access the shared learning exchange."""
+        if self._learning_exchange is None:
+            from dhee.core.learnings import LearningExchange
+            self._learning_exchange = LearningExchange(self.data_dir / "learnings")
+        return self._learning_exchange
 
     # ------------------------------------------------------------------
     # Hook registry
@@ -257,6 +266,7 @@ class DheePlugin:
         task_description: Optional[str] = None,
         user_id: Optional[str] = None,
         operational: bool = False,
+        repo: Optional[str] = None,
     ) -> Dict[str, Any]:
         """HyperAgent session bootstrap. Returns everything the agent needs.
 
@@ -265,7 +275,7 @@ class DheePlugin:
         """
         uid = user_id or self._user_id
         self._fire_hooks("pre_context", {
-            "task_description": task_description, "user_id": uid, "operational": operational,
+            "task_description": task_description, "user_id": uid, "repo": repo, "operational": operational,
         })
         self._tracker.on_context(task_description)
         hyper_ctx = self._buddhi.get_hyper_context(
@@ -277,8 +287,75 @@ class DheePlugin:
             result = hyper_ctx.to_operational_dict()
         else:
             result = hyper_ctx.to_dict()
+        try:
+            result["learnings"] = self.learning_exchange.search(
+                query=task_description or "",
+                repo=repo,
+                status="promoted",
+                limit=5,
+            )
+        except Exception as exc:
+            logger.debug("Learning context retrieval failed: %s", exc, exc_info=True)
+            result["learnings"] = []
         self._fire_hooks("post_context", result)
         return result
+
+    # ------------------------------------------------------------------
+    # Shared learnings
+    # ------------------------------------------------------------------
+
+    def submit_learning(self, **kwargs) -> Dict[str, Any]:
+        """Submit a gated learning candidate."""
+        return self.learning_exchange.submit(**kwargs).to_dict()
+
+    def search_learnings(
+        self,
+        query: Optional[str] = None,
+        task_type: Optional[str] = None,
+        repo: Optional[str] = None,
+        status: str = "promoted",
+        limit: int = 10,
+        include_candidates: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Search promoted learnings, or candidates when explicitly requested."""
+        return self.learning_exchange.search(
+            query=query,
+            task_type=task_type,
+            repo=repo,
+            status=status,
+            limit=limit,
+            include_candidates=include_candidates,
+        )
+
+    def promote_learning(
+        self,
+        learning_id: str,
+        scope: str = "personal",
+        repo: Optional[str] = None,
+        approved_by: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Promote a learning under Dhee's gate policy."""
+        return self.learning_exchange.promote(
+            learning_id,
+            scope=scope,
+            repo=repo,
+            approved_by=approved_by,
+        ).to_dict()
+
+    def record_learning_outcome(
+        self,
+        learning_id: str,
+        success: bool,
+        outcome_score: Optional[float] = None,
+        evidence: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Record reuse evidence for promotion scoring."""
+        return self.learning_exchange.record_outcome(
+            learning_id,
+            success=success,
+            outcome_score=outcome_score,
+            evidence=evidence,
+        ).to_dict()
 
     # ------------------------------------------------------------------
     # Tool 4: checkpoint
@@ -929,6 +1006,18 @@ class DheePlugin:
                 avoid = p.get("avoid", [])
                 if avoid:
                     parts.append(f"  Avoid: {', '.join(avoid[:3])}")
+
+        # Promoted cross-agent learnings. Candidates are never injected here.
+        learnings = ctx.get("learnings", [])
+        if learnings:
+            parts.append("\n### Learned Playbooks")
+            for item in learnings[:5]:
+                title = str(item.get("title") or "").strip()
+                body = str(item.get("body") or "").strip()[:220]
+                scope = item.get("scope", "personal")
+                confidence = float(item.get("confidence", 0) or 0)
+                if title and body:
+                    parts.append(f"- **{title}** [{scope}, confidence={confidence:.0%}]: {body}")
 
         # Beliefs (Phase 3)
         beliefs = ctx.get("beliefs", [])

@@ -270,6 +270,31 @@ class TestEnforcementGate:
         r = evaluate({"tool_name": "Bash", "tool_input": {"command": "echo hi"}})
         assert r == {}
 
+    def test_on_allows_heavy_bash_with_reducer_pipe(self, router_tmp):
+        """A reducer pipe (head/tail/wc/grep -c) bounds the producer's
+        output, so heavy-output heuristics should let the command through."""
+        self._turn_on(router_tmp)
+        from dhee.router.pre_tool_gate import evaluate
+        cases = [
+            "pytest tests/test_x.py -q 2>&1 | tail -20",
+            "git log --oneline | head -n 10",
+            "grep -r foo . | wc -l",
+            "find . -name '*.py' | head 50",
+            "rg foo | grep -c bar",
+        ]
+        for cmd in cases:
+            r = evaluate({"tool_name": "Bash", "tool_input": {"command": cmd}})
+            assert r == {}, f"reducer pipe should allow: {cmd}"
+
+    def test_on_allows_heavy_bash_with_explicit_bypass(self, router_tmp):
+        self._turn_on(router_tmp)
+        from dhee.router.pre_tool_gate import evaluate
+        r = evaluate({
+            "tool_name": "Bash",
+            "tool_input": {"command": "pytest tests/test_x.py -q  # dhee:bypass"},
+        })
+        assert r == {}
+
 
 # ---------------------------------------------------------------------------
 # Handlers round-trip — intent + policy attribution

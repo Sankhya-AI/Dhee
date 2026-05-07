@@ -139,6 +139,29 @@ class TestRenderer:
         xml = render_context(ctx, task_description="fix auth")
         assert 'task="fix auth"' in xml
 
+    def test_long_task_description_uses_child_element_not_truncated(self):
+        """Long or multi-line prompts must survive verbatim, not get
+        chopped to 120 chars in an attribute."""
+        long_prompt = (
+            "now lets see what we have built till now, my user is a staff engineer "
+            "who works on 5-6 microservices parallely, each has multiple repos and "
+            "claude sessions for each repo. we needs to share context between the "
+            "folder when he wants"
+        )
+        ctx = {"insights": [{"content": "freezegun works", "task_type": "bug_fix"}]}
+        xml = render_context(ctx, task_description=long_prompt)
+        # Full prompt must be present, not truncated.
+        assert long_prompt in xml
+        # And it must NOT live in the root attribute (which would chop newlines/quotes).
+        assert f'task="{long_prompt}"' not in xml
+        assert "<task>" in xml
+
+    def test_multiline_task_description_preserved_in_child(self):
+        prompt = "first line\nsecond line\nthird line"
+        ctx = {"insights": [{"content": "x", "task_type": "bug_fix"}]}
+        xml = render_context(ctx, task_description=prompt)
+        assert "<task>first line\nsecond line\nthird line</task>" in xml
+
     def test_shared_task_block_renders_compact_results(self):
         xml = render_context(
             {},
@@ -160,6 +183,28 @@ class TestRenderer:
         assert item is not None
         assert item.get("tool") == "Bash"
         assert "pytest failures" in (item.text or "")
+
+    def test_live_context_block_renders_unread_signal(self):
+        xml = render_context(
+            {},
+            live_messages=[
+                {
+                    "title": "Contract changed",
+                    "body": "Use /api/workspaces/{id}/line/stream for live updates.",
+                    "message_kind": "broadcast",
+                    "created_at": "2026-04-29T10:00:00Z",
+                    "metadata": {"agent_id": "codex"},
+                }
+            ],
+        )
+        root = _extract_xml(xml)
+        live = root.find("live")
+        assert live is not None
+        assert "read before continuing" in (live.get("msg") or "")
+        msg = live.find("msg")
+        assert msg is not None
+        assert msg.get("src") == "codex"
+        assert "line/stream" in (msg.text or "")
 
     def test_memories_sorted_by_score_descending(self):
         ctx = {
@@ -657,12 +702,86 @@ class TestDispatchHandlers:
             assert "Always run tests first" in result["systemMessage"]
             mock_assemble.assert_called_once()
 
-    def test_user_prompt_no_docs_returns_empty(self):
-        """When no doc chunks match above threshold, inject nothing."""
+    def test_user_prompt_filters_style_chunks(self):
+        """AGENTS.md style/commit/convention chunks are CLAUDE.md material —
+        the per-turn enrichment must drop them so the slot carries real signal."""
+        from dhee.hooks.claude_code.__main__ import handle_user_prompt
+        from dhee.hooks.claude_code.assembler import DocMatch
+
+        style_chunk = DocMatch(
+            text="Use snake_case for functions",
+            source_path="AGENTS.md",
+            heading_breadcrumb="Repository Guidelines › Coding Style & Naming Conventions",
+            score=0.85, chunk_index=0,
+        )
+        with patch("dhee.hooks.claude_code.__main__._get_dhee"), \
+             patch("dhee.hooks.claude_code.assembler.assemble_docs_only", return_value=[style_chunk]), \
+             patch("dhee.hooks.claude_code.assembler.assemble") as mock_assemble, \
+             patch("dhee.router.edit_ledger.render_block", return_value=""), \
+             patch("dhee.hooks.claude_code.__main__._repo_last_session", return_value=None), \
+             patch("dhee.hooks.claude_code.__main__._shared_snapshot", return_value={"task": None, "results": []}):
+            from dhee.hooks.claude_code.assembler import AssembledContext
+            mock_assemble.return_value = AssembledContext(doc_matches=[], typed_cognition={})
+            result = handle_user_prompt({"prompt": "how do I name this function?"})
+            # Style chunk filtered out → no other signal → empty.
+            assert result == {}
+
+    def test_user_prompt_includes_edits_and_session(self):
+        """Edit ledger and repo continuity ride along every turn — that's the
+        signal a staff engineer needs to keep working agents coherent."""
         from dhee.hooks.claude_code.__main__ import handle_user_prompt
 
         with patch("dhee.hooks.claude_code.__main__._get_dhee"), \
-             patch("dhee.hooks.claude_code.assembler.assemble_docs_only", return_value=[]):
+             patch("dhee.hooks.claude_code.assembler.assemble_docs_only", return_value=[]), \
+             patch("dhee.hooks.claude_code.assembler.assemble") as mock_assemble, \
+             patch("dhee.router.edit_ledger.render_block",
+                   return_value='<edits desc="this session\'s file changes">\n  server.py\n</edits>'), \
+             patch("dhee.hooks.claude_code.__main__._repo_last_session",
+                   return_value={"task_summary": "wired enrichment", "files_touched": ["__main__.py"]}), \
+             patch("dhee.hooks.claude_code.__main__._shared_snapshot",
+                   return_value={"task": None, "results": []}):
+            from dhee.hooks.claude_code.assembler import AssembledContext
+            mock_assemble.return_value = AssembledContext(doc_matches=[], typed_cognition={})
+            result = handle_user_prompt({"prompt": "what did we just change?"})
+            assert "systemMessage" in result
+            xml = result["systemMessage"]
+            assert "<edits" in xml
+            assert "server.py" in xml
+            assert "<session" in xml
+            assert "wired enrichment" in xml
+
+    def test_user_prompt_includes_live_inbox_messages(self):
+        from dhee.hooks.claude_code.__main__ import handle_user_prompt
+
+        with patch("dhee.hooks.claude_code.__main__._get_dhee"), \
+             patch("dhee.hooks.claude_code.assembler.assemble_docs_only", return_value=[]), \
+             patch("dhee.hooks.claude_code.assembler.assemble") as mock_assemble, \
+             patch("dhee.router.edit_ledger.render_block", return_value=""), \
+             patch("dhee.hooks.claude_code.__main__._repo_last_session", return_value=None), \
+             patch("dhee.hooks.claude_code.__main__._shared_snapshot", return_value={"task": None, "results": []}), \
+             patch("dhee.hooks.claude_code.__main__._live_inbox_snapshot",
+                   return_value={"messages": [{"title": "Heads up", "body": "Codex found the failing test.", "metadata": {"agent_id": "codex"}}]}):
+            from dhee.hooks.claude_code.assembler import AssembledContext
+            mock_assemble.return_value = AssembledContext(doc_matches=[], typed_cognition={})
+            result = handle_user_prompt({"prompt": "continue"})
+            assert "systemMessage" in result
+            assert "<live" in result["systemMessage"]
+            assert "failing test" in result["systemMessage"]
+
+    def test_user_prompt_no_signal_returns_empty(self):
+        """When no docs match AND no edits / no last_session / no shared task,
+        inject nothing. UserPromptSubmit now also rides along edits and
+        repo continuity, so off-topic-no-signal must clear all four sources."""
+        from dhee.hooks.claude_code.__main__ import handle_user_prompt
+
+        with patch("dhee.hooks.claude_code.__main__._get_dhee"), \
+             patch("dhee.hooks.claude_code.assembler.assemble_docs_only", return_value=[]), \
+             patch("dhee.hooks.claude_code.assembler.assemble") as mock_assemble, \
+             patch("dhee.router.edit_ledger.render_block", return_value=""), \
+             patch("dhee.hooks.claude_code.__main__._repo_last_session", return_value=None), \
+             patch("dhee.hooks.claude_code.__main__._shared_snapshot", return_value={"task": None, "results": []}):
+            from dhee.hooks.claude_code.assembler import AssembledContext
+            mock_assemble.return_value = AssembledContext(doc_matches=[], typed_cognition={})
             result = handle_user_prompt({"prompt": "random question about quantum physics"})
             assert result == {}
 
@@ -673,7 +792,11 @@ class TestDispatchHandlers:
 
         with patch("dhee.hooks.claude_code.__main__._get_dhee") as mock, \
              patch("dhee.hooks.claude_code.assembler.assemble") as mock_assemble, \
-             patch("dhee.hooks.claude_code.ingest.auto_ingest_project"):
+             patch("dhee.hooks.claude_code.ingest.auto_ingest_project"), \
+             patch("dhee.hooks.claude_code.__main__._repo_last_session", return_value=None), \
+             patch("dhee.hooks.claude_code.__main__._shared_snapshot",
+                   return_value={"task": None, "results": []}), \
+             patch("dhee.hooks.claude_code.__main__._repo_context_for", return_value=[]):
             mock_assemble.return_value = AssembledContext(
                 doc_matches=[], typed_cognition={},
             )
@@ -686,7 +809,8 @@ class TestDispatchHandlers:
 
         with patch("dhee.hooks.claude_code.__main__._get_dhee"), \
              patch("dhee.hooks.claude_code.assembler.assemble") as mock_assemble, \
-             patch("dhee.hooks.claude_code.ingest.auto_ingest_project"):
+             patch("dhee.hooks.claude_code.ingest.auto_ingest_project"), \
+             patch("dhee.hooks.claude_code.__main__._repo_last_session", return_value=None):
             mock_assemble.return_value = AssembledContext(
                 doc_matches=[
                     DocMatch(text="Always run pytest before committing",
@@ -709,7 +833,8 @@ class TestDispatchHandlers:
 
         with patch("dhee.hooks.claude_code.__main__._get_dhee"), \
              patch("dhee.hooks.claude_code.assembler.assemble") as mock_assemble, \
-             patch("dhee.hooks.claude_code.ingest.auto_ingest_project"):
+             patch("dhee.hooks.claude_code.ingest.auto_ingest_project"), \
+             patch("dhee.hooks.claude_code.__main__._repo_last_session", return_value=None):
             mock_assemble.return_value = AssembledContext(
                 doc_matches=[],
                 typed_cognition={"warnings": ["auth module churned 5x last week"]},
@@ -717,6 +842,24 @@ class TestDispatchHandlers:
             result = handle_session_start({})
             assert "systemMessage" in result
             assert "auth module" in result["systemMessage"]
+
+    def test_session_start_shared_context_first_loads_last_session(self, monkeypatch):
+        from dhee.hooks.claude_code.__main__ import handle_session_start
+        from dhee.hooks.claude_code.assembler import AssembledContext
+
+        monkeypatch.setenv("DHEE_SHARED_CONTEXT_FIRST", "1")
+        with patch("dhee.hooks.claude_code.__main__._get_dhee"), \
+             patch("dhee.hooks.claude_code.assembler.assemble") as mock_assemble, \
+             patch("dhee.hooks.claude_code.ingest.auto_ingest_project"), \
+             patch("dhee.hooks.claude_code.__main__._repo_last_session",
+                   return_value={"task_summary": "continued Nfinite background", "todos": ["tune frames"]}), \
+             patch("dhee.hooks.claude_code.__main__._shared_snapshot",
+                   return_value={"task": None, "results": []}), \
+             patch("dhee.hooks.claude_code.__main__._repo_context_for", return_value=[]):
+            mock_assemble.return_value = AssembledContext(doc_matches=[], typed_cognition={})
+            result = handle_session_start({"task_description": "new repo task"})
+            assert "systemMessage" in result
+            assert "continued Nfinite background" in result["systemMessage"]
 
     def test_stop_handler_calls_checkpoint(self):
         from dhee.hooks.claude_code.__main__ import handle_stop

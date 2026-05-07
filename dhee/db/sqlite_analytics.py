@@ -2,9 +2,10 @@ import hashlib
 import json
 import sqlite3
 import uuid
+from datetime import timedelta
 from typing import Any, Dict, List, Optional
 
-from .sqlite_common import _utcnow_iso
+from .sqlite_common import _utcnow, _utcnow_iso
 
 
 class SQLiteAnalyticsMixin:
@@ -527,6 +528,72 @@ class SQLiteAnalyticsMixin:
         pitch deck. Deduped by SHA-256 within a (workspace, project)
         scope.
         """
+        if self._is_migration_applied(conn, "v8_project_assets"):
+            self._ensure_workspace_line_receipts_migration(conn)
+            return
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS project_assets (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                project_id TEXT,
+                user_id TEXT NOT NULL,
+                artifact_id TEXT,
+                folder TEXT,
+                storage_path TEXT NOT NULL,
+                name TEXT NOT NULL,
+                mime_type TEXT,
+                size_bytes INTEGER DEFAULT 0,
+                checksum TEXT,
+                metadata TEXT DEFAULT '{}',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_project_assets_workspace
+                ON project_assets(workspace_id, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_project_assets_project
+                ON project_assets(project_id, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_project_assets_storage_path
+                ON project_assets(storage_path);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_project_assets_checksum_scope
+                ON project_assets(workspace_id, COALESCE(project_id, ''), checksum)
+                WHERE checksum IS NOT NULL;
+            """
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version) VALUES ('v8_project_assets')"
+        )
+        self._ensure_workspace_line_receipts_migration(conn)
+
+    def _ensure_workspace_line_receipts_migration(self, conn: sqlite3.Connection) -> None:
+        """Track which active agent consumers have seen live line messages."""
+        if self._is_migration_applied(conn, "v9_workspace_line_receipts"):
+            return
+        self._ensure_project_assets_migration_without_receipts(conn)
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS workspace_line_receipts (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                consumer_id TEXT NOT NULL,
+                metadata TEXT DEFAULT '{}',
+                read_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(workspace_id, message_id, user_id, consumer_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_workspace_line_receipts_consumer
+                ON workspace_line_receipts(workspace_id, user_id, consumer_id, read_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_workspace_line_receipts_message
+                ON workspace_line_receipts(message_id, consumer_id);
+            """
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version) VALUES ('v9_workspace_line_receipts')"
+        )
+
+    def _ensure_project_assets_migration_without_receipts(self, conn: sqlite3.Connection) -> None:
+        """Compatibility helper for v9 bootstrap without recursive migration calls."""
         if self._is_migration_applied(conn, "v8_project_assets"):
             return
         conn.executescript(
@@ -1721,6 +1788,91 @@ class SQLiteAnalyticsMixin:
             rows = conn.execute(query, params).fetchall()
         return [self._workspace_line_row_to_dict(row) for row in rows]
 
+    def list_workspace_line_unread(
+        self,
+        *,
+        workspace_id: str,
+        user_id: str = "default",
+        consumer_id: str,
+        project_id: Optional[str] = None,
+        channel: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """List live line messages not yet acknowledged by this consumer."""
+        consumer_id = str(consumer_id or "").strip()
+        if not consumer_id:
+            raise ValueError("consumer_id is required")
+        query = """
+            SELECT m.*
+            FROM workspace_line_messages m
+            LEFT JOIN workspace_line_receipts r
+              ON r.workspace_id = m.workspace_id
+             AND r.message_id = m.id
+             AND r.user_id = m.user_id
+             AND r.consumer_id = ?
+            WHERE m.workspace_id = ? AND m.user_id = ? AND r.message_id IS NULL
+        """
+        params: List[Any] = [consumer_id, workspace_id, user_id]
+        if project_id:
+            query += " AND (m.project_id = ? OR m.target_project_id = ?)"
+            params.extend([project_id, project_id])
+        if channel:
+            query += " AND m.channel = ?"
+            params.append(channel)
+        query += " ORDER BY m.created_at DESC, m.id DESC LIMIT ?"
+        try:
+            cap = max(1, min(200, int(limit) * 5))
+        except (TypeError, ValueError):
+            cap = 100
+        params.append(cap)
+        with self._get_connection() as conn:
+            self._ensure_workspace_hierarchy_tables(conn)
+            self._ensure_workspace_line_receipts_migration(conn)
+            rows = conn.execute(query, params).fetchall()
+        return [self._workspace_line_row_to_dict(row) for row in rows]
+
+    def mark_workspace_line_messages_read(
+        self,
+        *,
+        workspace_id: str,
+        user_id: str = "default",
+        consumer_id: str,
+        message_ids: List[str],
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        """Mark a set of live line messages as read for one consumer."""
+        consumer_id = str(consumer_id or "").strip()
+        if not consumer_id:
+            raise ValueError("consumer_id is required")
+        ids = [str(mid).strip() for mid in (message_ids or []) if str(mid or "").strip()]
+        if not ids:
+            return 0
+        now = _utcnow_iso()
+        meta = json.dumps(metadata or {})
+        wrote = 0
+        with self._get_connection() as conn:
+            self._ensure_workspace_hierarchy_tables(conn)
+            self._ensure_workspace_line_receipts_migration(conn)
+            for message_id in ids:
+                cur = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO workspace_line_receipts (
+                        id, workspace_id, message_id, user_id, consumer_id, metadata, read_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(uuid.uuid4()),
+                        workspace_id,
+                        message_id,
+                        user_id,
+                        consumer_id,
+                        meta,
+                        now,
+                    ),
+                )
+                wrote += int(cur.rowcount or 0)
+        return wrote
+
     def upsert_agent_session(self, session: Dict[str, Any]) -> Dict[str, Any]:
         user_id = str(session.get("user_id") or "default")
         runtime_id = str(session.get("runtime_id") or "").strip()
@@ -2350,6 +2502,30 @@ class SQLiteAnalyticsMixin:
                     (shared_task_id,),
                 )
         return bool(cur.rowcount)
+
+    def close_stale_shared_tasks(
+        self,
+        *,
+        user_id: str = "default",
+        max_age_hours: int = 24,
+        status: str = "closed",
+    ) -> int:
+        # Bulk close active tasks whose updated_at is older than the cutoff.
+        # ISO-8601 strings in `updated_at` sort lexicographically, so a string
+        # comparison is safe and avoids per-row datetime parsing.
+        cutoff = (_utcnow() - timedelta(hours=max(0, int(max_age_hours)))).isoformat()
+        now = _utcnow_iso()
+        with self._get_connection() as conn:
+            self._ensure_project_graph_tables(conn)
+            cur = conn.execute(
+                """
+                UPDATE shared_tasks
+                SET status = ?, updated_at = ?, closed_at = ?
+                WHERE user_id = ? AND status = 'active' AND updated_at < ?
+                """,
+                (status, now, now, user_id, cutoff),
+            )
+        return int(cur.rowcount or 0)
 
     def save_shared_task_result(self, result: Dict[str, Any]) -> str:
         shared_task_id = str(result.get("shared_task_id") or "").strip()
@@ -3223,7 +3399,7 @@ class SQLiteAnalyticsMixin:
                     confidence, locality_scope, project_id, workspace_id, folder_path,
                     session_id, thread_id, runtime_id, agent_id,
                     source_path, token_delta, outcome_alignment, metadata, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     decision_id,

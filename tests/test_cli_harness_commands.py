@@ -25,6 +25,11 @@ def test_install_all_and_status_round_trip(tmp_path, monkeypatch, capsys):
     assert data["claude_code"]["mcp_registered"] is True
     assert data["codex"]["enabled_in_config"] is True
     assert data["codex"]["mcp_registered"] is True
+    assert data["codex"]["native"] is True
+    assert data["codex"]["native_level"] == "closest_available"
+    assert data["codex"]["router_env"] == "1"
+    assert data["codex"]["context_first"] == "1"
+    assert data["codex"]["router_contract"] == "context_first"
 
 
 def test_disable_codex_via_cli(tmp_path, monkeypatch, capsys):

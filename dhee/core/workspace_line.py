@@ -258,6 +258,7 @@ def emit_agent_activity(
     agent_id: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
     result_status: str = "completed",
+    baseline_content: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Publish an agent tool-call onto the workspace information line.
 
@@ -265,10 +266,53 @@ def emit_agent_activity(
       * no workspace could be resolved (silently skipped; the line is
         workspace-scoped)
       * the dedup key matched an existing entry (silently skipped)
+      * **the per-file baseline gate suppressed the emit** because the
+        agent already saw this exact content at this path. Subsequent
+        identical reads add no information and would just inflate the
+        live block.
       * the DB doesn't expose ``add_workspace_line_message`` (old schema)
+
+    The baseline gate runs only when ``baseline_content`` is supplied
+    *and* the packet kind names a content-bearing read (see
+    ``file_baseline._READ_KINDS``). Edit/Write callers should leave
+    ``baseline_content=None`` and call
+    ``file_baseline.update_after_write`` separately so subsequent reads
+    diff against what they just wrote, not the pre-edit state.
     """
     if not hasattr(db, "add_workspace_line_message"):
         return None
+
+    # Per-file baseline dedup. Decided before workspace resolution so a
+    # `suppress` decision short-circuits the rest of the work.
+    baseline_meta: Dict[str, Any] = {}
+    if baseline_content is not None and source_path:
+        try:
+            from dhee.core import file_baseline
+            from dhee import repo_link as _repo_link
+
+            baseline_repo_id: Optional[str] = None
+            try:
+                root = _repo_link.repo_for_path(source_path) or _repo_link.repo_for_path(cwd or "")
+                if root is not None:
+                    links = _repo_link.list_links()
+                    baseline_repo_id = str(((links.get(str(root)) or {}).get("repo_id")) or "") or None
+            except Exception:
+                baseline_repo_id = None
+
+            decision = file_baseline.check_emit(
+                repo_id=baseline_repo_id,
+                source_path=source_path,
+                content=baseline_content,
+                packet_kind=packet_kind,
+                digest=digest,
+            )
+            if decision.action == "suppress":
+                return None
+            if decision.action == "emit_delta":
+                digest = decision.digest
+            baseline_meta = dict(decision.metadata or {})
+        except Exception:
+            baseline_meta = {}
 
     workspace_id, project_id = resolve_workspace_and_project(
         db,
@@ -281,6 +325,20 @@ def emit_agent_activity(
         cwd=cwd,
         source_path=source_path,
     )
+    if not workspace_id:
+        try:
+            from dhee.core.live_context import ensure_workspace_for_path
+
+            workspace = ensure_workspace_for_path(
+                db,
+                user_id=user_id,
+                repo=repo,
+                cwd=cwd,
+                source_path=source_path,
+            )
+            workspace_id = str((workspace or {}).get("id") or "").strip() or None
+        except Exception:
+            workspace_id = None
     if not workspace_id:
         return None
 
@@ -313,6 +371,9 @@ def emit_agent_activity(
     }
     if metadata:
         for key, value in metadata.items():
+            meta.setdefault(key, value)
+    if baseline_meta:
+        for key, value in baseline_meta.items():
             meta.setdefault(key, value)
 
     # Auto-link a project/workspace asset if this tool call touched one.

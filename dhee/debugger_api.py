@@ -28,6 +28,9 @@ except ImportError as exc:  # pragma: no cover - import handled at runtime
 else:
     _FASTAPI_IMPORT_ERROR = None
 
+_LOCAL_UI_ORIGIN_REGEX = r"https?://(localhost|127\.0\.0\.1|\[::1\])(:[0-9]+)?"
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
 
 def _default_cognition_dir() -> str:
     return (
@@ -127,8 +130,8 @@ def create_app(data_dir: Optional[str] = None) -> FastAPI:
     app = FastAPI(title="Dhee Cognitive Debugger API", version="0.1.0")
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
+        allow_origin_regex=os.environ.get("DHEE_DEBUGGER_CORS_ORIGIN_REGEX") or _LOCAL_UI_ORIGIN_REGEX,
+        allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -336,5 +339,10 @@ def run() -> None:  # pragma: no cover - integration entry point
 
     app = create_app()
     host = os.environ.get("DHEE_DEBUGGER_HOST", "127.0.0.1")
+    if host not in _LOOPBACK_HOSTS and os.environ.get("DHEE_DEBUGGER_ALLOW_PUBLIC") != "1":
+        raise RuntimeError(
+            "Refusing to expose the debugger API on a non-loopback host. "
+            "Set DHEE_DEBUGGER_ALLOW_PUBLIC=1 only behind trusted network controls."
+        )
     port = int(os.environ.get("DHEE_DEBUGGER_PORT", "8000"))
     uvicorn.run(app, host=host, port=port)

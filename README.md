@@ -2,12 +2,12 @@
   <img src="docs/dhee-logo.png" alt="Dhee" width="80">
 </p>
 
-<h1 align="center">Dhee — the Developer Brain for AI coding agents</h1>
+<h1 align="center">Dhee — the information layer for collaborating AI agents</h1>
 
-<h3 align="center">Local memory + context router for Claude Code, Codex, Cursor, Gemini CLI, Aider, Cline, and any MCP client.</h3>
+<h3 align="center">Local memory, shared learnings, and context routing for Hermes, Claude Code, Codex, Cursor, Gemini CLI, Aider, Cline, and any MCP client.</h3>
 
 <p align="center">
-  Give your agent a brain that <b>remembers what it learned</b>, <b>shares context across your team via git</b>, and <b>cuts LLM tokens by 90%</b> — without a hosted service.
+  Dhee is the information layer through which your agents collaborate. When one agent creates a reusable learning, Dhee captures it as a candidate; once promoted, every connected agent can use it.
 </p>
 
 <p align="center">
@@ -22,11 +22,12 @@
 </p>
 
 <p align="center">
-  <img src="docs/demo/demo.gif" alt="Dhee demo — fat skills, thin tokens, self-evolving retrieval" width="900">
+  <img src="docs/demo/demo.gif" alt="Dhee demo — fat skills, thin tokens, self-tuning retrieval" width="900">
 </p>
 
 <p align="center">
   <a href="#what-is-dhee">What is Dhee</a> ·
+  <a href="#shared-agent-learning">Shared Agent Learning</a> ·
   <a href="#quick-start">Quick Start</a> ·
   <a href="#repo-shared-context">Repo-Shared Context</a> ·
   <a href="#benchmarks">Benchmarks</a> ·
@@ -39,19 +40,62 @@
 
 ## What is Dhee?
 
-**Dhee is the developer brain that lives next to your AI coding agent.** It runs locally, uses SQLite, plugs into any MCP client, and does three jobs the model can't do for itself:
+**Dhee is the local information layer through which your agents collaborate.** It runs on your machine, uses SQLite, plugs into Hermes, Claude Code, Codex, and any MCP client, and does four jobs the model can't do for itself:
 
-1. **🧠 Remembers.** Doc chunks, decisions, what worked, what failed, user preferences. Ebbinghaus decay pushes stale knowledge out of the hot path; frequently-used memory gets promoted. Five years in, your per-turn injection is still ~300 tokens of the *right* stuff.
+1. **🧠 Remembers.** Doc chunks, decisions, what worked, what failed, user preferences. Ebbinghaus decay pushes stale knowledge out of the hot path; frequently-used memory gets promoted. Per-turn context stays bounded and relevant instead of becoming another giant prompt file.
 
-2. **🔁 Routes.** A 10 MB `git log` becomes a 40-token digest with a pointer. Raw output only re-enters context when the model explicitly expands it. Over a session that's a 90%+ token cut with zero information loss.
+2. **🔁 Routes.** A 10 MB `git log` becomes a compact digest with a pointer. Raw output only re-enters context when the model explicitly expands it. On heavy tool-output calls, this is where the 90%+ token reduction comes from.
 
-3. **🌱 Self-evolves.** Dhee watches which digests the model expands, which rules it ignores, which retrievals it actually uses — and tunes its own depth per tool, per intent, per file type. No config to hand-maintain. The longer your team uses it, the better it fits your workflow.
+3. **🌱 Shares learnings.** Hermes memory, session traces, and agent-created skills flow into Dhee as auditable learning candidates. Only promoted learnings appear as "Learned Playbooks" for Claude Code, Codex, Hermes, and any Dhee-enabled agent. No separate middleman agent.
+
+4. **⚙️ Self-tunes.** Dhee watches which digests the model expands and which retrieval depths are useful, then tunes router policy per tool, per intent, per file type. The goal is not a bigger prompt; it is a smaller, better one.
 
 ### Who it's for
 
 - **Every Claude Code / Cursor / Codex / Gemini CLI / Aider / Cline user** who has ever hit a context limit or a $200 token bill.
+- **Hermes users** who already have a self-evolving agent and want those learnings to make Claude Code and Codex smarter too.
 - **Any team** with a 2,000-line `CLAUDE.md`, a Skills library, an `AGENTS.md`, or a prompt library that's "too big for context." Stop pruning. Dhee handles delivery.
 - **Anyone who wants their team to share context through git** — the same way they share code.
+
+---
+
+## <span id="shared-agent-learning">Shared Agent Learning — one promoted learning, every agent benefits</span>
+
+Hermes can evolve its own skills and memories. Claude Code has native hooks. Codex has MCP config, `AGENTS.md`, and a persisted session stream. Dhee is the information layer underneath them: it turns separate agent histories into shared, gated context.
+
+```text
+Hermes MemoryProvider
+  ├─ MEMORY.md / USER.md writes
+  ├─ agent-created skills
+  ├─ session summaries and outcomes
+  └─ self-evolution traces
+          │
+          ▼
+      Dhee Learning Exchange
+          │
+          ├─ candidate  -> review / evidence / score
+          ├─ promoted   -> injected as Learned Playbooks
+          └─ rejected   -> auditable, never injected
+          │
+          ▼
+Claude Code · Codex · Hermes · any MCP client
+```
+
+What this means in practice:
+
+- Your existing Hermes progress is not stranded inside Hermes. `dhee install` detects Hermes when present, installs Dhee as a Hermes `MemoryProvider` at `~/.hermes/plugins/memory/dhee`, and imports local Hermes memory files, session summaries, and agent-created skills into Dhee.
+- Claude Code and Codex do not need to launch Hermes to benefit. They receive promoted Hermes/Dhee learnings through normal Dhee context and MCP tools.
+- New Claude Code and Codex outcomes can become Dhee learning candidates too. After promotion, Hermes can read them back through the same provider.
+- Candidate learnings are never auto-injected. Trusted Hermes `MEMORY.md` / `USER.md` imports may be promoted during install; Hermes `SOUL.md`, session traces, and agent-created skills stay candidates until explicitly approved or promoted by policy.
+
+This is the product contract: **with Dhee, a learning proven in one agent can become a promoted playbook for every connected agent.**
+
+### Reality check
+
+- **Hermes native:** Dhee integrates as a Hermes `MemoryProvider`, the first-class Hermes memory-plugin surface. Hermes allows one active external memory provider, so V1 replaces Honcho/Mem0/etc. while `memory.provider: dhee` is active.
+- **Claude Code native:** Dhee uses Claude Code hooks, MCP, and router enforcement. This is the strongest integration surface.
+- **Codex native:** Codex does not expose Claude-style pre-tool hooks here. Dhee uses the closest native Codex surfaces: `~/.codex/config.toml`, global `~/.codex/AGENTS.md`, MCP server instructions, and Codex session-stream auto-sync.
+- **Promotion gate:** Imported Hermes skills and session traces are candidates by default. Rejected or archived learnings remain auditable but are excluded from retrieval.
 
 ---
 
@@ -63,7 +107,7 @@
 curl -fsSL https://raw.githubusercontent.com/Sankhya-AI/Dhee/main/install.sh | sh
 ```
 
-The installer creates `~/.dhee/`, installs the `dhee` package, and auto-wires Claude Code and Codex hooks. Open your agent in any project — cognition is on.
+The installer creates `~/.dhee/`, installs the `dhee` package, and auto-wires Claude Code, Codex, and Hermes when detected. Open your agent in any project — cognition is on.
 
 <details>
 <summary><b>Other install paths</b></summary>
@@ -86,6 +130,9 @@ After install, Dhee auto-ingests project docs (`CLAUDE.md`, `AGENTS.md`, `SKILL.
 
 ```bash
 dhee install                  # configure local agent harnesses
+dhee hermes status            # see whether Hermes is detected and Dhee-backed
+dhee hermes sync --dry-run    # preview Hermes memories/skills before import
+dhee learn search --include-candidates  # inspect candidates and promotions
 dhee link /path/to/repo       # share context with teammates through this repo
 dhee context refresh          # refresh repo context after pull/checkout
 dhee handoff                  # compact continuity for current repo/session
@@ -213,7 +260,7 @@ Four MCP tools replace `Read` / `Bash` / `Agent` on heavy calls:
 
 A 10 MB `git log --oneline -50000` becomes a ~200-token digest. This is where the serious savings live.
 
-### Self-evolution — the part nobody else does
+### Self-tuning retrieval
 
 Most memory layers are static: you write rules, they retrieve. Dhee watches what happens and tunes itself.
 
@@ -231,18 +278,29 @@ Frontend-heavy teams get deeper JS/TS digests. Data teams get richer CSV/JSONL s
 |:--|:-:|:-:|:-:|:-:|:-:|:-:|
 | **Tokens / turn** | **~300** | 2,000+ | varies | ~1K+ | varies | ~1,900 |
 | **LongMemEval R@5** | **99.4%** | — | — | — | 96.6% | 95.2% |
-| **Self-evolving retrieval** | **Yes** | No | No | No | No | No |
+| **Self-tuning retrieval** | **Yes** | No | No | No | No | No |
+| **Hermes → Claude/Codex learning exchange** | **Yes** | No | No | No | No | No |
 | **Auto-digest tool output** | **Yes** | No | No | No | No | No |
 | **Git-shared team context** | **Yes** | Manual | No | No | No | No |
 | **Works across MCP agents** | **Yes** | No | Partial | No | Yes | Yes |
 | **External DB required** | No (SQLite) | No | Qdrant/pgvector | Postgres+vector | No | No |
 | **License** | MIT | — | Apache-2 | Apache-2 | MIT | MIT |
 
-Dhee is the only one that **reduces tokens, leads on recall, self-evolves its retrieval policy, and shares team context through git.**
+Dhee combines **token reduction, reproducible recall benchmarks, self-tuning retrieval policy, git-shared team context, and promoted cross-agent learning** in one local-first collaboration layer.
 
 ---
 
 ## Integrations
+
+### Hermes Agent — native MemoryProvider
+
+```bash
+dhee install                  # detects Hermes and enables Dhee when present
+dhee hermes status
+dhee hermes sync --dry-run
+```
+
+Dhee installs as the Hermes memory provider, mirrors Hermes memory writes, imports local Hermes memory files, and checkpoints Hermes sessions into Dhee learning candidates. Curated `MEMORY.md` / `USER.md` imports can be promoted on install; `SOUL.md`, session traces, and agent-created skills stay gated. Promoted playbooks flow back into Hermes through the provider and out to Claude Code/Codex through Dhee context.
 
 ### Claude Code — native hooks
 
@@ -250,9 +308,18 @@ Dhee is the only one that **reduces tokens, leads on recall, self-evolves its re
 pip install dhee && dhee install
 ```
 
-Six lifecycle hooks fire at the right moments. No SKILL.md, no plugin directory. The agent doesn't even know Dhee is there — it just gets better context.
+Six lifecycle hooks fire at the right moments. Claude Code gets Dhee handoff, shared tasks, inbox broadcasts, learned playbooks, and router enforcement for heavy `Read`/`Bash`/`Grep` calls.
 
-### MCP server — Cursor, Codex, Gemini CLI, Cline, Goose, anything MCP
+### Codex — closest native surface
+
+```bash
+pip install dhee && dhee install --harness codex
+dhee harness status --harness codex
+```
+
+Dhee writes `~/.codex/config.toml`, manages a global `~/.codex/AGENTS.md` block, advertises context-first MCP instructions, and tails Codex session logs on Dhee calls. Codex does not currently expose Claude-style pre-tool hooks, so this is the strongest truthful native integration available.
+
+### MCP server — Cursor, Gemini CLI, Cline, Goose, anything MCP
 
 ```json
 {
@@ -287,7 +354,8 @@ pip install dhee[ollama,mcp]    # local, no API costs
 | | **Public Dhee** (this repo, MIT) | **Dhee Enterprise** (private) |
 |:--|:--|:--|
 | Local memory + router | ✅ | ✅ |
-| Self-evolving retrieval | ✅ | ✅ |
+| Self-tuning retrieval | ✅ | ✅ |
+| Hermes → Claude Code/Codex learning exchange | ✅ | ✅ |
 | Git-shared repo context | ✅ | ✅ |
 | Claude Code / Codex / MCP | ✅ | ✅ |
 | Org / team management | — | ✅ |
@@ -295,7 +363,7 @@ pip install dhee[ollama,mcp]    # local, no API costs
 | Owner dashboard, billing, licensing | — | ✅ |
 | Sentry-derived security telemetry | — | ✅ |
 
-Public Dhee is the developer brain — lightweight, trustworthy, and complete on its own. The commercial layer is closed-source and lives in `Sankhya-AI/dhee-enterprise`.
+Public Dhee is the local collaboration layer — lightweight, trustworthy, and complete on its own. The commercial layer is closed-source and lives in `Sankhya-AI/dhee-enterprise`.
 
 ---
 
@@ -305,16 +373,22 @@ Public Dhee is the developer brain — lightweight, trustworthy, and complete on
 Large agent projects accumulate a fat `CLAUDE.md`, `AGENTS.md`, skills library, and tool output that get re-injected every turn. Dhee chunks, indexes, and decays that knowledge, and digests fat tool output at the source — so only the relevant ~300 tokens reach the model.
 
 **How is Dhee different from Mem0, Letta, MemPalace, agentmemory?**
-Dhee is the only memory layer that (a) leads [LongMemEval](https://github.com/xiaowu0162/LongMemEval) at R@5 99.4% on the full 500-question set, (b) self-evolves its retrieval policy per tool and per intent, (c) ships a **router** that digests `Read`/`Bash`/subagent output at source, and (d) shares team context through git instead of a server.
+Dhee is built around four pieces most tools treat separately: reproducible LongMemEval results, a self-tuning retrieval/router policy, source-side digests for heavy `Read`/`Bash`/subagent output, and git-shared team context instead of a server.
 
 **Does Dhee work with Claude Code, Cursor, Codex, Gemini CLI, Aider?**
-Yes. Native Claude Code hooks, an MCP server for every other host, plus a Python SDK and CLI. One install, every agent.
+Yes. Native Claude Code hooks, closest-native Codex config/AGENTS/session-stream sync, a Hermes MemoryProvider, an MCP server for every other host, plus a Python SDK and CLI. One install, every agent.
+
+**Does Hermes make Claude Code and Codex smarter?**
+Yes, through Dhee's learning exchange after promotion. Dhee can install as Hermes' memory provider, import Hermes memory/session/skill artifacts, and expose promoted learnings to Claude Code, Codex, and any MCP client as Learned Playbooks. Claude/Codex do not have to run Hermes to benefit.
+
+**Does Claude Code or Codex evolve Hermes back?**
+Yes, after promotion. Claude Code hooks, Codex session-stream sync, MCP memory tools, and learning submissions create Dhee learning candidates. Promoted personal/repo/workspace playbooks are retrieved by Hermes through the Dhee provider.
 
 **How does the team-context sharing actually work?**
 `dhee link /path/to/repo` writes a `.dhee/` directory inside your repo. Commit it. Teammates pull, install Dhee, and their agent surfaces the same shared decisions and conventions. Append-only with conflict detection — no overwrites, no server, no account.
 
 **Is Dhee production-ready? What storage?**
-SQLite by default. No Postgres, no Qdrant, no pgvector, no infra. 1000+ tests, reproducible benchmarks in-tree, MIT, works offline with Ollama or online with OpenAI / NVIDIA NIM / Gemini.
+SQLite by default. No Postgres, no Qdrant, no pgvector, no infra. The regression suite and reproducible benchmarks live in-tree. MIT, works offline with Ollama or online with OpenAI / NVIDIA NIM / Gemini.
 
 **Where are the benchmarks and can I reproduce them?**
 [`benchmarks/longmemeval/`](benchmarks/longmemeval/) — full command, per-question JSONL, `metrics.json`. Clone, run, recompute R@k. Any mismatch is an issue you can open.
@@ -333,7 +407,7 @@ pytest
 ---
 
 <p align="center">
-  <b>Your fat skills stay fat. Your token bill stays thin. Your agent gets smarter every session.</b>
+  <b>Your fat skills stay fat. Your token bill stays thin. Promoted learnings travel with every agent.</b>
   <br><br>
   <a href="https://github.com/Sankhya-AI/Dhee">GitHub</a> ·
   <a href="https://pypi.org/project/dhee">PyPI</a> ·

@@ -9,6 +9,7 @@ Tools:
  2. recall      — Search memory, get top-K results (0 LLM, 1 embed)
  3. context     — HyperAgent bootstrap: performance + insights + intentions + memories
  4. checkpoint  — Save session + batch-enrich stored memories (1 LLM per ~10 memories)
+  5. dhee_* learnings — Submit/search/promote gated cross-agent playbooks
 
 Cost model:
   Hot path (remember/recall): ~$0.0002 per call (1 embedding only)
@@ -26,6 +27,18 @@ from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
 logger = logging.getLogger(__name__)
+
+_MCP_CONTEXT_FIRST_INSTRUCTIONS = (
+    "Dhee is the native memory and context-router. At the start of substantive "
+    "repo/workspace tasks, use Dhee context/recall before reconstructing from "
+    "local files or shell output, then call dhee_inbox for unread live shared "
+    "context. Use dhee_broadcast for context another active agent must see "
+    "immediately. Search promoted Dhee/Hermes learnings when prior evolution "
+    "may apply. Prefer dhee_read and dhee_bash for large reusable "
+    "reads/searches/commands so raw output stays behind pointers. When "
+    "DHEE_HARNESS=codex, Dhee syncs Codex session logs on context/collaboration "
+    "calls so Codex native tool progress becomes shared Dhee context."
+)
 
 # ---------------------------------------------------------------------------
 # Lazy singleton — DheePlugin wraps Engram + Buddhi
@@ -62,11 +75,19 @@ def _get_plugin():
     return _plugin
 
 
+def _get_db():
+    return _get_plugin().memory.db
+
+
+def _default_agent_id(args: Dict[str, Any]) -> str:
+    return str(args.get("agent_id") or os.environ.get("DHEE_AGENT_ID") or "agent")
+
+
 # ---------------------------------------------------------------------------
 # 4 Tools
 # ---------------------------------------------------------------------------
 
-server = Server("dhee")
+server = Server("dhee", instructions=_MCP_CONTEXT_FIRST_INSTRUCTIONS)
 
 TOOLS = [
     Tool(
@@ -96,6 +117,7 @@ TOOLS = [
         name="recall",
         description=(
             "Search memory for relevant facts. Returns top-K results ranked by relevance. "
+            "Use before local reconstruction when prior repo/user context may exist. "
             "Lightweight: 0 LLM calls, 1 embedding call. "
             "Use for: 'What does the user prefer?', 'What did we discuss about X?'"
         ),
@@ -122,6 +144,7 @@ TOOLS = [
         name="context",
         description=(
             "HyperAgent session bootstrap. Call ONCE at conversation start. "
+            "Use before local reconstruction on substantive repo/workspace tasks. "
             "Returns: last session state, performance trends, synthesized insights, "
             "pending intentions, proactive warnings, and top memories. "
             "This single call gives you everything you need to continue where you left off."
@@ -141,7 +164,113 @@ TOOLS = [
                     "type": "boolean",
                     "description": "If true, return compact actionable-only format for per-turn use (default: false)",
                 },
+                "repo": {
+                    "type": "string",
+                    "description": "Optional repo/workspace root to scope promoted learnings",
+                },
             },
+        },
+    ),
+    Tool(
+        name="dhee_submit_learning",
+        description="Submit an auditable learning candidate. Candidates are not injected until promoted.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "body": {"type": "string"},
+                "kind": {"type": "string", "enum": ["skill", "heuristic", "policy", "contrast", "memory", "workflow", "playbook"]},
+                "source_agent_id": {"type": "string"},
+                "source_harness": {"type": "string"},
+                "task_type": {"type": "string"},
+                "repo": {"type": "string"},
+                "scope": {"type": "string", "enum": ["personal", "repo", "workspace"]},
+                "confidence": {"type": "number"},
+                "utility": {"type": "number"},
+                "evidence": {"type": "array", "items": {"type": "object"}},
+            },
+            "required": ["title", "body"],
+        },
+    ),
+    Tool(
+        name="dhee_search_learnings",
+        description="Search promoted Dhee learnings. Include candidates only for explicit review workflows.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "task_type": {"type": "string"},
+                "repo": {"type": "string"},
+                "status": {"type": "string", "enum": ["candidate", "promoted", "rejected", "archived"]},
+                "include_candidates": {"type": "boolean"},
+                "limit": {"type": "integer"},
+            },
+        },
+    ),
+    Tool(
+        name="dhee_promote_learning",
+        description="Promote a learning after gate/approval. Repo and workspace promotions require explicit approval.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "learning_id": {"type": "string"},
+                "scope": {"type": "string", "enum": ["personal", "repo", "workspace"]},
+                "repo": {"type": "string"},
+                "approved_by": {"type": "string"},
+            },
+            "required": ["learning_id"],
+        },
+    ),
+    Tool(
+        name="dhee_inbox",
+        description=(
+            "Fetch unread live shared-context broadcasts for this active agent. "
+            "Call after context/recall and after substantial shared work; a "
+            "non-empty signal means another party broadcast context to read before continuing."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string", "description": "Repo/workspace path"},
+                "workspace_id": {"type": "string", "description": "Explicit workspace id or path override"},
+                "project_id": {"type": "string", "description": "Optional project scope"},
+                "channel": {"type": "string", "description": "Optional channel filter"},
+                "consumer_id": {"type": "string", "description": "Stable consumer id"},
+                "agent_id": {"type": "string", "description": "Agent identity"},
+                "harness": {"type": "string", "description": "Harness/runtime id"},
+                "session_id": {"type": "string", "description": "Native session id"},
+                "limit": {"type": "integer", "description": "Max unread messages (default 10)"},
+                "mark_read": {"type": "boolean", "description": "Mark returned messages read (default true)"},
+                "include_own": {"type": "boolean", "description": "Include own messages"},
+                "user_id": {"type": "string", "description": "User identifier (default: 'default')"},
+            },
+        },
+    ),
+    Tool(
+        name="dhee_broadcast",
+        description=(
+            "Publish live shared context to the workspace line so other active "
+            "agents and UI subscribers receive it immediately."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "body": {"type": "string", "description": "Broadcast body/message"},
+                "title": {"type": "string", "description": "Short title"},
+                "repo": {"type": "string", "description": "Repo/workspace path"},
+                "workspace_id": {"type": "string", "description": "Explicit workspace id or path override"},
+                "project_id": {"type": "string", "description": "Source project id"},
+                "target_project_id": {"type": "string", "description": "Target project id"},
+                "channel": {"type": "string", "description": "Optional channel"},
+                "message_kind": {"type": "string", "description": "Kind label, default broadcast"},
+                "session_id": {"type": "string", "description": "Native session id"},
+                "task_id": {"type": "string", "description": "Related task id"},
+                "metadata": {"type": "object", "description": "Optional metadata"},
+                "agent_id": {"type": "string", "description": "Agent identity"},
+                "harness": {"type": "string", "description": "Harness/runtime id"},
+                "user_id": {"type": "string", "description": "User identifier (default: 'default')"},
+            },
+            "required": ["body"],
         },
     ),
     Tool(
@@ -327,8 +456,94 @@ def _handle_remember(args: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
+_DEFAULT_RECALL_THRESHOLD = 0.6
+
+
+def _recall_threshold(args: Dict[str, Any]) -> float:
+    """Resolve the per-call recall threshold.
+
+    Precedence: explicit ``threshold`` arg → env override → default 0.6.
+    Negative or zero disables filtering (caller wants raw results).
+    """
+    if "threshold" in args and args["threshold"] is not None:
+        try:
+            return float(args["threshold"])
+        except (TypeError, ValueError):
+            pass
+    env = os.environ.get("DHEE_RECALL_THRESHOLD")
+    if env:
+        try:
+            return float(env)
+        except ValueError:
+            pass
+    return _DEFAULT_RECALL_THRESHOLD
+
+
+_RECALL_TOKEN_RE = None
+
+
+def _tokenise(text: str) -> set:
+    """Crude lowercase word-set used to compute the per-result ``why``.
+
+    Intentionally cheap: no stemming, no stopword list. Match overlap
+    here is a transparency signal, not a relevance score — the
+    embedding score is the source of truth for ranking.
+    """
+    global _RECALL_TOKEN_RE
+    if _RECALL_TOKEN_RE is None:
+        import re as _re
+
+        _RECALL_TOKEN_RE = _re.compile(r"[a-zA-Z][a-zA-Z0-9_-]{2,}")
+    out = {m.lower() for m in _RECALL_TOKEN_RE.findall(text or "")}
+    out.discard("the")
+    out.discard("and")
+    out.discard("for")
+    out.discard("from")
+    out.discard("with")
+    out.discard("that")
+    out.discard("this")
+    out.discard("how")
+    out.discard("what")
+    return out
+
+
+def _recall_why(query: str, memory_text: str, *, max_terms: int = 5) -> str:
+    """Return a short comma-list of overlapping query/memory terms.
+
+    Helps the model decide whether a low-mid score result is genuine.
+    Empty string when there's no overlap (we still return the result if
+    score passed threshold — embedding match without lexical overlap is
+    legitimate, just unexplained).
+    """
+    qt = _tokenise(query)
+    mt = _tokenise(memory_text)
+    if not qt or not mt:
+        return ""
+    shared = qt & mt
+    if not shared:
+        return ""
+    ordered = sorted(shared, key=lambda t: -len(t))[:max_terms]
+    return ", ".join(ordered)
+
+
 def _handle_recall(args: Dict[str, Any]) -> Dict[str, Any]:
-    """Search memory. 0 LLM calls, 1 embed."""
+    """Search memory. 0 LLM calls, 1 embed.
+
+    Fuses personal memory hits with shared entries from any linked
+    repo containing the request's ``cwd`` (or the process cwd when not
+    supplied), so a coding agent sitting in a linked repo sees both
+    its user's personal memory and the team's shared context.
+
+    Quality controls:
+
+    * **Threshold filter** — drops results whose composite score is
+      below ``DHEE_RECALL_THRESHOLD`` (default 0.6). Honest empty is
+      better than misleading low-score noise: the model doesn't waste
+      tokens or get biased by tangentially-related memories. Override
+      per-call with ``threshold`` in args, or globally via env.
+    * **``why`` field** — lists overlapping query/memory terms so the
+      caller can sanity-check whether the match is real.
+    """
     query = args.get("query", "")
     if not query:
         return {"error": "query is required"}
@@ -336,23 +551,62 @@ def _handle_recall(args: Dict[str, Any]) -> Dict[str, Any]:
     plugin = _get_plugin()
     user_id = args.get("user_id", "default")
     limit = min(max(1, int(args.get("limit", 5))), 20)
+    cwd = args.get("cwd") or os.getcwd()
+    threshold = _recall_threshold(args)
 
-    # Use raw memory search to get proactive signals alongside results
+    # Pull a bigger raw window so the threshold filter doesn't starve
+    # the caller's ``limit``. Cap is conservative to keep one embed call
+    # cheap.
+    raw_limit = min(max(limit * 3, limit), 30)
+
     raw_result = plugin._engram._memory.search(
-        query=query, user_id=user_id, limit=limit,
+        query=query, user_id=user_id, limit=raw_limit,
     )
     results = raw_result.get("results", []) if isinstance(raw_result, dict) else []
 
-    memories = [
-        {
-            "id": r.get("id"),
-            "memory": r.get("memory", ""),
-            "score": round(r.get("composite_score", r.get("score", 0)), 3),
-        }
-        for r in results
-    ]
+    try:
+        from dhee import repo_link
+        fused = repo_link.fuse_search_results(query, results, cwd=cwd, limit=raw_limit)
+    except Exception:
+        fused = list(results)
 
-    response: Dict[str, Any] = {"memories": memories, "count": len(memories)}
+    memories: List[Dict[str, Any]] = []
+    dropped_count = 0
+    lowest_kept_score = None
+    for r in fused:
+        score = float(r.get("composite_score", r.get("score", 0)) or 0)
+        if threshold > 0 and score < threshold:
+            dropped_count += 1
+            continue
+        text = r.get("memory", "") or ""
+        memories.append({
+            "id": r.get("id"),
+            "memory": text,
+            "score": round(score, 3),
+            "source": r.get("source", "personal"),
+            "repo_root": r.get("repo_root"),
+            "title": r.get("title"),
+            "why": _recall_why(query, text),
+        })
+        lowest_kept_score = score if lowest_kept_score is None else min(lowest_kept_score, score)
+        if len(memories) >= limit:
+            break
+
+    response: Dict[str, Any] = {
+        "memories": memories,
+        "count": len(memories),
+        "threshold": round(threshold, 3),
+        "dropped_below_threshold": dropped_count,
+    }
+    if not memories and dropped_count:
+        # Be visibly honest about why nothing came back. The caller can
+        # lower the threshold per-call or via env if they want raw
+        # results.
+        response["note"] = (
+            f"All {dropped_count} candidates fell below threshold "
+            f"{threshold:.2f}. Raise --threshold or set "
+            f"DHEE_RECALL_THRESHOLD=0 to inspect them."
+        )
 
     # Attach Buddhi proactive signals if any
     buddhi_signals = raw_result.get("buddhi") if isinstance(raw_result, dict) else None
@@ -368,7 +622,53 @@ def _handle_context(args: Dict[str, Any]) -> Dict[str, Any]:
         task_description=args.get("task_description"),
         user_id=args.get("user_id", "default"),
         operational=bool(args.get("operational", False)),
+        repo=args.get("repo"),
     )
+
+
+def _handle_dhee_submit_learning(args: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee.core.learnings import LearningExchange
+
+    candidate = LearningExchange().submit(
+        title=str(args.get("title") or ""),
+        body=str(args.get("body") or ""),
+        kind=str(args.get("kind") or "heuristic"),
+        source_agent_id=str(args.get("source_agent_id") or _default_agent_id(args)),
+        source_harness=str(args.get("source_harness") or os.environ.get("DHEE_HARNESS") or "mcp"),
+        task_type=args.get("task_type"),
+        repo=args.get("repo"),
+        scope=str(args.get("scope") or "personal"),
+        confidence=float(args.get("confidence", 0.5) or 0.5),
+        utility=float(args.get("utility", 0.0) or 0.0),
+        evidence=args.get("evidence") or [],
+    )
+    return {"learning": candidate.to_dict()}
+
+
+def _handle_dhee_search_learnings(args: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee.core.learnings import LearningExchange
+
+    rows = LearningExchange().search(
+        query=args.get("query") or "",
+        task_type=args.get("task_type"),
+        repo=args.get("repo"),
+        status=str(args.get("status") or "promoted"),
+        include_candidates=bool(args.get("include_candidates", False)),
+        limit=_bounded_limit(args, "limit", 10, 50),
+    )
+    return {"count": len(rows), "results": rows}
+
+
+def _handle_dhee_promote_learning(args: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee.core.learnings import LearningExchange
+
+    candidate = LearningExchange().promote(
+        str(args.get("learning_id") or ""),
+        scope=str(args.get("scope") or "personal"),
+        repo=args.get("repo"),
+        approved_by=args.get("approved_by"),
+    )
+    return {"learning": candidate.to_dict()}
 
 
 def _handle_checkpoint(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -396,6 +696,70 @@ def _handle_checkpoint(args: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
+def _bounded_limit(args: Dict[str, Any], name: str, default: int, upper: int) -> int:
+    try:
+        return max(1, min(upper, int(args.get(name, default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _handle_dhee_inbox(args: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee.core.live_context import live_context_inbox
+
+    repo = args.get("repo")
+    if repo:
+        repo = os.path.abspath(str(repo))
+    harness = str(args.get("harness") or os.environ.get("DHEE_HARNESS") or _default_agent_id(args))
+    return live_context_inbox(
+        _get_db(),
+        user_id=args.get("user_id", "default"),
+        repo=repo,
+        cwd=repo,
+        workspace_id=args.get("workspace_id") or repo,
+        project_id=args.get("project_id"),
+        channel=args.get("channel"),
+        consumer_id=args.get("consumer_id"),
+        agent_id=_default_agent_id(args),
+        harness=harness,
+        runtime_id=harness,
+        session_id=args.get("session_id"),
+        native_session_id=args.get("session_id"),
+        limit=_bounded_limit(args, "limit", 10, 50),
+        mark_read=bool(args.get("mark_read", True)),
+        include_own=bool(args.get("include_own", False)),
+    )
+
+
+def _handle_dhee_broadcast(args: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee.core.live_context import broadcast_live_context
+
+    metadata = args.get("metadata")
+    if metadata is not None and not isinstance(metadata, dict):
+        return {"error": "metadata must be an object"}
+    repo = args.get("repo")
+    if repo:
+        repo = os.path.abspath(str(repo))
+    harness = str(args.get("harness") or os.environ.get("DHEE_HARNESS") or _default_agent_id(args))
+    return broadcast_live_context(
+        _get_db(),
+        user_id=args.get("user_id", "default"),
+        body=str(args.get("body") or ""),
+        title=args.get("title"),
+        repo=repo,
+        cwd=repo,
+        workspace_id=args.get("workspace_id") or repo,
+        project_id=args.get("project_id"),
+        target_project_id=args.get("target_project_id"),
+        channel=args.get("channel"),
+        message_kind=str(args.get("message_kind") or "broadcast"),
+        session_id=args.get("session_id"),
+        task_id=args.get("task_id"),
+        metadata=metadata or {},
+        agent_id=_default_agent_id(args),
+        harness=harness,
+    )
+
+
 def _handle_dhee_read(args: Dict[str, Any]) -> Dict[str, Any]:
     from dhee.router.handlers import handle_dhee_read
     return handle_dhee_read(args)
@@ -420,6 +784,11 @@ HANDLERS = {
     "remember": _handle_remember,
     "recall": _handle_recall,
     "context": _handle_context,
+    "dhee_submit_learning": _handle_dhee_submit_learning,
+    "dhee_search_learnings": _handle_dhee_search_learnings,
+    "dhee_promote_learning": _handle_dhee_promote_learning,
+    "dhee_inbox": _handle_dhee_inbox,
+    "dhee_broadcast": _handle_dhee_broadcast,
     "checkpoint": _handle_checkpoint,
     "dhee_read": _handle_dhee_read,
     "dhee_bash": _handle_dhee_bash,

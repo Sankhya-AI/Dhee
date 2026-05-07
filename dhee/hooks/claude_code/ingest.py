@@ -41,6 +41,52 @@ _AUTO_INGEST_GLOBS: tuple[str, ...] = (
     ".claude/settings.local.md",
 )
 
+# Extended ingest set used by `dhee init` — pulls in the human-authored
+# context that already lives in most repos. Order is priority order:
+# README first (almost always the repo's elevator pitch), then
+# architecture/design docs, then contribution guidance, then everything
+# else under docs/. The cap in ``init_ingest_project`` keeps this bounded
+# on big monorepos.
+_INIT_PRIORITY_FILES: tuple[str, ...] = (
+    "README.md",
+    "Readme.md",
+    "readme.md",
+    "ARCHITECTURE.md",
+    "DESIGN.md",
+    "CONTRIBUTING.md",
+    "CONTRIBUTORS.md",
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".claude/CLAUDE.md",
+)
+
+# Directory names we never crawl — large, generated, or vendored. Keeps
+# the init pass fast and prevents indexing third-party churn the dev
+# does not own.
+_SKIP_DIRS: frozenset[str] = frozenset({
+    ".git",
+    ".dhee",
+    "node_modules",
+    "vendor",
+    "dist",
+    "build",
+    "target",
+    "out",
+    ".venv",
+    "venv",
+    ".tox",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".next",
+    ".nuxt",
+    ".cache",
+    "coverage",
+    ".gradle",
+    ".idea",
+    ".vscode",
+})
+
 
 @dataclass
 class IngestEntry:
@@ -195,6 +241,159 @@ def auto_ingest_project(
             results.append(r)
 
     return results
+
+
+def prune_deleted_files(dhee: Any, project_root: str | Path) -> dict[str, int]:
+    """Drop manifest entries (and their chunks) for files that no longer
+    exist under *project_root*.
+
+    Re-running ``dhee init`` after a ``git pull`` may surface deletes
+    or renames. ``ingest_file`` already deletes old chunks when a
+    *changed* file's SHA differs, but it never sees a deleted file
+    again — so without explicit pruning the manifest grows with stale
+    entries and recall keeps surfacing chunks of deleted docs.
+
+    Scoping: we only prune entries whose ``source_path`` is under
+    *project_root*. The shared manifest at ``~/.dhee/doc_manifest.json``
+    holds entries for many repos; touching another repo's entries from
+    here would be a regression.
+
+    Returns ``{"files_pruned": N, "chunks_deleted": M}``.
+    """
+    root = Path(project_root).resolve()
+    if not root.is_dir():
+        return {"files_pruned": 0, "chunks_deleted": 0}
+
+    manifest = _load_manifest()
+    if not manifest:
+        return {"files_pruned": 0, "chunks_deleted": 0}
+
+    root_str = str(root) + os.sep
+    files_pruned = 0
+    chunks_deleted = 0
+    keys_to_remove: list[str] = []
+
+    for key, entry in manifest.items():
+        # Scope: only entries whose path lives inside this repo.
+        if not (key == str(root) or key.startswith(root_str)):
+            continue
+        if Path(key).exists():
+            continue
+        # File is gone — drop its chunks and the manifest row.
+        for chunk_id in (entry or {}).get("chunk_ids") or []:
+            try:
+                dhee.delete(chunk_id)
+                chunks_deleted += 1
+            except Exception:
+                pass
+        keys_to_remove.append(key)
+        files_pruned += 1
+
+    if keys_to_remove:
+        for key in keys_to_remove:
+            manifest.pop(key, None)
+        _save_manifest(manifest)
+
+    return {"files_pruned": files_pruned, "chunks_deleted": chunks_deleted}
+
+
+def init_ingest_project(
+    dhee: Any,
+    project_root: str | Path,
+    *,
+    max_chunks: int = 200,
+    force: bool = False,
+    prune: bool = True,
+) -> tuple[list[IngestResult], dict[str, int]]:
+    """Index the markdown surface of a (re-)init'd repo.
+
+    Walks the priority list (README, ARCHITECTURE, CONTRIBUTING, CLAUDE.md,
+    AGENTS.md), then any other top-level ``*.md``, then everything under
+    ``docs/``. Stops once ``max_chunks`` chunks have been stored across
+    the whole pass — big monorepos with hundreds of doc files do not run
+    away with the embedding budget.
+
+    Re-runs (after ``git pull``, after editing a doc, after running init
+    again because the user feels like it) are cheap and correct:
+
+    * SHA-based skip on unchanged files (``ingest_file`` already does this).
+    * Changed files: old chunks deleted, new chunks stored, manifest updated.
+    * **Deleted files: chunks pruned** via :func:`prune_deleted_files`.
+    * Renamed/moved files: treated as a delete + add — old chunks pruned,
+      new chunks stored at the new path.
+
+    Returns ``(results, prune_summary)`` — one ``IngestResult`` per file
+    considered, plus a small dict describing what was pruned.
+    """
+    root = Path(project_root).resolve()
+    if not root.is_dir():
+        return [], {"files_pruned": 0, "chunks_deleted": 0}
+
+    # Prune first so the chunk-cap budget below isn't blocked by stale
+    # entries that would be deleted anyway.
+    prune_summary = (
+        prune_deleted_files(dhee, root) if prune else {"files_pruned": 0, "chunks_deleted": 0}
+    )
+
+    seen: set[Path] = set()
+    ordered: list[Path] = []
+
+    # 1. Priority list — exact filenames at the repo root.
+    for name in _INIT_PRIORITY_FILES:
+        candidate = root / name
+        if candidate.is_file():
+            resolved = candidate.resolve()
+            if resolved not in seen:
+                seen.add(resolved)
+                ordered.append(resolved)
+
+    # 2. Other top-level ``*.md`` so ad-hoc repo notes get indexed too.
+    for entry in sorted(root.iterdir()):
+        if not entry.is_file():
+            continue
+        if entry.suffix.lower() != ".md":
+            continue
+        resolved = entry.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            ordered.append(resolved)
+
+    # 3. ``docs/`` (and its subdirs) — sorted for stable ingest order.
+    docs_dir = root / "docs"
+    if docs_dir.is_dir():
+        for path in _walk_md(docs_dir):
+            resolved = path.resolve()
+            if resolved not in seen:
+                seen.add(resolved)
+                ordered.append(resolved)
+
+    results: list[IngestResult] = []
+    chunks_used = 0
+    for path in ordered:
+        if chunks_used >= max_chunks:
+            results.append(IngestResult(str(path), skipped=True, reason="chunk_cap_reached"))
+            continue
+        result = ingest_file(dhee, path, force=force)
+        results.append(result)
+        if not result.skipped:
+            chunks_used += result.chunks_stored
+
+    return results, prune_summary
+
+
+def _walk_md(root: Path) -> list[Path]:
+    """Yield ``*.md`` files under *root*, skipping vendored/generated dirs."""
+    out: list[Path] = []
+    try:
+        for dirpath, dirnames, filenames in os.walk(root):
+            # Mutate dirnames in place so os.walk skips these subtrees.
+            dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS and not d.startswith("."))
+            for name in sorted(filenames):
+                if name.lower().endswith(".md"):
+                    out.append(Path(dirpath) / name)
+    except OSError:
+        return []
+    return out
 
 
 def get_manifest_summary() -> dict[str, Any]:

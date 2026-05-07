@@ -52,6 +52,43 @@ def _path_candidates(
     return candidates
 
 
+def _task_matches_repo(
+    task: Dict[str, Any],
+    *,
+    repo: Optional[str] = None,
+    workspace_id: Optional[str] = None,
+    source_path: Optional[str] = None,
+) -> bool:
+    # Strict "does this task live under the active path?" check. Unlike
+    # ``_path_candidates`` (which walks up to parents to score loose matches
+    # in the resolver), this filter compares the task's literal anchored
+    # roots against the literal active candidates only — a sibling repo
+    # under the same parent must NOT match.
+    candidates: list[str] = []
+    for value in (repo, workspace_id, source_path):
+        normalized = _abs_path(value)
+        if normalized and normalized not in candidates:
+            candidates.append(normalized)
+    if not candidates:
+        return True
+    roots: list[str] = []
+    for value in (task.get("repo"), task.get("workspace_id")):
+        normalized = _abs_path(value)
+        if normalized and normalized not in roots:
+            roots.append(normalized)
+    if not roots:
+        return False
+    for root in roots:
+        for candidate in candidates:
+            try:
+                common = os.path.commonpath([root, candidate])
+            except ValueError:
+                continue
+            if common == root or common == candidate:
+                return True
+    return False
+
+
 def resolve_active_shared_task(
     db: Any,
     *,
@@ -142,6 +179,7 @@ def publish_shared_task_result(
     harness: Optional[str] = None,
     agent_id: Optional[str] = None,
     result_status: str = "completed",
+    baseline_content: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Publish a tool result into the active shared-task feed, if any."""
     task = resolve_active_shared_task(
@@ -221,6 +259,7 @@ def publish_shared_task_result(
             agent_id=agent_id,
             metadata=metadata,
             result_status=result_status,
+            baseline_content=baseline_content,
         )
     except Exception:
         pass
@@ -264,6 +303,29 @@ def publish_in_flight(
     )
 
 
+_STALE_TASK_MAX_AGE_HOURS = 24
+
+
+def _close_stale_active_tasks(
+    db: Any,
+    *,
+    user_id: str = "default",
+    max_age_hours: int = _STALE_TASK_MAX_AGE_HOURS,
+) -> int:
+    # Best-effort prune of long-idle "active" rows so stale titles never leak
+    # into a future snapshot. Non-fatal — older DBs may not implement the bulk
+    # close, in which case we simply skip.
+    if not hasattr(db, "close_stale_shared_tasks"):
+        return 0
+    try:
+        return int(db.close_stale_shared_tasks(
+            user_id=user_id,
+            max_age_hours=max_age_hours,
+        ) or 0)
+    except Exception:
+        return 0
+
+
 def shared_task_snapshot(
     db: Any,
     *,
@@ -274,6 +336,7 @@ def shared_task_snapshot(
     limit: int = 5,
 ) -> Dict[str, Any]:
     """Compact active shared-task snapshot for handoff/bootstrap."""
+    _close_stale_active_tasks(db, user_id=user_id)
     task = resolve_active_shared_task(
         db,
         user_id=user_id,
@@ -282,6 +345,14 @@ def shared_task_snapshot(
         source_path=source_path,
     )
     if not task:
+        return {"task": None, "results": []}
+
+    # Drop tasks whose repo/workspace doesn't overlap the current path. The
+    # resolver returns a best-effort match when no candidate paths line up;
+    # for the snapshot we'd rather emit nothing than surface a foreign task.
+    if (repo or workspace_id or source_path) and not _task_matches_repo(
+        task, repo=repo, workspace_id=workspace_id, source_path=source_path
+    ):
         return {"task": None, "results": []}
 
     rows = db.list_shared_task_results(shared_task_id=task["id"], limit=limit)

@@ -118,30 +118,19 @@ def _configure_cursor(config: Dict[str, Any]) -> str:
 
 
 def _configure_codex(config: Dict[str, Any]) -> str:
-    """Configure Codex (~/.codex/config.toml) — append MCP server."""
+    """Configure Codex through the native harness installer.
+
+    The old generic MCP path could append a minimal server block. Codex now
+    needs the full native contract: MCP env, global AGENTS.md, context-first
+    flags, and Codex session-stream auto-sync.
+    """
     config_dir = os.path.join(os.path.expanduser("~"), ".codex")
-    toml_path = os.path.join(config_dir, "config.toml")
     if not os.path.exists(config_dir):
         return "not installed"
-    # Codex uses TOML — we append a simple section if not present
-    content = ""
-    if os.path.exists(toml_path):
-        with open(toml_path, "r") as f:
-            content = f.read()
-    if "dhee" in content or "engram" in content:
-        return "already configured"
-    env = _build_env_block(config)
-    env_lines = "\n".join(f'  {k} = "{v}"' for k, v in env.items())
-    block = (
-        f'\n[mcp_servers.dhee]\n'
-        f'command = "{_dhee_mcp_entry()}"\n'
-        f'args = []\n'
-    )
-    if env_lines:
-        block += f'[mcp_servers.dhee.env]\n{env_lines}\n'
-    with open(toml_path, "a") as f:
-        f.write(block)
-    return "configured"
+    from dhee.harness.install import install_harnesses
+
+    result = install_harnesses(harness="codex")["codex"]
+    return "configured" if result.action == "enabled" else str(result.action)
 
 
 # Agent registry: (name, detector, configurer)
