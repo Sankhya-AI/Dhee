@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from dhee.configs.base import _dhee_data_dir
 from dhee.core.intention import IntentionStore
@@ -13,6 +14,8 @@ from dhee.core.task_state import TaskStateStore
 from dhee.core.thread_state import resolve_continuity
 
 _NOISE_KINDS = {"artifact_chunk", "doc_chunk"}
+_NOISE_SOURCE_APPS = {"test", "test_app", "pytest", "unit_test", "unit-tests"}
+_PLACEHOLDER_MEMORY_RE = re.compile(r"^(?:test memory|content|memory item \d+|content [0-9a-f]{6,})$", re.IGNORECASE)
 
 
 def _utcnow() -> str:
@@ -23,8 +26,30 @@ def _store_dir(name: str) -> str:
     return os.path.join(_dhee_data_dir(), name)
 
 
-def _recent_memories(db: Any, *, user_id: str, limit: int) -> List[Dict[str, Any]]:
+def _is_handoff_noise_memory(parsed: Dict[str, Any], metadata: Dict[str, Any]) -> Tuple[bool, str]:
+    kind = str(metadata.get("kind") or "").strip()
+    if kind in _NOISE_KINDS:
+        return True, f"metadata.kind={kind}"
+
+    source_app = str(parsed.get("source_app") or metadata.get("source_app") or "").strip().lower()
+    source_type = str(parsed.get("source_type") or metadata.get("source_type") or "").strip().lower()
+    if source_app in _NOISE_SOURCE_APPS or source_type in _NOISE_SOURCE_APPS:
+        return True, "test fixture source"
+    if metadata.get("test_only") or metadata.get("fixture") or metadata.get("is_test"):
+        return True, "test fixture metadata"
+
+    memory_text = " ".join(str(parsed.get("memory") or "").strip().split())
+    if _PLACEHOLDER_MEMORY_RE.match(memory_text):
+        return True, "placeholder memory"
+    return False, ""
+
+
+def _recent_memories(db: Any, *, user_id: str, limit: int) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
+    hygiene = {
+        "filtered_recent_memory_count": 0,
+        "filtered_recent_memory_reasons": {},
+    }
     with db._get_connection() as conn:
         raw_rows = conn.execute(
             """
@@ -39,7 +64,11 @@ def _recent_memories(db: Any, *, user_id: str, limit: int) -> List[Dict[str, Any
         for row in raw_rows:
             parsed = db._row_to_dict(row)
             metadata = dict(parsed.get("metadata") or {})
-            if metadata.get("kind") in _NOISE_KINDS:
+            is_noise, reason = _is_handoff_noise_memory(parsed, metadata)
+            if is_noise:
+                hygiene["filtered_recent_memory_count"] += 1
+                reasons = hygiene["filtered_recent_memory_reasons"]
+                reasons[reason] = int(reasons.get(reason) or 0) + 1
                 continue
             rows.append(
                 {
@@ -54,7 +83,7 @@ def _recent_memories(db: Any, *, user_id: str, limit: int) -> List[Dict[str, Any
             )
             if len(rows) >= limit:
                 break
-    return rows
+    return rows, hygiene
 
 
 def _recent_artifacts(db: Any, *, user_id: str, workspace_id: Optional[str], limit: int) -> List[Dict[str, Any]]:
@@ -124,7 +153,7 @@ def build_handoff_snapshot(
 
     tasks = _task_snapshot(user_id=user_id, limit=task_limit)
     intentions = _active_intentions(user_id=user_id, limit=intention_limit)
-    memories = _recent_memories(db, user_id=user_id, limit=memory_limit)
+    memories, memory_hygiene = _recent_memories(db, user_id=user_id, limit=memory_limit)
     artifacts = _recent_artifacts(
         db,
         user_id=user_id,
@@ -185,6 +214,10 @@ def build_handoff_snapshot(
         "shared_task": shared_task,
         "shared_task_results": shared.get("results") or [],
         "recent_memories": memories,
+        "continuity_hygiene": {
+            **memory_hygiene,
+            "dheefs_reads_create_memories": False,
+        },
         "recent_artifacts": artifacts,
         "resume_hints": resume_hints[:8],
     }

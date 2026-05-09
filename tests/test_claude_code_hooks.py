@@ -58,6 +58,11 @@ from dhee.hooks.claude_code.signal import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolated_dhee_data_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("DHEE_DATA_DIR", str(tmp_path / "dhee-data"))
+
+
 # ---------------------------------------------------------------------------
 # Renderer
 # ---------------------------------------------------------------------------
@@ -69,6 +74,13 @@ def _extract_xml(rendered: str) -> ET.Element:
     if not match:
         raise ValueError("No <dhee> block found")
     return ET.fromstring(rendered[match.start():])
+
+
+def _hook_context(result: dict) -> str:
+    output = result.get("hookSpecificOutput") if isinstance(result, dict) else None
+    if isinstance(output, dict) and output.get("additionalContext"):
+        return str(output["additionalContext"])
+    return str((result or {}).get("systemMessage") or "")
 
 
 def _rich_ctx() -> dict:
@@ -205,6 +217,16 @@ class TestRenderer:
         assert msg is not None
         assert msg.get("src") == "codex"
         assert "line/stream" in (msg.text or "")
+
+    def test_state_card_renders_as_compiled_state(self):
+        state_card = '<dhee_state v="1"><goal>Fix auth</goal><next>Patch middleware</next></dhee_state>'
+        xml = render_context({}, state_card=state_card)
+        root = _extract_xml(xml)
+        state = root.find("dhee_state")
+
+        assert state is not None
+        assert state.find("goal").text == "Fix auth"
+        assert state.find("next").text == "Patch middleware"
 
     def test_memories_sorted_by_score_descending(self):
         ctx = {
@@ -699,7 +721,7 @@ class TestDispatchHandlers:
             ]
             result = handle_user_prompt({"prompt": "how do I test this?"})
             assert "systemMessage" in result
-            assert "Always run tests first" in result["systemMessage"]
+            assert "Always run tests first" in _hook_context(result)
             mock_assemble.assert_called_once()
 
     def test_user_prompt_filters_style_chunks(self):
@@ -723,8 +745,9 @@ class TestDispatchHandlers:
             from dhee.hooks.claude_code.assembler import AssembledContext
             mock_assemble.return_value = AssembledContext(doc_matches=[], typed_cognition={})
             result = handle_user_prompt({"prompt": "how do I name this function?"})
-            # Style chunk filtered out → no other signal → empty.
-            assert result == {}
+            xml = _hook_context(result)
+            assert "Use snake_case" not in xml
+            assert "<dhee_state" in xml
 
     def test_user_prompt_includes_edits_and_session(self):
         """Edit ledger and repo continuity ride along every turn — that's the
@@ -744,11 +767,10 @@ class TestDispatchHandlers:
             mock_assemble.return_value = AssembledContext(doc_matches=[], typed_cognition={})
             result = handle_user_prompt({"prompt": "what did we just change?"})
             assert "systemMessage" in result
-            xml = result["systemMessage"]
+            xml = _hook_context(result)
             assert "<edits" in xml
             assert "server.py" in xml
-            assert "<session" in xml
-            assert "wired enrichment" in xml
+            assert "<dhee_state" in xml
 
     def test_user_prompt_includes_live_inbox_messages(self):
         from dhee.hooks.claude_code.__main__ import handle_user_prompt
@@ -765,8 +787,9 @@ class TestDispatchHandlers:
             mock_assemble.return_value = AssembledContext(doc_matches=[], typed_cognition={})
             result = handle_user_prompt({"prompt": "continue"})
             assert "systemMessage" in result
-            assert "<live" in result["systemMessage"]
-            assert "failing test" in result["systemMessage"]
+            xml = _hook_context(result)
+            assert "<live" in xml
+            assert "failing test" in xml
 
     def test_user_prompt_no_signal_returns_empty(self):
         """When no docs match AND no edits / no last_session / no shared task,
@@ -783,7 +806,7 @@ class TestDispatchHandlers:
             from dhee.hooks.claude_code.assembler import AssembledContext
             mock_assemble.return_value = AssembledContext(doc_matches=[], typed_cognition={})
             result = handle_user_prompt({"prompt": "random question about quantum physics"})
-            assert result == {}
+            assert "<dhee_state" in _hook_context(result)
 
     def test_session_start_empty_assembler_returns_empty(self):
         """No docs, no typed cognition → no injection."""
@@ -801,7 +824,7 @@ class TestDispatchHandlers:
                 doc_matches=[], typed_cognition={},
             )
             result = handle_session_start({"task_description": "fix"})
-            assert result == {}
+            assert "<dhee_state" in _hook_context(result)
 
     def test_session_start_with_doc_matches_injects(self):
         from dhee.hooks.claude_code.__main__ import handle_session_start
@@ -823,9 +846,10 @@ class TestDispatchHandlers:
             )
             result = handle_session_start({"task_description": "fix flaky test"})
             assert "systemMessage" in result
-            assert "Always run pytest" in result["systemMessage"]
-            assert "freezegun" in result["systemMessage"]
-            assert 'task="fix flaky test"' in result["systemMessage"]
+            xml = _hook_context(result)
+            assert "Always run pytest" in xml
+            assert "freezegun" in xml
+            assert 'task="fix flaky test"' in xml
 
     def test_session_start_with_only_cognition_injects(self):
         from dhee.hooks.claude_code.__main__ import handle_session_start
@@ -841,7 +865,7 @@ class TestDispatchHandlers:
             )
             result = handle_session_start({})
             assert "systemMessage" in result
-            assert "auth module" in result["systemMessage"]
+            assert "auth module" in _hook_context(result)
 
     def test_session_start_shared_context_first_loads_last_session(self, monkeypatch):
         from dhee.hooks.claude_code.__main__ import handle_session_start
@@ -859,7 +883,7 @@ class TestDispatchHandlers:
             mock_assemble.return_value = AssembledContext(doc_matches=[], typed_cognition={})
             result = handle_session_start({"task_description": "new repo task"})
             assert "systemMessage" in result
-            assert "continued Nfinite background" in result["systemMessage"]
+            assert "continued Nfinite background" in _hook_context(result)
 
     def test_stop_handler_calls_checkpoint(self):
         from dhee.hooks.claude_code.__main__ import handle_stop

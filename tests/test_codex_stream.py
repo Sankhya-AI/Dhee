@@ -7,7 +7,8 @@ from dhee.core.codex_stream import sync_latest_codex_stream
 from dhee.db.sqlite import SQLiteManager
 
 
-def test_codex_stream_sync_publishes_shared_results_and_artifacts(tmp_path):
+def test_codex_stream_sync_publishes_shared_results_and_artifacts(tmp_path, monkeypatch):
+    monkeypatch.setenv("DHEE_DATA_DIR", str(tmp_path / "dhee-data"))
     db = SQLiteManager(str(tmp_path / "history.db"))
     manager = ArtifactManager(db)
 

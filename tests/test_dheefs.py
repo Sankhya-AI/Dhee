@@ -7,6 +7,11 @@ from dhee.fs import ContextWorkspace
 from dhee.fs.types import DheeFSEntry, DheeMount
 
 
+@pytest.fixture(autouse=True)
+def _isolated_dhee_data_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("DHEE_DATA_DIR", str(tmp_path / "dhee-data"))
+
+
 def make_workspace(tmp_path, **kwargs):
     exchange = kwargs.pop("learning_exchange", None) or LearningExchange(data_dir=tmp_path / "learnings")
     return ContextWorkspace(
@@ -27,6 +32,44 @@ def test_shell_lists_learning_status_dirs(tmp_path):
     assert "candidates/" in result.stdout
     assert "promoted/" in result.stdout
     assert result.data["entries"][0]["kind"] == "dir"
+
+
+def test_shell_exposes_compiled_state_and_context_debt(tmp_path):
+    ws = make_workspace(tmp_path)
+    store = ws.context_state_store()
+    store.observe_prompt("Fix parser bug without rereading stale transcript")
+    store.add_fact("Parser failure is in token stream handling", source="pytest")
+
+    state = ws.execute("cat /state/card.xml")
+    current = ws.execute("cat /state/current.md")
+    history = ws.execute("cat /state/history.md")
+    status = ws.execute("cat /context/status.json")
+    debt = ws.execute("cat /context/debt.json")
+
+    assert state.ok
+    assert "<dhee_state" in state.stdout
+    assert "Fix parser bug" in state.stdout
+    assert current.ok
+    assert "Parser failure" in current.stdout
+    assert history.ok
+    assert "Task Epoch History" in history.stdout
+    assert status.ok
+    assert "dhee_context_status" in status.stdout
+    assert debt.ok
+    assert "projected_cache_read_tokens" in debt.stdout
+
+
+def test_context_checkpoint_visible_in_dheefs(tmp_path):
+    ws = make_workspace(tmp_path)
+    checkpoint = ws.context_checkpoint(reason="test")
+
+    listing = ws.execute("ls /context/checkpoints")
+    content = ws.execute(f"cat /context/checkpoints/{checkpoint['id']}.json")
+
+    assert listing.ok
+    assert checkpoint["id"] in listing.stdout
+    assert content.ok
+    assert "dhee_context_checkpoint" in content.stdout
 
 
 def test_shell_cat_grep_and_why_learning(tmp_path):

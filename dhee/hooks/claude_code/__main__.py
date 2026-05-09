@@ -77,6 +77,25 @@ def _render(ctx: dict[str, Any], **kwargs: Any) -> str:
     return render_context(ctx, **kwargs)
 
 
+def _collapsed(xml: str, event_name: str) -> dict[str, Any]:
+    """Return a collapsed hook response.
+
+    The full XML rides on ``hookSpecificOutput.additionalContext`` so the
+    model still sees it. ``systemMessage`` carries only a one-line label
+    so the user's transcript stays readable instead of being dominated
+    by the raw context envelope.
+    """
+    if not xml:
+        return {}
+    return {
+        "systemMessage": "<dhee context>",
+        "hookSpecificOutput": {
+            "hookEventName": event_name,
+            "additionalContext": xml,
+        },
+    }
+
+
 def _artifact_manager(dhee: Any):
     from dhee.core.artifacts import ArtifactManager
 
@@ -337,6 +356,7 @@ def _render_live_inbox(dhee: Any, payload: Any, *, task_description: str | None 
         task_description=task_description,
         max_tokens=700,
         live_messages=filtered[:5],
+        state_card=_compiled_state_card(payload),
     )
     if not xml:
         return {}
@@ -405,6 +425,25 @@ def _repo_last_session(repo: str) -> dict[str, Any] | None:
         return session if isinstance(session, dict) else None
     except Exception:
         return None
+
+
+def _compiled_state_store(payload: Any | None = None, *, repo: str | None = None):
+    from dhee.context_state import ContextStateStore
+
+    root = repo or os.environ.get("DHEE_REPO_ROOT") or _hook_cwd(payload)
+    return ContextStateStore(
+        repo=root,
+        workspace_id=root,
+        user_id=os.environ.get("DHEE_USER_ID", "default"),
+        agent_id=os.environ.get("DHEE_AGENT_ID", "claude-code"),
+    )
+
+
+def _compiled_state_card(payload: Any | None = None, *, repo: str | None = None) -> str:
+    try:
+        return _compiled_state_store(payload, repo=repo).render_state_card()
+    except Exception:
+        return ""
 
 
 # Heading-breadcrumb fragments that mark CLAUDE.md/system-prompt material:
@@ -545,6 +584,7 @@ def handle_session_start(payload: dict[str, Any]) -> dict[str, Any]:
 
     repo_cfg = _discover_repo_config(_hook_cwd(payload))
     repo_root = str(repo_cfg.get("repo_root") or _hook_cwd(payload))
+    state_store = _compiled_state_store(payload, repo=repo_root)
 
     dhee = _get_dhee()
 
@@ -556,6 +596,11 @@ def handle_session_start(payload: dict[str, Any]) -> dict[str, Any]:
             or payload.get("prompt")
             or ""
         )
+    if task_desc:
+        try:
+            state_store.observe_prompt(task_desc)
+        except Exception:
+            pass
 
     # Auto-ingest any stale project docs (CLAUDE.md, AGENTS.md, etc.).
     # SHA check makes this a no-op if files haven't changed.
@@ -596,9 +641,15 @@ def handle_session_start(payload: dict[str, Any]) -> dict[str, Any]:
     if should_auto_resume and not typed.get("last_session"):
         last = _repo_last_session(repo_root)
         if last:
-            typed["last_session"] = last
+            try:
+                state_store.ingest_session(last)
+            except Exception:
+                pass
+            if _looks_like_continue(task_desc):
+                typed["last_session"] = last
 
     repo_entries = _repo_context_for(repo_root, query=task_desc, limit=5)
+    state_card = state_store.render_state_card()
 
     if (
         not doc_matches
@@ -608,6 +659,7 @@ def handle_session_start(payload: dict[str, Any]) -> dict[str, Any]:
         and not typed.get("last_session")
         and not assembled.has_cognition
         and not repo_entries
+        and not state_card
     ):
         return {}
 
@@ -619,10 +671,11 @@ def handle_session_start(payload: dict[str, Any]) -> dict[str, Any]:
         shared_task_results=shared.get("results") or [],
         repo_entries=repo_entries,
         live_messages=live.get("messages") or [],
+        state_card=state_card,
     )
     if not xml:
         return {}
-    return {"systemMessage": xml}
+    return _collapsed(xml, "SessionStart")
 
 
 def handle_user_prompt(payload: dict[str, Any]) -> dict[str, Any]:
@@ -648,6 +701,12 @@ def handle_user_prompt(payload: dict[str, Any]) -> dict[str, Any]:
 
     dhee = _get_dhee()
     _discover_repo_config(_hook_cwd(payload))
+    repo = os.environ.get("DHEE_REPO_ROOT") or os.getcwd()
+    state_store = _compiled_state_store(payload, repo=repo)
+    try:
+        state_store.observe_prompt(prompt)
+    except Exception:
+        pass
 
     # ── Doc chunks: gated, style-filtered ────────────────────────────
     doc_matches = assemble_docs_only(dhee, query=prompt)
@@ -690,10 +749,14 @@ def handle_user_prompt(payload: dict[str, Any]) -> dict[str, Any]:
         edits_block = ""
 
     # ── Last session for this repo: continuity even without "continue" ──
-    repo = os.environ.get("DHEE_REPO_ROOT") or os.getcwd()
     last_session = _repo_last_session(repo)
     if last_session:
-        typed_cognition.setdefault("last_session", last_session)
+        try:
+            state_store.ingest_session(last_session)
+        except Exception:
+            pass
+        if _looks_like_continue(prompt):
+            typed_cognition.setdefault("last_session", last_session)
 
     # ── Shared cross-session task (semantic gate already applied) ────
     shared = _shared_snapshot(dhee)
@@ -704,6 +767,7 @@ def handle_user_prompt(payload: dict[str, Any]) -> dict[str, Any]:
     live = _live_inbox_snapshot(dhee, payload, limit=5, mark_read=True)
 
     repo_entries = _repo_context_for(repo, query=prompt, limit=3)
+    state_card = state_store.render_state_card()
 
     has_signal = (
         bool(doc_matches)
@@ -712,6 +776,7 @@ def handle_user_prompt(payload: dict[str, Any]) -> dict[str, Any]:
         or bool(shared.get("task"))
         or bool(live.get("messages"))
         or bool(repo_entries)
+        or bool(state_card)
     )
     if not has_signal:
         return {}
@@ -732,10 +797,11 @@ def handle_user_prompt(payload: dict[str, Any]) -> dict[str, Any]:
         shared_task_results=shared.get("results") or [],
         repo_entries=repo_entries,
         live_messages=live.get("messages") or [],
+        state_card=state_card,
     )
     if not xml:
         return {}
-    return {"systemMessage": xml}
+    return _collapsed(xml, "UserPromptSubmit")
 
 
 def handle_pre_tool(payload: dict[str, Any]) -> dict[str, Any]:
@@ -873,6 +939,17 @@ def handle_post_tool(payload: dict[str, Any]) -> dict[str, Any]:
         tool_result=tool_result,
         success=success,
     )
+    try:
+        signal_meta = signal[1] if signal is not None else {}
+        _compiled_state_store(payload).record_tool_event(
+            tool_name=str(tool_name or "tool"),
+            success=bool(success),
+            tool_input=tool_input if isinstance(tool_input, dict) else {},
+            tool_result=tool_result,
+            metadata=signal_meta if isinstance(signal_meta, dict) else {},
+        )
+    except Exception:
+        pass
     if signal is None:
         try:
             return _render_live_inbox(_get_dhee(), payload, task_description=f"after {tool_name}")
@@ -956,6 +1033,10 @@ def handle_pre_compact(payload: dict[str, Any]) -> dict[str, Any]:
         dhee.checkpoint(summary=summary, status="compacted")
     except Exception:
         pass
+    try:
+        _compiled_state_store(payload).checkpoint(reason=f"Claude PreCompact: {summary}")
+    except Exception:
+        pass
 
     # Re-inject context to survive compaction.
     assembled = assemble(dhee, query=summary, include_cognition=True)
@@ -981,6 +1062,7 @@ def handle_pre_compact(payload: dict[str, Any]) -> dict[str, Any]:
         shared_task=shared.get("task"),
         shared_task_results=shared.get("results") or [],
         live_messages=live.get("messages") or [],
+        state_card=_compiled_state_card(payload),
     )
     if not xml:
         return {}
@@ -1019,6 +1101,10 @@ def handle_stop(payload: dict[str, Any]) -> dict[str, Any]:
             status="completed",
             repo=os.getcwd(),
         )
+    except Exception:
+        pass
+    try:
+        _compiled_state_store(payload).checkpoint(reason=f"Claude session end: {summary}")
     except Exception:
         pass
 

@@ -40,6 +40,8 @@ class QualityReport:
     generated_at: float = 0.0
     router: dict[str, Any] = field(default_factory=dict)
     critical_surface: dict[str, Any] = field(default_factory=dict)
+    context_governance: dict[str, Any] = field(default_factory=dict)
+    tool_schema: dict[str, Any] = field(default_factory=dict)
     replay: dict[str, Any] = field(default_factory=dict)
     edits: dict[str, Any] = field(default_factory=dict)
     hooks: dict[str, Any] = field(default_factory=dict)
@@ -69,6 +71,67 @@ def _critical_surface_section() -> dict[str, Any]:
         return db.summarize_route_decisions(user_id="default")
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def _context_governance_section() -> dict[str, Any]:
+    try:
+        import os
+
+        from dhee.context_state import ContextStateStore
+
+        repo = os.environ.get("DHEE_REPO") or os.getcwd()
+        store = ContextStateStore(
+            repo=repo,
+            workspace_id=repo,
+            user_id=os.environ.get("DHEE_USER_ID", "default"),
+            agent_id=os.environ.get("DHEE_AGENT_ID", "quality_report"),
+        )
+        debt = store.debt_summary(top=False)
+        state = store.load()
+        return {
+            "task_epoch": int(state.get("task_epoch") or 1),
+            "state_revision": int(state.get("state_revision") or 0),
+            "cache_tier_breakdown": debt.get("cache_tier_breakdown", {}),
+            "receipt_count": debt.get("receipt_count", 0),
+            "assertion_mismatch_count": debt.get("assertion_mismatch_count", 0),
+            "reread_short_circuit_count": debt.get("reread_short_circuit_count", 0),
+            "suppression_equivalence_projection": debt.get("suppression_equivalence_projection", {}),
+            "disclaimer": "Replay estimates savings and pressure, not live behavioral equivalence.",
+        }
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def _tool_schema_section() -> dict[str, Any]:
+    try:
+        from dhee.mcp_slim import tool_schema_report
+
+        return tool_schema_report()
+    except Exception as exc:
+        try:
+            source = (Path(__file__).resolve().parents[1] / "mcp_slim.py").read_text(encoding="utf-8")
+            start = source.index("TOOLS = [")
+            end = source.index("# ---------------------------------------------------------------------------\n# Tool-schema footprint", start)
+            tool_block = source[start:end]
+            original_tokens = max(0, int(len(tool_block) / 3.5))
+            tool_count = tool_block.count("Tool(")
+            tiers = {}
+            for tier, fraction in {"low": 0.62, "moderate": 0.42, "strong": 0.28, "max": 0.08}.items():
+                tokens = int(original_tokens * fraction)
+                tiers[tier] = {
+                    "tokens": tokens,
+                    "saved_tokens": max(0, original_tokens - tokens),
+                    "saved_pct": round((original_tokens - tokens) / original_tokens * 100, 2) if original_tokens else 0.0,
+                }
+            return {
+                "tool_count": tool_count,
+                "original_tokens": original_tokens,
+                "tiers": tiers,
+                "policy": "Static fallback estimate; mcp package unavailable. Do not mutate tool definitions mid-session.",
+                "fallback_reason": f"{type(exc).__name__}: {exc}",
+            }
+        except Exception:
+            return {"error": f"{type(exc).__name__}: {exc}"}
 
 
 def _replay_section(sessions_dir: Path | None = None, limit: int = 0) -> dict[str, Any]:
@@ -220,6 +283,8 @@ def build_report(sessions_dir: Path | None = None, limit: int = 0) -> QualityRep
         generated_at=time.time(),
         router=_router_section(),
         critical_surface=_critical_surface_section(),
+        context_governance=_context_governance_section(),
+        tool_schema=_tool_schema_section(),
         replay=_replay_section(sessions_dir=sessions_dir, limit=limit),
         edits=_edits_section(),
         hooks=_hooks_section(),
@@ -237,6 +302,8 @@ def save_report(report: QualityReport, path: Path | None = None) -> Path:
 def format_human(report: QualityReport) -> str:
     r = report.router
     cs = report.critical_surface
+    cg = report.context_governance
+    ts = report.tool_schema
     rep = report.replay
     e = report.edits
     s = report.settings
@@ -274,6 +341,27 @@ def format_human(report: QualityReport) -> str:
             f"  avg fits:       semantic={cs.get('avg_semantic_fit', 0):.2f}"
             f" structural={cs.get('avg_structural_fit', 0):.2f}"
             f" confidence={cs.get('avg_confidence', 0):.2f}",
+        ]
+    if cg and not cg.get("error"):
+        lines += [
+            "",
+            "[ context governance ]",
+            f"  receipts:       {cg.get('receipt_count', 0)}",
+            f"  cache tiers:    {cg.get('cache_tier_breakdown', {})}",
+            f"  assertion gaps: {cg.get('assertion_mismatch_count', 0)}",
+            f"  reread stops:   {cg.get('reread_short_circuit_count', 0)}",
+        ]
+        projection = cg.get("suppression_equivalence_projection", {}) or {}
+        lines.append(f"  suppression proxy risk: {projection.get('risk', 'unknown')}")
+    if ts and not ts.get("error"):
+        tiers = ts.get("tiers", {}) or {}
+        strong = tiers.get("strong", {}) if isinstance(tiers, dict) else {}
+        lines += [
+            "",
+            "[ tool schema footprint ]",
+            f"  tools:          {ts.get('tool_count', 0)}",
+            f"  original:       {ts.get('original_tokens', 0):,} tokens",
+            f"  strong tier:    {strong.get('tokens', 0):,} tokens ({strong.get('saved_pct', 0):.1f}% projected savings)",
         ]
     lines += [
         "",
@@ -313,6 +401,8 @@ def format_share(report: QualityReport) -> str:
     """
     r = report.router or {}
     cs = report.critical_surface or {}
+    cg = report.context_governance or {}
+    ts = report.tool_schema or {}
     rep = report.replay or {}
     s = report.settings or {}
     h = report.hooks or {}
@@ -361,6 +451,18 @@ def format_share(report: QualityReport) -> str:
             f"- saved tokens from routed reads + artifact reuse: **{cs.get('total_token_delta', 0):,}**",
             f"- route mix: `{cs.get('by_route', {})}`",
         ]
+    if cg and not cg.get("error"):
+        lines += [
+            f"- context receipts: **{cg.get('receipt_count', 0)}**",
+            f"- assertion/admission gaps: **{cg.get('assertion_mismatch_count', 0)}**",
+            f"- reread short-circuits: **{cg.get('reread_short_circuit_count', 0)}**",
+        ]
+    if ts and not ts.get("error"):
+        strong = ((ts.get("tiers") or {}).get("strong") or {})
+        lines.append(
+            f"- tool schema footprint: **{ts.get('original_tokens', 0):,}** tokens "
+            f"(strong tier projection: **{strong.get('tokens', 0):,}**)"
+        )
     if calls > 0:
         if expansion < 0.05:
             lines.append("- digests are sufficient — no quality regression observed")

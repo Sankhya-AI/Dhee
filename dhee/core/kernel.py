@@ -24,9 +24,9 @@ def _get_bus(db_path: Optional[str] = None):
         from engram_bus.bus import Bus
     except ImportError as exc:
         raise ImportError(
-            "Cross-agent handoff requires 'engram-bus'. "
-            "Install it with: pip install engram-bus  "
-            "(or: pip install dhee[bus])"
+            "Cross-agent handoff bus is bundled with Dhee but could not be imported. "
+            "Reinstall Dhee with the official installer (`curl ... | sh`) or run "
+            "`pip install --upgrade --force-reinstall dhee`."
         ) from exc
     return Bus(db_path=db_path or os.environ.get("ENGRAM_HANDOFF_DB", _DEFAULT_DB))
 

@@ -334,6 +334,51 @@ class TestHandlersRoundTrip:
         meta = ptr_store.load_meta(res["ptr"])
         assert meta["depth"] == "shallow"
 
+    def test_read_uses_task_aware_schema_when_query_supplied(self, router_tmp, tmp_path):
+        from dhee.router import handlers, ptr_store
+
+        src = tmp_path / "mod.py"
+        src.write_text(("def f():\n    raise ValueError('bad')\n\n" * 160))
+        res = handlers.handle_dhee_read({"file_path": str(src), "query": "debug failing pytest traceback"})
+        meta = ptr_store.load_meta(res["ptr"])
+
+        assert meta["task_intent"] == "debug_failure"
+        assert meta["depth"] == "deep"
+        assert "task_schema=debug_failure" in res["digest"]
+        assert "focus:" in res["digest"]
+        assert res["focus_count"] >= 1
+
+    def test_read_infers_task_schema_from_compiled_state(self, router_tmp, tmp_path):
+        from dhee.context_state import ContextStateStore
+        from dhee.router import handlers, ptr_store
+
+        store = ContextStateStore(repo=os.getcwd(), workspace_id=os.getcwd(), user_id="default", agent_id="test")
+        store.observe_prompt("Debug failing pytest traceback in parser")
+        src = tmp_path / "parser.py"
+        src.write_text("def parse_token(value):\n    raise ValueError(value)\n")
+
+        res = handlers.handle_dhee_read({"file_path": str(src)})
+        meta = ptr_store.load_meta(res["ptr"])
+
+        assert meta["task_intent"] == "debug_failure"
+        assert meta["task_source"] == "compiled_state"
+        assert res["task_source"] == "compiled_state"
+
+    def test_repeated_unchanged_read_is_suppressed_by_stable_hash(self, router_tmp, tmp_path):
+        from dhee.context_state import ContextStateStore
+        from dhee.router import handlers
+
+        src = tmp_path / "stable.py"
+        src.write_text("def stable():\n    return 1\n")
+
+        handlers.handle_dhee_read({"file_path": str(src)})
+        handlers.handle_dhee_read({"file_path": str(src)})
+
+        store = ContextStateStore(repo=os.getcwd(), workspace_id=os.getcwd(), user_id="default", agent_id="test")
+        audit = store.read_audit_text()
+        assert '"decision": "suppress"' in audit
+        assert "already admitted" in audit
+
     def test_read_records_critical_surface_decision(self, router_tmp, tmp_path):
         from dhee.db.sqlite import SQLiteManager
         from dhee.router import handlers
@@ -363,6 +408,10 @@ class TestHandlersRoundTrip:
         report = quality_report.build_report(limit=0)
         assert report.critical_surface["total_decisions"] >= 1
         assert report.critical_surface["by_packet_kind"]["routed_read"] >= 1
+        assert report.context_governance["receipt_count"] >= 1
+        assert "cache_tier_breakdown" in report.context_governance
+        assert report.tool_schema["original_tokens"] > 0
+        assert report.tool_schema["tiers"]["strong"]["tokens"] < report.tool_schema["original_tokens"]
 
     def test_expand_records_attribution(self, router_tmp, tmp_path):
         from dhee.router import handlers
@@ -371,9 +420,10 @@ class TestHandlersRoundTrip:
         src.write_text("x = 1\n")
         stored = handlers.handle_dhee_read({"file_path": str(src)})
         ptr = stored["ptr"]
-        expanded = handlers.handle_dhee_expand_result({"ptr": ptr})
+        expanded = handlers.handle_dhee_expand_result({"ptr": ptr, "reason": "needed exact value", "expected": "x assignment"})
         assert expanded["ptr"] == ptr
         assert "x = 1" in expanded["content"]
+        assert expanded["expansion"]["reason"] == "needed exact value"
 
         # Expansion log must have the ptr with tool + intent attribution.
         log = router_tmp / "ptr" / "pytest" / "expansions.jsonl"
@@ -383,8 +433,49 @@ class TestHandlersRoundTrip:
             r.get("ptr") == ptr
             and r.get("tool") == "Read"
             and r.get("intent") == "source_code"
+            and r.get("reason") == "needed exact value"
             for r in rows
         )
+
+    def test_bash_preview_only_does_not_execute(self, router_tmp, tmp_path):
+        from dhee.router import handlers
+
+        marker = tmp_path / "should_not_exist"
+        res = handlers.handle_dhee_bash({
+            "command": f"echo nope > {marker}",
+            "preview_only": True,
+        })
+
+        assert res["will_execute"] is False
+        assert res["preflight"]["output_risk"] in {"low", "medium", "high"}
+        assert not marker.exists()
+
+    def test_ptr_store_writes_private_files(self, router_tmp):
+        from dhee.router import ptr_store
+
+        stored = ptr_store.store("secret raw output", tool="Read", meta={"intent": "source_code"})
+
+        assert oct(stored.path.stat().st_mode & 0o777) == "0o600"
+        assert oct(stored.path.parent.stat().st_mode & 0o777) == "0o700"
+
+    def test_git_diff_digest_extracts_change_shape(self):
+        from dhee.router import bash_digest
+
+        diff = """diff --git a/a.py b/a.py
+index 111..222 100644
+--- a/a.py
++++ b/a.py
+@@ -1,2 +1,3 @@
+ old = 1
++new = 2
+-gone = 3
+"""
+        digest = bash_digest.digest_bash(cmd="git diff", exit_code=0, duration_ms=1, stdout=diff, stderr="")
+
+        assert digest.cls == "git_diff"
+        assert "files_changed=1" in digest.summary
+        assert "additions=1" in digest.summary
+        assert "deletions=1" in digest.summary
 
 
 # ---------------------------------------------------------------------------
@@ -470,6 +561,18 @@ class TestDigestXmlSafety:
         assert "<dhee_agent " in digest
         assert "</dhee_agent>" in digest
         assert "<dhee:" not in digest
+
+    def test_agent_digest_supports_typed_schema_hint(self, router_tmp):
+        from dhee.router import handlers
+
+        res = handlers.handle_dhee_agent({
+            "kind": "LocalizationDigest",
+            "text": "confidence: high\n- dhee/context_state.py:120-130 stores receipts\n",
+        })
+
+        assert res["schema"] == "LocalizationDigest"
+        assert "schema=LocalizationDigest" in res["digest"]
+        assert "dhee/context_state.py:120-130" in res["digest"]
 
 
 class TestPreToolGateQuoteSafety:

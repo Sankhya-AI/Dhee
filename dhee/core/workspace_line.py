@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -78,6 +79,70 @@ def _auto_title(tool_name: Optional[str], source_path: Optional[str], digest: st
     if first_line and len(first_line) <= 80:
         return f"{head} · {first_line}"
     return head
+
+
+def _utc_after(seconds: int) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + max(0, int(seconds))))
+
+
+def _looks_like_test_command(command: Optional[str]) -> bool:
+    value = str(command or "").lower()
+    return any(token in value for token in ("pytest", "npm test", "pnpm test", "yarn test", "cargo test", "go test"))
+
+
+def _message_class(tool_name: Optional[str], packet_kind: Optional[str], result_status: str, metadata: Dict[str, Any]) -> str:
+    if str(result_status or "") == "in_flight":
+        return "claim"
+    kind = str(packet_kind or "").lower()
+    tool = str(tool_name or "").lower()
+    if tool in {"edit", "write", "multiedit", "notebookedit"} or "edit" in kind or "write" in kind:
+        return "edit"
+    if _looks_like_test_command(metadata.get("command")):
+        return "test_result"
+    if tool in {"grep", "dhee_grep"} or "grep" in kind:
+        return "search_result"
+    if tool in {"read", "dhee_read"} or "read" in kind:
+        return "read_evidence"
+    if tool in {"artifact"} or "artifact" in kind or metadata.get("artifact_id"):
+        return "artifact"
+    if "broadcast" in kind or "live" in kind:
+        return "broadcast"
+    if tool in {"bash", "dhee_bash"} or "bash" in kind:
+        return "command_result"
+    return "tool_result"
+
+
+def _salience_score(message_class: str, result_status: str, metadata: Dict[str, Any]) -> float:
+    base = {
+        "claim": 0.20,
+        "read_evidence": 0.52,
+        "search_result": 0.62,
+        "command_result": 0.58,
+        "test_result": 0.78,
+        "edit": 0.84,
+        "artifact": 0.72,
+        "broadcast": 0.90,
+        "tool_result": 0.45,
+    }.get(message_class, 0.45)
+    if message_class == "test_result":
+        exit_code = metadata.get("exit_code")
+        if str(exit_code) not in {"0", "None", ""}:
+            base = 0.95
+    if str(result_status or "") not in {"completed", "ok", "success"}:
+        base = min(0.98, base + 0.08)
+    if metadata.get("ptr") or metadata.get("artifact_id"):
+        base = min(1.0, base + 0.04)
+    return round(base, 2)
+
+
+def _ttl_seconds(message_class: str, result_status: str) -> int:
+    if str(result_status or "") == "in_flight" or message_class == "claim":
+        return 15 * 60
+    if message_class in {"edit", "test_result", "artifact", "broadcast"}:
+        return 24 * 60 * 60
+    if message_class in {"read_evidence", "search_result", "command_result"}:
+        return 6 * 60 * 60
+    return 3 * 60 * 60
 
 
 def _dedup_key(
@@ -355,22 +420,48 @@ def emit_agent_activity(
 
     title = _auto_title(tool_name, source_path, digest)
     body = _short(digest)
+    source_abs = _abs(source_path)
+    incoming_meta = dict(metadata or {})
+    computed_seed = {
+        **incoming_meta,
+        "command": incoming_meta.get("command"),
+        "exit_code": incoming_meta.get("exit_code"),
+        "ptr": ptr,
+        "artifact_id": artifact_id,
+    }
+    message_class = _message_class(tool_name, packet_kind, result_status, computed_seed)
+    salience = _salience_score(message_class, result_status, computed_seed)
+    ttl_seconds = _ttl_seconds(message_class, result_status)
 
     meta: Dict[str, Any] = {
         "tool_name": tool_name,
         "packet_kind": packet_kind,
         "harness": harness,
         "agent_id": agent_id,
-        "source_path": _abs(source_path),
+        "source_path": source_abs,
         "ptr": ptr,
         "artifact_id": artifact_id,
         "native_session_id": native_session_id,
         "runtime_id": runtime_id,
         "source_event_id": source_event_id,
         "result_status": result_status,
+        "message_class": message_class,
+        "salience": salience,
+        "ttl_seconds": ttl_seconds,
+        "expires_at": _utc_after(ttl_seconds),
+        "provenance": {
+            "harness": harness,
+            "agent_id": agent_id,
+            "session_id": session_id or native_session_id,
+            "runtime_id": runtime_id,
+            "source_event_id": source_event_id,
+            "source_path": source_abs,
+            "ptr": ptr,
+            "artifact_id": artifact_id,
+        },
     }
-    if metadata:
-        for key, value in metadata.items():
+    if incoming_meta:
+        for key, value in incoming_meta.items():
             meta.setdefault(key, value)
     if baseline_meta:
         for key, value in baseline_meta.items():

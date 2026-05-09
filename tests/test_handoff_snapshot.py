@@ -78,3 +78,33 @@ def test_build_handoff_snapshot_includes_real_state(tmp_path, monkeypatch):
     assert snapshot["recent_memories"][0]["memory"] == "User prefers concise updates."
     assert snapshot["recent_artifacts"][0]["filename"] == "handoff.pdf"
     assert snapshot["resume_hints"]
+
+
+def test_handoff_filters_fixture_memories_from_recent_context(tmp_path, monkeypatch):
+    monkeypatch.setenv("DHEE_DATA_DIR", str(tmp_path / "dhee-data"))
+    db = SQLiteManager(str(tmp_path / "history.db"))
+    db.add_memory(
+        {
+            "id": "fixture-memory",
+            "memory": "Test memory",
+            "user_id": "default",
+            "source_app": "test_app",
+            "content_hash": "fixture-hash",
+        }
+    )
+    db.add_memory(
+        {
+            "id": "real-memory",
+            "memory": "Use Dhee compiled state before re-reading old transcript.",
+            "user_id": "default",
+            "metadata": {"source_type": "agent"},
+            "content_hash": "real-hash",
+        }
+    )
+    monkeypatch.setattr("dhee.core.thread_state.get_last_session", lambda **_: None)
+
+    snapshot = build_handoff_snapshot(db, user_id="default", repo=str(tmp_path), memory_limit=5)
+
+    assert [row["id"] for row in snapshot["recent_memories"]] == ["real-memory"]
+    assert snapshot["continuity_hygiene"]["filtered_recent_memory_count"] == 1
+    assert "test fixture source" in snapshot["continuity_hygiene"]["filtered_recent_memory_reasons"]

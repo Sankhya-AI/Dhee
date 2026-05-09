@@ -271,6 +271,31 @@ def _ingest_exec_command(
         )
         if shared is not None:
             stats["completed"] += 1
+        try:
+            from dhee.context_state import ContextAdmissionController, ContextBlock, ContextStateStore
+
+            store = ContextStateStore(
+                repo=cwd or None,
+                workspace_id=cwd or None,
+                user_id=user_id,
+                agent_id="codex",
+            )
+            ContextAdmissionController(store).decide(
+                ContextBlock(
+                    kind="codex_native_bash",
+                    text=digest.render(stored.ptr),
+                    source=cwd or command or "codex",
+                    ptr=stored.ptr,
+                    metadata={
+                        "token_estimate": digest.est_tokens,
+                        "command": command,
+                        "exit_code": exit_code,
+                        "stream": "codex",
+                    },
+                )
+            )
+        except Exception:
+            pass
 
     parsed_cmds = payload.get("parsed_cmd", []) or []
     for parsed in _iter_read_commands(parsed_cmds):

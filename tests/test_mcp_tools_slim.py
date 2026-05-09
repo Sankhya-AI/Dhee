@@ -32,6 +32,12 @@ EXPECTED_TOOL_NAMES = {
     "dhee_submit_learning",
     "dhee_search_learnings",
     "dhee_promote_learning",
+    "dhee_context_status",
+    "dhee_context_state",
+    "dhee_context_checkpoint",
+    "dhee_context_rollover",
+    "dhee_context_provision",
+    "dhee_tools_list",
     "dhee_shell",
     "dhee_list_assets",
     "dhee_get_asset",
@@ -78,3 +84,13 @@ class TestMCPToolsSlim:
         for tool in mcp_server.TOOLS:
             assert tool.inputSchema is not None, f"Tool '{tool.name}' missing inputSchema"
             assert "type" in tool.inputSchema, f"Tool '{tool.name}' schema missing 'type'"
+
+    def test_default_slim_server_has_compiled_state_tools(self):
+        slim = pytest.importorskip("dhee.mcp_slim", reason="mcp package not installed")
+        names = {tool.name for tool in slim.TOOLS}
+
+        assert "dhee_context_state" in names
+        assert "dhee_context_status" in names
+        assert "dhee_context_rollover" in names
+        assert "dhee_grep" in names
+        assert "dhee_handoff" in names

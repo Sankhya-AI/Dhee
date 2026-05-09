@@ -13,6 +13,7 @@ from dhee.core.learnings import LearningExchange
 from dhee.fs.mounts import (
     AgentsMount,
     ArtifactMount,
+    ContextMount,
     HandoffMount,
     LearningMount,
     RepoMount,
@@ -20,6 +21,7 @@ from dhee.fs.mounts import (
     SessionsMount,
     SharedMount,
     SourceRootMount,
+    StateMount,
 )
 from dhee.fs.types import (
     DheeFSCommandError,
@@ -197,6 +199,8 @@ class ContextWorkspace:
         self.context_sources = list(context_sources or [])
         self.command_registry = CommandRegistry(self)
         builtin_mounts: List[DheeMount] = [
+            StateMount(self),
+            ContextMount(self),
             LearningMount(self),
             HandoffMount(self),
             RouterMount(self),
@@ -374,6 +378,28 @@ class ContextWorkspace:
         except Exception as exc:
             return {"messages": [], "error": f"{type(exc).__name__}: {exc}"}
 
+    def context_state_store(self):
+        from dhee.context_state import ContextStateStore
+
+        return ContextStateStore(
+            repo=self.repo,
+            workspace_id=self.workspace_id,
+            user_id=self.user_id,
+            agent_id=self.agent_id,
+        )
+
+    def context_status(self) -> Dict[str, Any]:
+        return self.context_state_store().status()
+
+    def context_debt(self, *, top: bool = False) -> Dict[str, Any]:
+        return self.context_state_store().debt_summary(top=top)
+
+    def context_checkpoint(self, *, reason: str = "dheefs snapshot") -> Dict[str, Any]:
+        return self.context_state_store().checkpoint(reason=reason)
+
+    def context_rollover(self, *, reason: str = "dheefs rollover") -> Dict[str, Any]:
+        return self.context_state_store().rollover(reason=reason)
+
     def list_artifacts(self, *, limit: int = 50) -> List[Dict[str, Any]]:
         if not self.db or not hasattr(self.db, "list_artifacts"):
             return []
@@ -386,6 +412,7 @@ class ContextWorkspace:
 
     def provision(self, query: str) -> Dict[str, Any]:
         text = str(query or "")
+        context_projection = self.context_state_store().provision(text)
         raw_tokens = max(1, math.ceil(len(text) / 4))
         pointers = _PTR_PATTERN.findall(text)
         learning_rows = self.learning_exchange.search(
@@ -411,10 +438,11 @@ class ContextWorkspace:
             risk = "high"
         return {
             "format": "dheefs_provision",
-            "version": "0",
+            "version": "1",
             "query": text,
             "estimated_raw_tokens": raw_tokens,
             "estimated_routed_tokens": routed_tokens,
+            "compiled_state": context_projection,
             "pointer_count": len(pointers),
             "pointers": pointers[:20],
             "candidate_learning_count": len(learning_rows),
@@ -425,9 +453,10 @@ class ContextWorkspace:
         }
 
     def snapshot_manifest(self) -> Dict[str, Any]:
+        context = self.context_state_store()
         return {
             "format": "dheefs_snapshot_manifest",
-            "version": "0",
+            "version": "1",
             "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "user_id": self.user_id,
             "agent_id": self.agent_id,
@@ -438,6 +467,7 @@ class ContextWorkspace:
                 for status in ("candidate", "promoted", "rejected", "archived")
             },
             "artifact_count": len(self.list_artifacts(limit=100)),
+            "compiled_state": context.status(),
             "handoff": self.handoff_snapshot(),
             "context_sources": [getattr(source, "name", "") for source in self.context_sources],
         }

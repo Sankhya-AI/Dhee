@@ -2,12 +2,12 @@
   <img src="docs/dhee-logo.png" alt="Dhee" width="80">
 </p>
 
-<h1 align="center">Dhee — the information layer for collaborating AI agents</h1>
+<h1 align="center">Dhee — the context compiler for AI coding agents</h1>
 
-<h3 align="center">Local memory, shared learnings, and context routing for Hermes, Claude Code, Codex, Cursor, Gemini CLI, Aider, Cline, and any MCP client.</h3>
+<h3 align="center">Local context infrastructure that compiles working state, routes tool output, and shares audited learnings across Hermes, Claude Code, Codex, Cursor, Gemini CLI, Aider, Cline, and any MCP client.</h3>
 
 <p align="center">
-  Dhee is the information layer through which your agents collaborate. When one agent creates a reusable learning, Dhee captures it as a candidate; once promoted, every connected agent can use it.
+  Dhee is not another coding agent, IDE, or vector database. It is the control plane that decides what context reaches the next turn: goal, facts, decisions, plan, active files, tests, and pointer-backed evidence.
 </p>
 
 <p align="center">
@@ -27,6 +27,7 @@
 
 <p align="center">
   <a href="#what-is-dhee">What is Dhee</a> ·
+  <a href="#compiled-state">Compiled State</a> ·
   <a href="#shared-agent-learning">Shared Agent Learning</a> ·
   <a href="#dheefs">DheeFS</a> ·
   <a href="#quick-start">Quick Start</a> ·
@@ -41,22 +42,60 @@
 
 ## What is Dhee?
 
-**Dhee is the local information layer through which your agents collaborate.** It runs on your machine, uses SQLite, plugs into Hermes, Claude Code, Codex, and any MCP client, and does four jobs the model can't do for itself:
+**Dhee is the local context compiler for agentic development.** It runs on your machine, uses SQLite and local state files, plugs into Hermes, Claude Code, Codex, and any MCP client, and turns scattered transcripts, tool output, repo docs, memories, and subagent digests into a small auditable working set.
 
-1. **🧠 Remembers.** Doc chunks, decisions, what worked, what failed, user preferences. Ebbinghaus decay pushes stale knowledge out of the hot path; frequently-used memory gets promoted. Per-turn context stays bounded and relevant instead of becoming another giant prompt file.
+This is the category Dhee is built to own: **context governance for AI coding agents**. As models get cheaper and more capable, the scarce resource is not the prompt box; it is the quality, stability, provenance, and cost of the context that gets admitted into every agent turn. Dhee sits between agents and their workspace as the compiler for that context.
 
-2. **🔁 Routes.** A 10 MB `git log` becomes a compact digest with a pointer. Raw output only re-enters context when the model explicitly expands it. On heavy tool-output calls, this is where the 90%+ token reduction comes from.
+It does five jobs the model can't reliably do for itself:
 
-3. **🌱 Shares learnings.** Hermes memory, session traces, and agent-created skills flow into Dhee as auditable learning candidates. Only promoted learnings appear as "Learned Playbooks" for Claude Code, Codex, Hermes, and any Dhee-enabled agent. No separate middleman agent.
+1. **Maintains compiled state.** Every turn gets a small regenerated state card instead of the whole journey: current goal, canonical facts, active decisions, next action, active files, test status, and pointer-backed evidence.
 
-4. **⚙️ Self-tunes.** Dhee watches which digests the model expands and which retrieval depths are useful, then tunes router policy per tool, per intent, per file type. The goal is not a bigger prompt; it is a smaller, better one.
+2. **Remembers.** Doc chunks, decisions, what worked, what failed, user preferences. Decay and promotion keep stale knowledge out of the hot path while preserving what should transfer.
+
+3. **Routes.** A 10 MB `git log` becomes a compact digest with a pointer. Raw output only re-enters context when the model explicitly expands it.
+
+4. **Shares learnings.** Hermes memory, session traces, and agent-created skills flow into Dhee as auditable learning candidates. Only promoted learnings appear as Learned Playbooks for Claude Code, Codex, Hermes, and any Dhee-enabled agent.
+
+5. **Self-tunes.** Dhee watches which digests the model expands and which retrieval depths are useful, then tunes router policy per tool, per intent, per file type. The goal is not a bigger prompt; it is a smaller, better working set.
 
 ### Who it's for
 
-- **Every Claude Code / Cursor / Codex / Gemini CLI / Aider / Cline user** who has ever hit a context limit or a $200 token bill.
+- **AI-native engineering teams** whose agents are now expensive, forgetful, repetitive, or hard to audit.
+- **Claude Code / Cursor / Codex / Gemini CLI / Aider / Cline users** who have hit context limits, compaction loops, or runaway tool-output bills.
+- **Teams standardizing on `AGENTS.md`, `CLAUDE.md`, Skills, MCP tools, and subagents** who need governed delivery instead of bigger prompts.
 - **Hermes users** who already have a self-evolving agent and want those learnings to make Claude Code and Codex smarter too.
-- **Any team** with a 2,000-line `CLAUDE.md`, a Skills library, an `AGENTS.md`, or a prompt library that's "too big for context." Stop pruning. Dhee handles delivery.
-- **Anyone who wants their team to share context through git** — the same way they share code.
+- **Founders building agentic development workflows** who need a local, inspectable context layer before they can trust agents with more of the work.
+
+---
+
+## <span id="compiled-state">Compiled State — the transcript is audit, state is truth</span>
+
+Long coding sessions get expensive and less reliable when old tool output, repeated reads, failed attempts, and superseded plans keep influencing the next token. Dhee's answer is not to trim the transcript. Dhee keeps a canonical working state and regenerates a small state card for each turn.
+
+```bash
+dhee context status
+dhee context state --card
+dhee context provision "fix expired-token KeyError"
+dhee context checkpoint --reason "before compaction"
+dhee context rollover --reason "context debt crossed threshold"
+```
+
+The state card contains only current signal:
+
+```xml
+<dhee_state v="1" epoch="3" revision="42" debt="healthy">
+  <goal>Fix expired-token KeyError in login</goal>
+  <facts><f src="pytest">middleware.py line 47 raises KeyError iat</f></facts>
+  <decisions><d id="D-...">Use python-jose validation path</d></decisions>
+  <next>Patch middleware and run the narrow auth test.</next>
+  <files><file>middleware.py</file></files>
+  <evidence><ptr ptr="R-...">failing pytest digest</ptr></evidence>
+</dhee_state>
+```
+
+Task pivots start a new epoch: stale facts, repeated reads, old plans, and superseded decisions are tombstoned instead of carried into the next state card. The raw evidence remains local behind pointers, and state writes are guarded so CLI, MCP, Codex sync, and Claude hooks do not trample each other.
+
+Quality is the gate. Dhee suppresses duplicate and stale context only when the pointer store, expansion SLO, and outcome signals keep the next step safe. If expansion rises, Dhee deepens that digest class instead of hiding more evidence.
 
 ---
 
@@ -97,6 +136,7 @@ This is the product contract: **with Dhee, a learning proven in one agent can be
 - **Claude Code native:** Dhee uses Claude Code hooks, MCP, and router enforcement. This is the strongest integration surface.
 - **Codex native:** Codex does not expose Claude-style pre-tool hooks here. Dhee uses the closest native Codex surfaces: `~/.codex/config.toml`, global `~/.codex/AGENTS.md`, MCP server instructions, and Codex session-stream auto-sync.
 - **Promotion gate:** Imported Hermes skills and session traces are candidates by default. Rejected or archived learnings remain auditable but are excluded from retrieval.
+- **Continuity hygiene:** Handoffs filter fixture memories, artifact chunks, and placeholder test rows by default. Shared tool results carry provenance, salience, TTL, and evidence pointers so another agent can inherit the useful state without inheriting every live mirror.
 
 ---
 
@@ -124,6 +164,8 @@ External systems such as Slack, Gmail, and Notion are future **context sources**
 
 ```text
 /learnings   candidates, promoted, rejected, archived
+/state       current compiled state, state card, decisions, epoch history
+/context     debt, status, checkpoints, rollover evidence
 /handoff     latest repo/session continuity
 /router/ptr  raw pointer lookup when explicitly requested
 /artifacts   host-parsed files and chunks
@@ -289,10 +331,10 @@ Dhee overhead: ~$0.004/session. Token savings on the same 20-turn session: **~$0
 
 Four MCP tools replace `Read` / `Bash` / `Agent` on heavy calls:
 
-- `dhee_read(file_path, offset?, limit?)` — symbols, head, tail, kind, token estimate + pointer.
-- `dhee_bash(command)` — output digested by class (git log, pytest, grep, listing, generic).
+- `dhee_read(file_path, offset?, limit?, query?, task_intent?)` — symbols, focus slices, head/tail, kind, token estimate + pointer. When no query is passed, Dhee infers one from compiled state.
+- `dhee_bash(command, preview_only?)` — preflight risk, output class, stderr/stdout landmarks, and command-specific reducers for git diffs, pytest/build failures, grep, listings, and generic logs.
 - `dhee_agent(text)` — file refs, headings, bullets, error signals from any subagent return.
-- `dhee_expand_result(ptr)` — only called when the digest genuinely isn't enough.
+- `dhee_expand_result(ptr, range?, symbol?, reason?, expected?)` — only called when the digest genuinely isn't enough; expansion reasons feed router tuning.
 
 A 10 MB `git log --oneline -50000` becomes a ~200-token digest. This is where the serious savings live.
 
@@ -300,8 +342,9 @@ A 10 MB `git log --oneline -50000` becomes a ~200-token digest. This is where th
 
 Most memory layers are static: you write rules, they retrieve. Dhee watches what happens and tunes itself.
 
-- **Intent classification.** Every `Read`/`Bash`/`Agent` call is bucketed (source, test, config, doc, data, build). Each bucket gets its own retrieval depth.
-- **Expansion ledger.** Every `dhee_expand_result(ptr)` is logged with `(tool, intent, depth)`.
+- **Intent classification.** Every `Read`/`Bash`/`Agent` call is bucketed (source, test, config, doc, data, build). Reads also inherit the live compiled-state task intent, so a debug session gets failure landmarks without the agent remembering to pass a query.
+- **Stable duplicate suppression.** Admission hashes the underlying evidence, not the fresh pointer string, so unchanged repeated reads stop adding debt.
+- **Expansion ledger.** Every `dhee_expand_result(ptr)` is logged with `(tool, intent, depth, slice mode, reason, expected signal)`.
 - **Policy tuning.** `dhee router tune` reads the ledger and atomically rewrites `~/.dhee/router_policy.json` — deeper for what gets expanded, shallower for what doesn't.
 
 Frontend-heavy teams get deeper JS/TS digests. Data teams get richer CSV/JSONL summaries. **You don't pick — Dhee picks, based on what you actually expand.**
@@ -322,7 +365,7 @@ Frontend-heavy teams get deeper JS/TS digests. Data teams get richer CSV/JSONL s
 | **External DB required** | No (SQLite) | No | Qdrant/pgvector | Postgres+vector | No | No |
 | **License** | MIT | — | Apache-2 | Apache-2 | MIT | MIT |
 
-Dhee combines **token reduction, reproducible recall benchmarks, self-tuning retrieval policy, git-shared team context, and promoted cross-agent learning** in one local-first collaboration layer.
+Dhee is not trying to be the agent, the IDE, or the memory SaaS. It is the **context governance layer** those systems need underneath them: token reduction, reproducible recall, self-tuning retrieval policy, git-shared team context, and promoted cross-agent learning in one local-first control plane.
 
 ---
 

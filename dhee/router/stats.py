@@ -37,6 +37,8 @@ class RouterStats:
     est_tokens_diverted: int = 0
     expansion_calls: int = 0
     expansion_rate: float = 0.0
+    expansion_reasons: dict[str, int] = field(default_factory=dict)
+    expansion_slice_modes: dict[str, int] = field(default_factory=dict)
     edit_files: int = 0
     edit_events: int = 0
     edit_deduped: int = 0
@@ -52,6 +54,8 @@ class RouterStats:
             "est_tokens_diverted": self.est_tokens_diverted,
             "expansion_calls": self.expansion_calls,
             "expansion_rate": round(self.expansion_rate, 4),
+            "expansion_reasons": dict(self.expansion_reasons),
+            "expansion_slice_modes": dict(self.expansion_slice_modes),
             "edit_files": self.edit_files,
             "edit_events": self.edit_events,
             "edit_deduped": self.edit_deduped,
@@ -190,15 +194,23 @@ def compute_stats(agent_id: str | None = None) -> RouterStats:
 
     # Expansion counts from the per-session audit logs.
     expansions = 0
+    reasons: Counter[str] = Counter()
+    slice_modes: Counter[str] = Counter()
     for rec in ptr_store.iter_expansion_records():
         rec_agent = _normalize_agent_id(rec.get("agent_id"))
         if selected_agent and rec_agent != selected_agent:
             continue
         expansions += 1
+        reason = str(rec.get("reason") or "unspecified").strip()[:80] or "unspecified"
+        reasons[reason] += 1
+        slice_mode = str(rec.get("slice_mode") or "full").strip() or "full"
+        slice_modes[slice_mode] += 1
     stats.sessions = len(session_hits) if selected_agent else len(_iter_session_dirs())
     stats.expansion_calls = expansions
     stats.calls_by_tool = dict(tool_counts)
     stats.bash_class_breakdown = dict(bash_classes)
+    stats.expansion_reasons = dict(reasons.most_common(8))
+    stats.expansion_slice_modes = dict(slice_modes)
     stats.est_tokens_diverted = int(stats.bytes_stored / CHARS_PER_TOKEN)
     if stats.total_calls:
         stats.expansion_rate = expansions / stats.total_calls
@@ -259,6 +271,12 @@ def format_human(stats: RouterStats) -> str:
             lines.append("    (model rarely expands — digests appear sufficient)")
         elif stats.expansion_rate > 0.30:
             lines.append("    (high expand rate — digests may be too shallow)")
+    if stats.expansion_reasons:
+        lines.append("  Expansion reasons:")
+        for reason, n in stats.expansion_reasons.items():
+            lines.append(f"    {n:<4} {reason}")
+    if stats.expansion_slice_modes:
+        lines.append(f"  Expansion modes:    {stats.expansion_slice_modes}")
     if stats.edit_events:
         lines.append(
             f"  Edits logged:        {stats.edit_events} across "

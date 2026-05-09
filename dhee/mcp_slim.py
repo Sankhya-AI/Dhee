@@ -1,15 +1,15 @@
-"""Dhee — 4-tool MCP server. Cognition as a Service.
+"""Dhee compact MCP server. Compiled state + pointer-backed tools.
 
 Install: pip install dhee[openai,mcp]
 Config:  export OPENAI_API_KEY=sk-...
 Run:     dhee-mcp
 
-Tools:
- 1. remember    — Store a fact (0 LLM on hot path, 1 embed). Enrichment deferred to checkpoint.
- 2. recall      — Search memory, get top-K results (0 LLM, 1 embed)
- 3. context     — HyperAgent bootstrap: performance + insights + intentions + memories
- 4. checkpoint  — Save session + batch-enrich stored memories (1 LLM per ~10 memories)
-  5. dhee_* learnings — Submit/search/promote gated cross-agent playbooks
+Core tools:
+ - dhee_context_* — compiled state, debt, checkpoint, rollover, provision
+ - dhee_read / dhee_grep / dhee_bash / dhee_agent — pointer-backed router
+ - dhee_shell — DheeFS virtual learning/context space
+ - dhee_handoff / dhee_inbox / dhee_broadcast — continuity and live context
+ - remember / recall / learning search — compact memory and promoted playbooks
 
 Cost model:
   Hot path (remember/recall): ~$0.0002 per call (1 embedding only)
@@ -22,9 +22,54 @@ import logging
 import os
 from typing import Any, Dict, List, Optional
 
-from mcp.server import Server
-from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
+try:
+    from mcp.server import Server
+    from mcp.server.stdio import stdio_server
+    from mcp.types import Tool, TextContent
+except ModuleNotFoundError:
+    class Tool:  # type: ignore[no-redef]
+        def __init__(self, *, name: str, description: str, inputSchema: Dict[str, Any]):
+            self.name = name
+            self.description = description
+            self.inputSchema = inputSchema
+
+    class TextContent:  # type: ignore[no-redef]
+        def __init__(self, *, type: str, text: str):
+            self.type = type
+            self.text = text
+
+    class Server:  # type: ignore[no-redef]
+        def __init__(self, *_args: Any, **_kwargs: Any):
+            self._list_tools = None
+            self._call_tool = None
+
+        def list_tools(self):
+            def decorator(func):
+                self._list_tools = func
+                return func
+            return decorator
+
+        def call_tool(self):
+            def decorator(func):
+                self._call_tool = func
+                return func
+            return decorator
+
+        def create_initialization_options(self):
+            return {}
+
+        async def run(self, *_args: Any, **_kwargs: Any):
+            raise RuntimeError("mcp package is required to run dhee-mcp")
+
+    class _MissingStdioServer:
+        async def __aenter__(self):
+            raise RuntimeError("mcp package is required to run dhee-mcp")
+
+        async def __aexit__(self, *_args: Any):
+            return False
+
+    def stdio_server():  # type: ignore[no-redef]
+        return _MissingStdioServer()
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +129,7 @@ def _default_agent_id(args: Dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 4 Tools
+# Compact default tool surface
 # ---------------------------------------------------------------------------
 
 server = Server("dhee", instructions=_MCP_CONTEXT_FIRST_INSTRUCTIONS)
@@ -220,6 +265,80 @@ TOOLS = [
             },
             "required": ["learning_id"],
         },
+    ),
+    Tool(
+        name="dhee_context_status",
+        description="Show compiled-state health, projected context debt, and rollover status for a repo.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string", "description": "Repo/workspace path"},
+                "workspace_id": {"type": "string", "description": "Explicit workspace id"},
+                "user_id": {"type": "string", "description": "User identifier"},
+                "agent_id": {"type": "string", "description": "Agent identity"},
+            },
+        },
+    ),
+    Tool(
+        name="dhee_context_state",
+        description="Return the living Dhee state card or canonical compiled state for the current repo.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string", "description": "Repo/workspace path"},
+                "workspace_id": {"type": "string", "description": "Explicit workspace id"},
+                "user_id": {"type": "string", "description": "User identifier"},
+                "agent_id": {"type": "string", "description": "Agent identity"},
+                "format": {"type": "string", "enum": ["card", "markdown", "json"], "description": "Return format (default card)"},
+            },
+        },
+    ),
+    Tool(
+        name="dhee_context_checkpoint",
+        description="Write a compact compiled-state checkpoint for continuation or compaction.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string", "description": "Repo/workspace path"},
+                "workspace_id": {"type": "string", "description": "Explicit workspace id"},
+                "user_id": {"type": "string", "description": "User identifier"},
+                "agent_id": {"type": "string", "description": "Agent identity"},
+                "reason": {"type": "string", "description": "Checkpoint reason"},
+            },
+        },
+    ),
+    Tool(
+        name="dhee_context_rollover",
+        description="Create a checkpoint and return instructions for continuing from compiled state.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string", "description": "Repo/workspace path"},
+                "workspace_id": {"type": "string", "description": "Explicit workspace id"},
+                "user_id": {"type": "string", "description": "User identifier"},
+                "agent_id": {"type": "string", "description": "Agent identity"},
+                "reason": {"type": "string", "description": "Rollover reason"},
+            },
+        },
+    ),
+    Tool(
+        name="dhee_context_provision",
+        description="Estimate raw vs compiled context cost before starting a task. Does not change state.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "task": {"type": "string", "description": "Task or prompt to estimate"},
+                "repo": {"type": "string", "description": "Repo/workspace path"},
+                "workspace_id": {"type": "string", "description": "Explicit workspace id"},
+                "user_id": {"type": "string", "description": "User identifier"},
+                "agent_id": {"type": "string", "description": "Agent identity"},
+            },
+        },
+    ),
+    Tool(
+        name="dhee_tools_list",
+        description="List Dhee's compact default MCP tools and the advanced tools available in dhee-mcp-full.",
+        inputSchema={"type": "object", "properties": {}},
     ),
     Tool(
         name="dhee_shell",
@@ -395,8 +514,27 @@ TOOLS = [
                     "enum": ["shallow", "normal", "deep"],
                     "description": "shallow=counts+symbols only; normal=+5-line head/tail; deep=+10-line head/tail. Default: normal",
                 },
+                "query": {"type": "string", "description": "Optional task/query for task-aware digest schema"},
+                "task_intent": {"type": "string", "description": "Optional digest intent: find_definition, debug_failure, understand_module, inspect_config, general"},
             },
             "required": ["file_path"],
+        },
+    ),
+    Tool(
+        name="dhee_grep",
+        description="Pointer-backed ripgrep. Returns compact match counts and top hits; raw hit list stays behind ptr.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "Regex or literal when fixed_string=true"},
+                "path": {"type": "string", "description": "File or directory root"},
+                "glob": {"type": "string", "description": "Optional glob filter"},
+                "case_insensitive": {"type": "boolean", "description": "Case-insensitive search"},
+                "fixed_string": {"type": "boolean", "description": "Treat pattern as literal"},
+                "multiline": {"type": "boolean", "description": "Enable multiline matching"},
+                "context": {"type": "integer", "description": "Context lines"},
+            },
+            "required": ["pattern"],
         },
     ),
     Tool(
@@ -415,6 +553,7 @@ TOOLS = [
                 "command": {"type": "string", "description": "Shell command to run"},
                 "cwd": {"type": "string", "description": "Working directory (optional)"},
                 "timeout": {"type": "number", "description": "Seconds before SIGKILL (default 120, max 600)"},
+                "preview_only": {"type": "boolean", "description": "Return preflight risk without executing"},
             },
             "required": ["command"],
         },
@@ -424,7 +563,7 @@ TOOLS = [
         description=(
             "Router wrapper for long-text tool returns (subagent results, "
             "pasted docs, etc.). Extracts file:line refs, headings, bullets, "
-            "error signals, head+tail from the text; stores the full raw "
+            "typed digest schemas, error signals, and head+tail from the text; stores the full raw "
             "under `ptr`. Use INSTEAD OF pasting a subagent's full response "
             "back into your reasoning."
         ),
@@ -434,7 +573,7 @@ TOOLS = [
                 "text": {"type": "string", "description": "Raw text to digest"},
                 "kind": {
                     "type": "string",
-                    "description": "Optional hint (e.g. 'code-review', 'error-report'). Auto-detected if omitted.",
+                    "description": "Optional hint: LocalizationDigest, BugReproDigest, ReadDigest, SearchDigest, or legacy labels.",
                 },
                 "source": {"type": "string", "description": "Optional label (e.g. 'subagent:Explore')"},
             },
@@ -453,11 +592,108 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "ptr": {"type": "string", "description": "Pointer returned by a dhee_* tool"},
+                "range": {"description": "Optional 1-indexed line range, e.g. '40:80' or [40, 80]"},
+                "symbol": {"type": "string", "description": "Optional function/class symbol to expand instead of full raw"},
+                "reason": {"type": "string", "description": "Why the digest was insufficient; used to tune reducers"},
+                "expected": {"type": "string", "description": "What signal you expected to find in the expansion"},
             },
             "required": ["ptr"],
         },
     ),
+    Tool(
+        name="dhee_handoff",
+        description="Emit compact cross-agent continuity for a repo before local reconstruction.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string", "description": "Repo/workspace path"},
+                "thread_id": {"type": "string", "description": "Optional live thread id"},
+                "user_id": {"type": "string", "description": "User identifier"},
+                "memory_limit": {"type": "integer", "description": "Recent memories to include"},
+                "artifact_limit": {"type": "integer", "description": "Recent artifacts to include"},
+                "task_limit": {"type": "integer", "description": "Recent tasks to include"},
+                "intention_limit": {"type": "integer", "description": "Active intentions to include"},
+            },
+        },
+    ),
 ]
+
+
+# ---------------------------------------------------------------------------
+# Tool-schema footprint reporting (cache-safe; does not mutate tool registry)
+# ---------------------------------------------------------------------------
+
+def _schema_tokens(payload: Any) -> int:
+    return max(0, int(len(json.dumps(payload, sort_keys=True, default=str)) / 3.5))
+
+
+def _trim_text(value: Any, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "..."
+
+
+def _tool_schema_dict(tool: Tool) -> Dict[str, Any]:
+    return {
+        "name": tool.name,
+        "description": tool.description,
+        "inputSchema": tool.inputSchema,
+    }
+
+
+def _slim_schema_payload(tool: Tool, tier: str) -> Dict[str, Any]:
+    schema = tool.inputSchema or {}
+    props = schema.get("properties", {}) if isinstance(schema, dict) else {}
+    required = schema.get("required", []) if isinstance(schema, dict) else []
+    if tier == "max":
+        return {"name": tool.name}
+    if tier == "strong":
+        return {
+            "name": tool.name,
+            "description": _trim_text(tool.description, 80),
+            "properties": sorted(props.keys()) if isinstance(props, dict) else [],
+            "required": required,
+        }
+    if tier == "moderate":
+        slim_props = {}
+        if isinstance(props, dict):
+            for key, value in props.items():
+                value = value if isinstance(value, dict) else {}
+                slim_props[key] = {
+                    "type": value.get("type"),
+                    "description": _trim_text(value.get("description"), 80),
+                }
+        return {
+            "name": tool.name,
+            "description": _trim_text(tool.description, 160),
+            "inputSchema": {
+                "type": schema.get("type", "object") if isinstance(schema, dict) else "object",
+                "properties": slim_props,
+                "required": required,
+            },
+        }
+    return _tool_schema_dict(tool)
+
+
+def tool_schema_report() -> Dict[str, Any]:
+    original_payloads = [_tool_schema_dict(tool) for tool in TOOLS]
+    original_tokens = _schema_tokens(original_payloads)
+    tiers: Dict[str, Dict[str, Any]] = {}
+    for tier in ("low", "moderate", "strong", "max"):
+        payload = [_slim_schema_payload(tool, tier) for tool in TOOLS]
+        tokens = _schema_tokens(payload)
+        tiers[tier] = {
+            "tokens": tokens,
+            "saved_tokens": max(0, original_tokens - tokens),
+            "saved_pct": round((original_tokens - tokens) / original_tokens * 100, 2) if original_tokens else 0.0,
+        }
+    return {
+        "tool_count": len(TOOLS),
+        "original_tokens": original_tokens,
+        "tiers": tiers,
+        "policy": "Report slim tiers only; do not mutate tool definitions mid-session. Mask availability instead.",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -706,6 +942,78 @@ def _handle_dhee_shell(args: Dict[str, Any]) -> Dict[str, Any]:
     return workspace.execute(str(args.get("command") or "")).to_dict()
 
 
+def _context_store(args: Dict[str, Any]):
+    from dhee.context_state import ContextStateStore
+
+    repo = args.get("repo")
+    if repo:
+        repo = os.path.abspath(str(repo))
+    return ContextStateStore(
+        repo=repo,
+        workspace_id=args.get("workspace_id") or repo,
+        user_id=str(args.get("user_id") or "default"),
+        agent_id=_default_agent_id(args),
+    )
+
+
+def _handle_dhee_context_status(args: Dict[str, Any]) -> Dict[str, Any]:
+    return _context_store(args).status()
+
+
+def _handle_dhee_context_state(args: Dict[str, Any]) -> Dict[str, Any]:
+    store = _context_store(args)
+    fmt = str(args.get("format") or "card").lower()
+    if fmt == "json":
+        return {"format": "dhee_context_state", "state": store.load(), "status": store.status()}
+    if fmt == "markdown":
+        return {"format": "markdown", "text": store.render_markdown()}
+    return {"format": "card", "text": store.render_state_card(), "status": store.status()}
+
+
+def _handle_dhee_context_checkpoint(args: Dict[str, Any]) -> Dict[str, Any]:
+    return _context_store(args).checkpoint(reason=str(args.get("reason") or "mcp checkpoint"))
+
+
+def _handle_dhee_context_rollover(args: Dict[str, Any]) -> Dict[str, Any]:
+    return _context_store(args).rollover(reason=str(args.get("reason") or "mcp rollover"))
+
+
+def _handle_dhee_context_provision(args: Dict[str, Any]) -> Dict[str, Any]:
+    return _context_store(args).provision(str(args.get("task") or args.get("query") or ""))
+
+
+def _handle_dhee_tools_list(_args: Dict[str, Any]) -> Dict[str, Any]:
+    default_tools = [tool.name for tool in TOOLS]
+    advanced_tools = [
+        "search_memory",
+        "get_memory",
+        "get_all_memories",
+        "get_memory_stats",
+        "search_skills",
+        "apply_skill",
+        "record_trajectory_step",
+        "mine_skills",
+        "reflect",
+        "store_intention",
+        "dhee_list_assets",
+        "dhee_get_asset",
+        "dhee_sync_codex_artifacts",
+        "dhee_why",
+        "dhee_thread_state",
+        "dhee_shared_task",
+        "dhee_shared_task_results",
+    ]
+    return {
+        "format": "dhee_tools",
+        "default_server": "dhee-mcp",
+        "advanced_server": "dhee-mcp-full",
+        "default_tools": default_tools,
+        "advanced_tools": advanced_tools,
+        "schema_footprint": tool_schema_report(),
+        "note": "Use DheeFS paths and compiled-state tools first; switch to dhee-mcp-full only for manual administration.",
+    }
+
+
 def _handle_checkpoint(args: Dict[str, Any]) -> Dict[str, Any]:
     """Session lifecycle. Delegates to DheePlugin.checkpoint()."""
     summary = args.get("summary", "")
@@ -805,6 +1113,11 @@ def _handle_dhee_bash(args: Dict[str, Any]) -> Dict[str, Any]:
     return handle_dhee_bash(args)
 
 
+def _handle_dhee_grep(args: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee.router.handlers import handle_dhee_grep
+    return handle_dhee_grep(args)
+
+
 def _handle_dhee_agent(args: Dict[str, Any]) -> Dict[str, Any]:
     from dhee.router.handlers import handle_dhee_agent
     return handle_dhee_agent(args)
@@ -815,6 +1128,25 @@ def _handle_dhee_expand_result(args: Dict[str, Any]) -> Dict[str, Any]:
     return handle_dhee_expand_result(args)
 
 
+def _handle_dhee_handoff(args: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee.core.handoff_snapshot import build_handoff_snapshot
+
+    repo = args.get("repo")
+    if repo:
+        repo = os.path.abspath(str(repo))
+    return build_handoff_snapshot(
+        _get_db(),
+        user_id=str(args.get("user_id") or "default"),
+        repo=repo,
+        workspace_id=args.get("workspace_id") or repo,
+        thread_id=args.get("thread_id"),
+        memory_limit=_bounded_limit(args, "memory_limit", 5, 20),
+        artifact_limit=_bounded_limit(args, "artifact_limit", 5, 20),
+        task_limit=_bounded_limit(args, "task_limit", 5, 20),
+        intention_limit=_bounded_limit(args, "intention_limit", 5, 20),
+    )
+
+
 HANDLERS = {
     "remember": _handle_remember,
     "recall": _handle_recall,
@@ -822,14 +1154,22 @@ HANDLERS = {
     "dhee_submit_learning": _handle_dhee_submit_learning,
     "dhee_search_learnings": _handle_dhee_search_learnings,
     "dhee_promote_learning": _handle_dhee_promote_learning,
+    "dhee_context_status": _handle_dhee_context_status,
+    "dhee_context_state": _handle_dhee_context_state,
+    "dhee_context_checkpoint": _handle_dhee_context_checkpoint,
+    "dhee_context_rollover": _handle_dhee_context_rollover,
+    "dhee_context_provision": _handle_dhee_context_provision,
+    "dhee_tools_list": _handle_dhee_tools_list,
     "dhee_shell": _handle_dhee_shell,
     "dhee_inbox": _handle_dhee_inbox,
     "dhee_broadcast": _handle_dhee_broadcast,
     "checkpoint": _handle_checkpoint,
     "dhee_read": _handle_dhee_read,
     "dhee_bash": _handle_dhee_bash,
+    "dhee_grep": _handle_dhee_grep,
     "dhee_agent": _handle_dhee_agent,
     "dhee_expand_result": _handle_dhee_expand_result,
+    "dhee_handoff": _handle_dhee_handoff,
 }
 
 

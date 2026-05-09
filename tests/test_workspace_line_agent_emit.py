@@ -133,6 +133,10 @@ def test_emit_writes_line_message(tmp_path):
     assert row["channel"] == "project"
     assert row["message_kind"] == "tool.hook_post_tool"
     assert row["title"].startswith("read · README.md")
+    assert row["metadata"]["message_class"] == "read_evidence"
+    assert row["metadata"]["salience"] > 0
+    assert row["metadata"]["ttl_seconds"] > 0
+    assert row["metadata"]["provenance"]["ptr"] == "R-abc"
 
     messages = db.list_workspace_line_messages(workspace_id=ws_id, user_id="default")
     assert len(messages) == 1
@@ -319,6 +323,8 @@ def test_publish_shared_task_result_fans_out_to_line(tmp_path):
     assert meta.get("ptr") == "R-pdf"
     assert meta.get("harness") == "codex"
     assert meta.get("result_status") == "completed"
+    assert meta.get("message_class") == "read_evidence"
+    assert meta.get("provenance", {}).get("session_id") == "codex-sess"
 
     # Retry — same event/ptr — must not create a second message.
     shared_tasks.publish_shared_task_result(

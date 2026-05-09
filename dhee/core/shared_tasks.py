@@ -89,6 +89,37 @@ def _task_matches_repo(
     return False
 
 
+def _enriched_result_metadata(
+    metadata: Optional[Dict[str, Any]],
+    *,
+    harness: Optional[str],
+    agent_id: Optional[str],
+    session_id: Optional[str],
+    thread_id: Optional[str],
+    source_event_id: Optional[str],
+    source_path: Optional[str],
+    ptr: Optional[str],
+    artifact_id: Optional[str],
+    result_status: str,
+) -> Dict[str, Any]:
+    meta = dict(metadata or {})
+    meta.setdefault("result_status", result_status)
+    meta.setdefault(
+        "provenance",
+        {
+            "harness": harness,
+            "agent_id": agent_id,
+            "session_id": session_id,
+            "thread_id": thread_id,
+            "source_event_id": source_event_id,
+            "source_path": _abs_path(source_path),
+            "ptr": ptr,
+            "artifact_id": artifact_id,
+        },
+    )
+    return meta
+
+
 def resolve_active_shared_task(
     db: Any,
     *,
@@ -206,6 +237,18 @@ def publish_shared_task_result(
         artifact_id=artifact_id,
         digest=digest,
     )
+    enriched_metadata = _enriched_result_metadata(
+        metadata,
+        harness=harness,
+        agent_id=agent_id,
+        session_id=session_id,
+        thread_id=thread_id,
+        source_event_id=source_event_id,
+        source_path=source_path,
+        ptr=ptr,
+        artifact_id=artifact_id,
+        result_status=result_status,
+    )
     payload = {
         "shared_task_id": task["id"],
         "result_key": result_key,
@@ -222,7 +265,7 @@ def publish_shared_task_result(
         "ptr": ptr,
         "artifact_id": artifact_id,
         "digest": digest,
-        "metadata": metadata or {},
+        "metadata": enriched_metadata,
         "session_id": session_id,
         "thread_id": thread_id,
         "harness": harness,
@@ -257,7 +300,7 @@ def publish_shared_task_result(
             task_id=str(task["id"]),
             harness=harness,
             agent_id=agent_id,
-            metadata=metadata,
+            metadata=enriched_metadata,
             result_status=result_status,
             baseline_content=baseline_content,
         )

@@ -31,6 +31,7 @@ class ReadDigest:
     kind: str
     range: tuple[int, int] | None = None  # 1-indexed inclusive
     symbols: dict[str, list[str]] = field(default_factory=dict)
+    focus: list[str] = field(default_factory=list)
     head: str = ""
     tail: str = ""
     notes: list[str] = field(default_factory=list)
@@ -64,6 +65,11 @@ class ReadDigest:
                 rendered = [(f"{s} x{counts[s]}" if counts[s] > 1 else s) for s in order]
                 shown = rendered if len(rendered) <= 20 else rendered[:20] + [f"(+{len(rendered)-20} more)"]
                 lines.append(f"  {k}: [{', '.join(shown)}]")
+        if self.focus and depth != "shallow":
+            lines.append("focus:")
+            for item in self.focus[:6]:
+                for line in str(item).splitlines()[:24]:
+                    lines.append(f"  {line}")
         if depth != "shallow":
             if self.head:
                 lines.append("head:")
@@ -257,12 +263,172 @@ def _head_tail(text: str, lines_each: int = 5) -> tuple[str, str]:
     return head, tail
 
 
+_STOP_TERMS = {
+    "about", "after", "again", "before", "build", "class", "code", "debug",
+    "dhee", "error", "failed", "failure", "file", "find", "from", "function",
+    "into", "line", "module", "need", "needs", "read", "return", "test",
+    "tests", "this", "traceback", "where", "with",
+}
+
+
+def _query_terms(query: str) -> list[str]:
+    terms: list[str] = []
+    for raw in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", str(query or "")):
+        term = raw.lower()
+        if term in _STOP_TERMS:
+            continue
+        if term not in terms:
+            terms.append(term)
+    return terms[:16]
+
+
+def _query_line_numbers(query: str) -> list[int]:
+    nums: list[int] = []
+    for m in re.finditer(r"(?:line\s+|:)(\d{1,6})\b", str(query or ""), flags=re.IGNORECASE):
+        try:
+            value = int(m.group(1))
+        except ValueError:
+            continue
+        if value > 0 and value not in nums:
+            nums.append(value)
+    return nums[:8]
+
+
+def _numbered_window(lines: list[str], start: int, end: int) -> str:
+    start = max(1, start)
+    end = min(len(lines), max(start, end))
+    width = len(str(end))
+    return "\n".join(f"{i:>{width}}| {lines[i - 1]}" for i in range(start, end + 1))
+
+
+def _line_window(text: str, line_no: int, *, radius: int = 5, label: str = "line") -> str:
+    lines = text.splitlines()
+    if not lines:
+        return ""
+    start = max(1, line_no - radius)
+    end = min(len(lines), line_no + radius)
+    return f"{label} {line_no}:\n{_numbered_window(lines, start, end)}"
+
+
+def _symbol_focus_python(text: str, terms: list[str]) -> list[str]:
+    if not terms:
+        return []
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return []
+    lines = text.splitlines()
+    out: list[str] = []
+
+    def _matches(name: str) -> bool:
+        hay = name.lower()
+        return any(term in hay for term in terms)
+
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not _matches(getattr(node, "name", "")):
+            continue
+        start = int(getattr(node, "lineno", 1) or 1)
+        end = int(getattr(node, "end_lineno", start + 24) or start + 24)
+        end = min(end, start + 44, len(lines))
+        kind = "class" if isinstance(node, ast.ClassDef) else "def"
+        out.append(f"{kind} {node.name} lines {start}-{end}:\n{_numbered_window(lines, start, end)}")
+        if len(out) >= 4:
+            break
+    return out
+
+
+def _contract_focus_python(text: str) -> list[str]:
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return []
+    lines = text.splitlines()
+    items: list[str] = []
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            line_no = int(getattr(node, "lineno", 0) or 0)
+            if line_no <= 0 or line_no > len(lines):
+                continue
+            items.append(f"{line_no}| {lines[line_no - 1].strip()}")
+        if len(items) >= 24:
+            break
+    return ["module contract:\n" + "\n".join(items)] if items else []
+
+
+def _term_focus_lines(text: str, terms: list[str], *, label: str = "matched lines") -> list[str]:
+    if not terms:
+        return []
+    lines = text.splitlines()
+    hits: list[tuple[int, str]] = []
+    for i, line in enumerate(lines, start=1):
+        lower = line.lower()
+        if any(term in lower for term in terms):
+            hits.append((i, line))
+        if len(hits) >= 8:
+            break
+    if not hits:
+        return []
+    width = len(str(hits[-1][0]))
+    body = "\n".join(f"{i:>{width}}| {line}" for i, line in hits)
+    return [f"{label}:\n{body}"]
+
+
+def _failure_landmarks(text: str) -> list[str]:
+    lines = text.splitlines()
+    rx = re.compile(r"\b(assert|raise|except|error|failed|failure|traceback|todo|fixme)\b", re.IGNORECASE)
+    hits: list[tuple[int, str]] = []
+    for i, line in enumerate(lines, start=1):
+        if rx.search(line):
+            hits.append((i, line))
+        if len(hits) >= 8:
+            break
+    if not hits:
+        return []
+    width = len(str(hits[-1][0]))
+    body = "\n".join(f"{i:>{width}}| {line}" for i, line in hits)
+    return ["failure landmarks:\n" + body]
+
+
+def _build_focus(path: str, text: str, *, query: str = "", task_intent: str = "") -> list[str]:
+    intent = str(task_intent or "").strip()
+    terms = _query_terms(query)
+    focus: list[str] = []
+    for line_no in _query_line_numbers(query):
+        snippet = _line_window(text, line_no, radius=6, label="referenced line")
+        if snippet:
+            focus.append(snippet)
+    kind = _detect_kind(path, text)
+    if kind == "python":
+        if intent == "understand_module":
+            focus.extend(_contract_focus_python(text))
+        focus.extend(_symbol_focus_python(text, terms))
+    if intent == "debug_failure":
+        focus.extend(_failure_landmarks(text))
+    focus.extend(_term_focus_lines(text, terms))
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in focus:
+        key = item[:400]
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item[:1800])
+        if len(deduped) >= 6:
+            break
+    return deduped
+
+
 def digest_read(
     path: str,
     text: str,
     *,
     depth: str = "normal",
     range_: tuple[int, int] | None = None,
+    query: str = "",
+    task_intent: str = "",
 ) -> ReadDigest:
     """Build a ReadDigest for a file's contents."""
     line_count = text.count("\n") + (1 if text and not text.endswith("\n") else 0)
@@ -290,6 +456,7 @@ def digest_read(
         symbols = _generic_symbols(text)
 
     head, tail = _head_tail(text, lines_each=5 if depth != "deep" else 10)
+    focus = _build_focus(path, text, query=query, task_intent=task_intent)
 
     return ReadDigest(
         path=path,
@@ -299,6 +466,7 @@ def digest_read(
         kind=kind,
         range=range_,
         symbols={k: v for k, v in symbols.items() if v},
+        focus=focus,
         head=head,
         tail=tail,
         notes=notes,

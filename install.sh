@@ -76,9 +76,22 @@ fi
 "$VENV_DIR/bin/pip" install --upgrade --no-cache-dir "$PACKAGE" -q
 done_ "Installed dhee"
 
+# --- Verify bundled handoff bus ---
+if "$VENV_DIR/bin/python" - <<'PY' >/dev/null 2>&1
+from dhee.core.kernel import _get_bus
+
+bus = _get_bus()
+bus.close()
+PY
+then
+    done_ "Cross-agent handoff bus ready"
+else
+    error "Dhee installed, but the bundled handoff bus failed to import. Please rerun the installer or report this build."
+fi
+
 # --- Symlink binaries ---
 mkdir -p "$BIN_DIR"
-for bin_name in dhee dhee-mcp; do
+for bin_name in dhee dhee-mcp engram-bus; do
     src="$VENV_DIR/bin/$bin_name"
     dst="$BIN_DIR/$bin_name"
     [ -f "$src" ] && ln -sf "$src" "$dst"

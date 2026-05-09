@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import secrets
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -63,18 +64,46 @@ def _root() -> Path:
         base = Path(_dhee_data_dir())
     except Exception:
         base = Path.home() / ".dhee"
-    return base / "router_ptr_cache"
+    root = base / "router_ptr_cache"
+    root.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(root, 0o700)
+    except OSError:
+        pass
+    return root
 
 
 def _session_dir() -> Path:
     d = _root() / _session_id()
     d.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(d, 0o700)
+    except OSError:
+        pass
     return d
 
 
 def _make_ptr(prefix: str, content: str, extra: str = "") -> str:
     h = hashlib.sha1(f"{extra}|{content}|{time.time_ns()}".encode("utf-8")).hexdigest()
     return f"{prefix}-{h[:10]}"
+
+
+def _write_text_private(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
+    try:
+        tmp.write_text(content, encoding="utf-8")
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
 
 @dataclass
@@ -97,12 +126,12 @@ def store(content: str, *, tool: str, meta: dict[str, Any] | None = None) -> Sto
     sdir = _session_dir()
     path = sdir / f"{ptr}.txt"
     meta_path = sdir / f"{ptr}.json"
-    path.write_text(content, encoding="utf-8")
+    _write_text_private(path, content)
     if meta:
         import json
-        meta_path.write_text(
+        _write_text_private(
+            meta_path,
             json.dumps({**meta, "tool": tool, "ptr": ptr, "stored_at": time.time()}, default=str),
-            encoding="utf-8",
         )
     return StoredPtr(ptr=ptr, path=path, meta_path=meta_path)
 
@@ -134,6 +163,9 @@ def record_expansion(
     intent: str = "",
     depth: str = "",
     agent_id: str = "",
+    reason: str = "",
+    slice_mode: str = "",
+    expected: str = "",
 ) -> None:
     """Append an append-only audit record that `ptr` was expanded.
 
@@ -154,8 +186,18 @@ def record_expansion(
             rec["depth"] = depth
         if agent_id:
             rec["agent_id"] = agent_id
+        if reason:
+            rec["reason"] = reason[:240]
+        if slice_mode:
+            rec["slice_mode"] = slice_mode
+        if expected:
+            rec["expected"] = expected[:240]
         with log.open("a", encoding="utf-8") as f:
             f.write(_json.dumps(rec) + "\n")
+        try:
+            os.chmod(log, 0o600)
+        except OSError:
+            pass
     except Exception:
         return
 

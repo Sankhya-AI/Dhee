@@ -52,6 +52,89 @@ def _metadata_lines(data: Dict[str, Any], keys: Iterable[str]) -> List[str]:
     return lines
 
 
+class StateMount(DheeMount):
+    prefix = "/state"
+
+    def list(self, path: str) -> List[DheeFSEntry]:
+        parts = _parts(path)
+        if parts == ["state"]:
+            return [
+                DheeFSEntry(name="current.md", path="/state/current.md"),
+                DheeFSEntry(name="card.xml", path="/state/card.xml"),
+                DheeFSEntry(name="decisions.md", path="/state/decisions.md"),
+                DheeFSEntry(name="superseded.md", path="/state/superseded.md"),
+                DheeFSEntry(name="history.md", path="/state/history.md"),
+            ]
+        raise DheeFSNotFoundError(path)
+
+    def read(self, path: str) -> str:
+        parts = _parts(path)
+        store = self.workspace.context_state_store()
+        if parts == ["state"]:
+            return entries_to_text(self.list(path))
+        if parts == ["state", "current.md"]:
+            return store.render_markdown()
+        if parts == ["state", "card.xml"]:
+            return store.render_state_card()
+        if parts == ["state", "decisions.md"]:
+            return store.render_decisions(superseded=False)
+        if parts == ["state", "superseded.md"]:
+            return store.render_decisions(superseded=True)
+        if parts == ["state", "history.md"]:
+            return store.render_history()
+        raise DheeFSNotFoundError(path)
+
+    def search(self, path: str, query: str) -> List[Dict[str, Any]]:
+        text = self.read(path if path != "/state" else "/state/current.md")
+        needle = str(query or "").lower()
+        return [
+            {"path": path, "line": idx, "text": line}
+            for idx, line in enumerate(text.splitlines(), start=1)
+            if not needle or needle in line.lower()
+        ]
+
+
+class ContextMount(DheeMount):
+    prefix = "/context"
+
+    def list(self, path: str) -> List[DheeFSEntry]:
+        parts = _parts(path)
+        if parts == ["context"]:
+            return [
+                DheeFSEntry(name="status.json", path="/context/status.json"),
+                DheeFSEntry(name="debt.json", path="/context/debt.json"),
+                DheeFSEntry(name="checkpoints/", path="/context/checkpoints", kind="dir"),
+            ]
+        if parts == ["context", "checkpoints"]:
+            return [
+                DheeFSEntry(
+                    name=f"{row.get('id')}.json",
+                    path=f"/context/checkpoints/{row.get('id')}.json",
+                    metadata={"created_at": row.get("created_at"), "reason": row.get("reason")},
+                )
+                for row in self.workspace.context_state_store().list_checkpoints()
+            ]
+        raise DheeFSNotFoundError(path)
+
+    def read(self, path: str) -> str:
+        parts = _parts(path)
+        store = self.workspace.context_state_store()
+        if parts == ["context"]:
+            return entries_to_text(self.list(path))
+        if parts == ["context", "status.json"]:
+            return _json(store.status())
+        if parts == ["context", "debt.json"]:
+            return _json(store.debt_summary(top=True))
+        if parts == ["context", "checkpoints"]:
+            return entries_to_text(self.list(path))
+        if len(parts) == 3 and parts[:2] == ["context", "checkpoints"]:
+            checkpoint = store.read_checkpoint(_strip_md(parts[2]))
+            if not checkpoint:
+                raise DheeFSNotFoundError(f"unknown checkpoint: {parts[2]}")
+            return _json(checkpoint)
+        raise DheeFSNotFoundError(path)
+
+
 class LearningMount(DheeMount):
     prefix = "/learnings"
 
@@ -502,8 +585,13 @@ class SessionsMount(DheeMount):
         parts = _parts(path)
         if parts == ["sessions"]:
             return [
+                DheeFSEntry(name="current/", path="/sessions/current", kind="dir"),
                 DheeFSEntry(name="latest.md", path="/sessions/latest.md"),
                 DheeFSEntry(name="latest.json", path="/sessions/latest.json"),
+            ]
+        if parts == ["sessions", "current"]:
+            return [
+                DheeFSEntry(name="audit.jsonl", path="/sessions/current/audit.jsonl"),
             ]
         raise DheeFSNotFoundError(path)
 
@@ -523,6 +611,10 @@ class SessionsMount(DheeMount):
                 lines.extend(["", "## Todos"])
                 lines.extend([f"- {todo}" for todo in todos])
             return "\n".join(lines)
+        if parts == ["sessions", "current"]:
+            return entries_to_text(self.list(path))
+        if parts == ["sessions", "current", "audit.jsonl"]:
+            return self.workspace.context_state_store().read_audit_text(limit=500)
         return entries_to_text(self.list(path))
 
 

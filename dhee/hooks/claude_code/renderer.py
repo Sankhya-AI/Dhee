@@ -40,13 +40,14 @@ def render_context(
     shared_task_results: list[dict[str, Any]] | None = None,
     repo_entries: list[dict[str, Any]] | None = None,
     live_messages: list[dict[str, Any]] | None = None,
+    state_card: str | None = None,
 ) -> str:
     """Render Dhee context dict as flat XML for Claude Code injection.
 
     Returns empty string when nothing to inject.
     """
     sections: list[tuple[int, list[str]]] = [
-        (120, _router_block()),
+        (119, _state_card_block(state_card)),
         (118, _live_context_block(live_messages)),
         (115, _edits_section(edits_block)),
         (113, _repo_context_block(repo_entries)),
@@ -66,6 +67,11 @@ def render_context(
     non_empty = [(p, lines) for p, lines in sections if lines]
     if not non_empty:
         return ""
+    router_lines = _router_block()
+    if router_lines:
+        # Router guidance is useful, but it must not create a context payload by
+        # itself or displace session/state under tight budgets.
+        non_empty.append((20, router_lines))
 
     budget_chars = int(max_tokens * CHARS_PER_TOKEN)
 
@@ -133,6 +139,15 @@ def _router_block() -> list[str]:
     if os.environ.get("DHEE_ROUTER") != "1":
         return []
     return [f"<router>{_xml_escape(_ROUTER_NUDGE)}</router>"]
+
+
+def _state_card_block(state_card: str | None) -> list[str]:
+    if not state_card:
+        return []
+    text = str(state_card).strip()
+    if not text:
+        return []
+    return [text]
 
 
 def _docs_block(doc_matches: list | None) -> list[str]:

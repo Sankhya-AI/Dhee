@@ -31,6 +31,8 @@ class BashDigest:
     summary: list[str] = field(default_factory=list)
     head: str = ""
     tail: str = ""
+    stderr_head: str = ""
+    stderr_tail: str = ""
     notes: list[str] = field(default_factory=list)
 
     def render(self, ptr: str) -> str:
@@ -53,6 +55,14 @@ class BashDigest:
         if self.tail:
             lines.append("stdout-tail:")
             for tl in self.tail.splitlines()[-5:]:
+                lines.append(f"  {tl}")
+        if self.stderr_head:
+            lines.append("stderr-head:")
+            for hl in self.stderr_head.splitlines()[:8]:
+                lines.append(f"  {hl}")
+        if self.stderr_tail:
+            lines.append("stderr-tail:")
+            for tl in self.stderr_tail.splitlines()[-5:]:
                 lines.append(f"  {tl}")
         for n in self.notes:
             lines.append(f"note: {n}")
@@ -102,6 +112,45 @@ def _classify(cmd: str) -> str:
     if first in ("make", "cargo", "go"):
         return "build"
     return "generic"
+
+
+def preflight_command(cmd: str) -> dict[str, Any]:
+    """Cheap command-risk estimate before executing a routed bash command."""
+    cls = _classify(cmd)
+    try:
+        tokens = shlex.split(cmd, posix=True)
+    except ValueError:
+        tokens = cmd.split()
+    lower = cmd.lower()
+    bounded = bool(re.search(r"\|\s*(head|tail|wc|grep\s+-c)\b", lower))
+    risk = "low"
+    suggested = ""
+    reason = "output is likely bounded or naturally compact"
+    if cls in {"git_log", "git_diff", "grep", "listing", "file_dump"} and not bounded:
+        risk = "medium"
+        reason = f"{cls} can produce high-volume output"
+    if cls in {"pytest", "npm_run", "build"}:
+        risk = "medium"
+        reason = f"{cls} can emit long failure logs"
+    if " -r" in lower or " --recursive" in lower or "find /" in lower or "ls -r" in lower:
+        risk = "high"
+        reason = "recursive command can scan a large tree"
+    if cls == "git_log" and not bounded:
+        suggested = cmd + " --max-count=80" if "--max-count" not in lower and " -n " not in lower else ""
+    elif cls == "git_diff" and "--stat" not in lower and not bounded:
+        suggested = cmd + " --stat"
+    elif cls == "listing" and not bounded:
+        suggested = cmd + " | head -200"
+    elif cls == "grep" and not bounded:
+        suggested = cmd + " | head -200"
+    return {
+        "class": cls,
+        "output_risk": risk,
+        "bounded": bounded,
+        "reason": reason,
+        "suggested_bounded_command": suggested,
+        "token_count": len(tokens),
+    }
 
 
 def _head_tail(text: str, head_lines: int = 8, tail_lines: int = 5) -> tuple[str, str]:
@@ -160,10 +209,61 @@ def _summarise_grep(stdout: str) -> list[str]:
     return [f"matches={len(lines)}", f"files_matched={len(files)}"]
 
 
+_DIFF_FILE_RE = re.compile(r"^diff --git a/(.*?) b/(.*?)$", re.MULTILINE)
+_DIFF_HUNK_RE = re.compile(r"^@@", re.MULTILINE)
+
+
+def _summarise_git_diff(stdout: str) -> list[str]:
+    files = []
+    for m in _DIFF_FILE_RE.finditer(stdout):
+        path = m.group(2) or m.group(1)
+        if path and path not in files:
+            files.append(path)
+    additions = sum(1 for line in stdout.splitlines() if line.startswith("+") and not line.startswith("+++"))
+    deletions = sum(1 for line in stdout.splitlines() if line.startswith("-") and not line.startswith("---"))
+    hunks = len(_DIFF_HUNK_RE.findall(stdout))
+    items = [f"files_changed={len(files)}", f"hunks={hunks}", f"additions={additions}", f"deletions={deletions}"]
+    if files:
+        shown = ", ".join(files[:8])
+        if len(files) > 8:
+            shown += f", +{len(files)-8} more"
+        items.append(f"files={shown}")
+    return items
+
+
+_ERROR_LINE_RE = re.compile(
+    r"(?:^|\b)(error|failed|failure|exception|traceback|assertionerror|panic|fatal)(?:\b|:)",
+    re.IGNORECASE,
+)
+_FILE_LINE_RE = re.compile(r"([A-Za-z0-9_./\\-]+\.(?:py|js|ts|tsx|go|rs|java|rb|c|cc|cpp|h|hpp)):(\d+)")
+
+
+def _summarise_errors(stdout: str, stderr: str) -> list[str]:
+    combined = stdout + "\n" + stderr
+    lines = [line.strip() for line in combined.splitlines() if line.strip()]
+    errors: list[str] = []
+    refs: list[str] = []
+    for line in lines:
+        if _ERROR_LINE_RE.search(line):
+            errors.append(line[:220])
+        for m in _FILE_LINE_RE.finditer(line):
+            ref = f"{m.group(1)}:{m.group(2)}"
+            if ref not in refs:
+                refs.append(ref)
+        if len(errors) >= 4 and len(refs) >= 4:
+            break
+    out: list[str] = []
+    if errors:
+        out.append("first_errors=" + " | ".join(errors[:3]))
+    if refs:
+        out.append("file_refs=" + ", ".join(refs[:8]))
+    return out
+
+
 def _summarise_generic(stdout: str, stderr: str) -> list[str]:
     sl = stdout.splitlines()
     el = stderr.splitlines()
-    return [f"stdout_lines={len(sl)}", f"stderr_lines={len(el)}"]
+    return [f"stdout_lines={len(sl)}", f"stderr_lines={len(el)}"] + _summarise_errors(stdout, stderr)
 
 
 def digest_bash(
@@ -182,16 +282,21 @@ def digest_bash(
 
     if cls == "git_log":
         summary = _summarise_git_log(stdout)
+    elif cls == "git_diff":
+        summary = _summarise_git_diff(stdout)
     elif cls == "pytest" or cls == "npm_run":
-        summary = _summarise_pytest(stdout, stderr)
+        summary = _summarise_pytest(stdout, stderr) + _summarise_errors(stdout, stderr)
     elif cls == "listing":
         summary = _summarise_listing(stdout)
     elif cls == "grep":
         summary = _summarise_grep(stdout)
+    elif cls == "build":
+        summary = _summarise_generic(stdout, stderr)
     else:
         summary = _summarise_generic(stdout, stderr)
 
     head, tail = _head_tail(stdout, head_lines=8, tail_lines=5)
+    stderr_head, stderr_tail = _head_tail(stderr, head_lines=8, tail_lines=5)
 
     notes: list[str] = []
     if stderr.strip() and cls != "pytest":
@@ -209,5 +314,7 @@ def digest_bash(
         summary=summary,
         head=head,
         tail=tail,
+        stderr_head=stderr_head,
+        stderr_tail=stderr_tail,
         notes=notes,
     )

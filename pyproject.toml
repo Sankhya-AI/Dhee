@@ -47,7 +47,9 @@ local = ["llama-cpp-python>=0.3", "sentence-transformers>=3.0"]
 # Integrations
 mcp = ["mcp>=1.0.0"]
 api = ["fastapi>=0.100.0", "uvicorn>=0.20.0"]
-bus = ["engram-bus>=0.1.0"]
+# Handoff bus ships inside Dhee's wheel. Keep the extra as a no-op
+# compatibility alias so `pip install dhee[bus]` remains valid.
+bus = []
 benchmarks = ["huggingface_hub>=0.24.0"]
 # Edge/hardware deployment (offline, ONNX embedder)
 edge = ["onnxruntime>=1.16"]
@@ -65,7 +67,6 @@ all = [
     "mcp>=1.0.0",
     "fastapi>=0.100.0",
     "uvicorn>=0.20.0",
-    "engram-bus>=0.1.0",
     "huggingface_hub>=0.24.0",
     "llama-cpp-python>=0.3",
     "sentence-transformers>=3.0",
@@ -84,6 +85,7 @@ dhee = "dhee.cli:main"
 dhee-mcp = "dhee.mcp_slim:run"
 dhee-mcp-full = "dhee.mcp_server:run"
 dhee-debugger-api = "dhee.debugger_api:run"
+engram-bus = "engram_bus.server:main"
 
 [project.urls]
 Homepage = "https://github.com/Sankhya-AI/Dhee"
@@ -96,8 +98,8 @@ Changelog = "https://github.com/Sankhya-AI/Dhee/blob/main/CHANGELOG.md"
 include-package-data = false
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["dhee*", "engram*"]
+where = [".", "engram-bus"]
+include = ["dhee*", "engram*", "engram_bus*"]
 exclude = [
     "dhee.ui*",
     "engram-bus*",

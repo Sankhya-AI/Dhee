@@ -14,6 +14,7 @@ from dhee.db.sqlite import SQLiteManager
 @pytest.fixture
 def temp_db(tmp_path, monkeypatch):
     monkeypatch.setenv("DHEE_CODEX_AUTO_SYNC", "0")
+    monkeypatch.setenv("DHEE_DATA_DIR", str(tmp_path / "dhee-data"))
     db = SQLiteManager(str(tmp_path / "history.db"))
     monkeypatch.setattr(mcp_server, "_db", db)
     monkeypatch.setattr(mcp_server, "get_db", lambda: db)

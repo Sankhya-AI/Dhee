@@ -88,7 +88,26 @@ def cmd_shell(args: argparse.Namespace) -> None:
     """Run a DheeFS virtual shell command."""
     from dhee.fs import ContextWorkspace
 
-    command = " ".join(getattr(args, "shell_command", []) or []).strip()
+    shell_parts = list(getattr(args, "shell_command", []) or [])
+    # ``argparse.REMAINDER`` intentionally lets users pass commands like
+    # ``grep "two words" /state`` intact, but it also captures options
+    # placed after the virtual command. Accept both orders so the CLI feels
+    # like a product, not an argparse puzzle.
+    cleaned: list[str] = []
+    idx = 0
+    while idx < len(shell_parts):
+        token = shell_parts[idx]
+        if token in {"--repo", "--workspace-id", "--user-id", "--agent-id"} and idx + 1 < len(shell_parts):
+            setattr(args, token[2:].replace("-", "_"), shell_parts[idx + 1])
+            idx += 2
+            continue
+        if token == "--json":
+            setattr(args, "json", True)
+            idx += 1
+            continue
+        cleaned.append(token)
+        idx += 1
+    command = " ".join(cleaned).strip()
     if not command:
         print("Error: shell command is required", file=sys.stderr)
         sys.exit(2)
@@ -365,9 +384,79 @@ def cmd_demote(args: argparse.Namespace) -> None:
 
 def cmd_context(args: argparse.Namespace) -> None:
     """Inspect or refresh a linked repo's shared context."""
+    compiled_actions = {"status", "state", "checkpoint", "rollover", "provision", "debt"}
+    action = args.context_action or "list"
+    if action in compiled_actions:
+        from dhee.context_state import ContextStateStore
+
+        repo = args.repo or os.getcwd()
+        store = ContextStateStore(
+            repo=repo,
+            workspace_id=os.path.abspath(os.path.expanduser(repo)),
+            user_id=getattr(args, "user_id", "default"),
+            agent_id="cli",
+        )
+        if action == "status":
+            data = store.status()
+            if args.json:
+                _json_out(data)
+                return
+            print(f"Dhee compiled state: {data['level']}")
+            print(f"  projected cache-read  {_compact_int(data['projected_cache_read_tokens'])} tokens/turn")
+            print(f"  state card            {_compact_int(data['state_card_tokens'])} tokens")
+            print(f"  facts                 {data['fact_count']}")
+            print(f"  decisions             {data['active_decision_count']} active / {data['superseded_decision_count']} superseded")
+            print(f"  rollover required     {'yes' if data['rollover_required'] else 'no'}")
+            return
+        if action == "state":
+            text = store.render_state_card() if getattr(args, "card", False) else store.render_markdown()
+            print(text)
+            return
+        if action == "debt":
+            data = store.debt_summary(top=bool(getattr(args, "top", False)))
+            if args.json:
+                _json_out(data)
+                return
+            print(f"Projected cache-read: {_compact_int(data['projected_cache_read_tokens'])} tokens/turn")
+            print(f"Debt level: {data['level']}")
+            print(f"Expansion SLO: {data['expansion_level']} ({data['expansion_rate']:.1%})")
+            print(f"Suppressed: {_compact_int(data['suppressed_tokens'])} tokens")
+            if getattr(args, "top", False):
+                for row in data.get("top_debt_sources", []):
+                    print(f"  {_compact_int(row.get('tokens') or 0)} {row.get('kind') or ''} {row.get('source') or ''} - {row.get('reason') or ''}")
+            return
+        if action == "checkpoint":
+            data = store.checkpoint(reason=getattr(args, "reason", None) or "manual")
+            if args.json:
+                _json_out(data)
+                return
+            print(f"Checkpoint {data['id']}")
+            print(data["state_card"])
+            return
+        if action == "rollover":
+            data = store.rollover(reason=getattr(args, "reason", None) or "manual rollover")
+            if args.json:
+                _json_out(data)
+                return
+            print(f"Rollover checkpoint {data['checkpoint_id']}")
+            print(data["instruction"])
+            print(data["state_card"])
+            return
+        if action == "provision":
+            task = args.entry_id or ""
+            data = store.provision(task)
+            if args.json:
+                _json_out(data)
+                return
+            print(f"Estimated raw tokens: {data['estimated_raw_tokens']}")
+            print(f"Estimated compiled tokens: {data['estimated_compiled_tokens']}")
+            print(f"Projected cache-read: {data['projected_cache_read_tokens']}")
+            print(f"Risk: {data['risk']}")
+            print(f"Rollover required: {'yes' if data['rollover_required'] else 'no'}")
+            return
+
     from dhee import repo_link
 
-    action = args.context_action or "list"
     repo_root = repo_link._resolve_repo(args.repo) if args.repo else repo_link.repo_for_path(os.getcwd())
     if action == "refresh":
         results = repo_link.refresh(repo=args.repo)
@@ -2333,12 +2422,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_context.add_argument(
         "context_action",
         nargs="?",
-        choices=["list", "show", "delete", "refresh", "check"],
+        choices=["list", "show", "delete", "refresh", "check", "status", "state", "checkpoint", "rollover", "provision", "debt"],
         default="list",
         help="Subcommand (default: list)",
     )
-    p_context.add_argument("entry_id", nargs="?", help="Entry id for show/delete")
+    p_context.add_argument("entry_id", nargs="?", help="Entry id for show/delete, or task text for provision")
     p_context.add_argument("--repo", help="Repo path (default: linked repo containing cwd)")
+    p_context.add_argument("--user-id", default="default", help="User ID for compiled-state commands")
+    p_context.add_argument("--top", action="store_true", help="Show top context-debt sources")
+    p_context.add_argument("--card", action="store_true", help="For `context state`, print state card XML")
+    p_context.add_argument("--reason", help="Reason for checkpoint or rollover")
     p_context.add_argument("--quiet", action="store_true", help="No output on refresh (for git hooks)")
     p_context.add_argument("--json", action="store_true", help="JSON output")
 

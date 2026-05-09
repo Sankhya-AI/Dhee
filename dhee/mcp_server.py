@@ -35,6 +35,8 @@ Tools:
 32. dhee_submit_learning  — Submit an auditable learning candidate
 33. dhee_search_learnings — Search promoted learnings or candidates on request
 34. dhee_promote_learning — Promote a learning after gate/approval
+35. dhee_context_*       — Compiled state, debt, checkpoint, rollover, provision
+36. dhee_tools_list      — Discover compact vs full MCP surfaces
 """
 
 import json
@@ -741,6 +743,80 @@ TOOLS = [
         },
     ),
     Tool(
+        name="dhee_context_status",
+        description="Show compiled-state health, projected context debt, and rollover status for a repo.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string", "description": "Repo/workspace path"},
+                "workspace_id": {"type": "string", "description": "Explicit workspace id"},
+                "user_id": {"type": "string", "description": "User identifier"},
+                "agent_id": {"type": "string", "description": "Agent identity"},
+            },
+        },
+    ),
+    Tool(
+        name="dhee_context_state",
+        description="Return the living Dhee state card or canonical compiled state for the current repo.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string", "description": "Repo/workspace path"},
+                "workspace_id": {"type": "string", "description": "Explicit workspace id"},
+                "user_id": {"type": "string", "description": "User identifier"},
+                "agent_id": {"type": "string", "description": "Agent identity"},
+                "format": {"type": "string", "enum": ["card", "markdown", "json"], "description": "Return format (default card)"},
+            },
+        },
+    ),
+    Tool(
+        name="dhee_context_checkpoint",
+        description="Write a compact compiled-state checkpoint for continuation or compaction.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string", "description": "Repo/workspace path"},
+                "workspace_id": {"type": "string", "description": "Explicit workspace id"},
+                "user_id": {"type": "string", "description": "User identifier"},
+                "agent_id": {"type": "string", "description": "Agent identity"},
+                "reason": {"type": "string", "description": "Checkpoint reason"},
+            },
+        },
+    ),
+    Tool(
+        name="dhee_context_rollover",
+        description="Create a checkpoint and return instructions for continuing from compiled state.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string", "description": "Repo/workspace path"},
+                "workspace_id": {"type": "string", "description": "Explicit workspace id"},
+                "user_id": {"type": "string", "description": "User identifier"},
+                "agent_id": {"type": "string", "description": "Agent identity"},
+                "reason": {"type": "string", "description": "Rollover reason"},
+            },
+        },
+    ),
+    Tool(
+        name="dhee_context_provision",
+        description="Estimate raw vs compiled context cost before starting a task. Does not change state.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "task": {"type": "string", "description": "Task or prompt to estimate"},
+                "repo": {"type": "string", "description": "Repo/workspace path"},
+                "workspace_id": {"type": "string", "description": "Explicit workspace id"},
+                "user_id": {"type": "string", "description": "User identifier"},
+                "agent_id": {"type": "string", "description": "Agent identity"},
+            },
+        },
+    ),
+    Tool(
+        name="dhee_tools_list",
+        description="List compact default MCP tools and advanced tools available in dhee-mcp-full.",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
         name="dhee_shell",
         description=(
             "Run one approved DheeFS virtual shell command over Dhee's learning/context space. "
@@ -1012,6 +1088,8 @@ TOOLS = [
                     "enum": ["shallow", "normal", "deep"],
                     "description": "shallow=counts+symbols only; normal=+5-line head/tail; deep=+10-line head/tail. Default: normal",
                 },
+                "query": {"type": "string", "description": "Optional task/query for task-aware digest schema"},
+                "task_intent": {"type": "string", "description": "Optional digest intent: find_definition, debug_failure, understand_module, inspect_config, general"},
             },
             "required": ["file_path"],
         },
@@ -1032,6 +1110,7 @@ TOOLS = [
                 "command": {"type": "string", "description": "Shell command to run"},
                 "cwd": {"type": "string", "description": "Working directory (optional)"},
                 "timeout": {"type": "number", "description": "Seconds before SIGKILL (default 120, max 600)"},
+                "preview_only": {"type": "boolean", "description": "Return preflight risk without executing"},
             },
             "required": ["command"],
         },
@@ -1088,6 +1167,10 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "ptr": {"type": "string", "description": "Pointer returned by a dhee_* tool"},
+                "range": {"description": "Optional 1-indexed line range, e.g. '40:80' or [40, 80]"},
+                "symbol": {"type": "string", "description": "Optional function/class symbol to expand instead of full raw"},
+                "reason": {"type": "string", "description": "Why the digest was insufficient; used to tune reducers"},
+                "expected": {"type": "string", "description": "What signal you expected to find in the expansion"},
             },
             "required": ["ptr"],
         },
@@ -1571,6 +1654,80 @@ def _handle_dhee_shell(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
         workspace_id=arguments.get("workspace_id") or repo,
     )
     return workspace.execute(str(arguments.get("command") or "")).to_dict()
+
+
+def _context_store(arguments: Dict[str, Any]):
+    from dhee.context_state import ContextStateStore
+
+    repo = arguments.get("repo")
+    if repo:
+        repo = os.path.abspath(str(repo))
+    return ContextStateStore(
+        repo=repo,
+        workspace_id=arguments.get("workspace_id") or repo,
+        user_id=_default_user_id(arguments),
+        agent_id=_default_agent_id(arguments),
+    )
+
+
+def _handle_dhee_context_status(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    _maybe_sync_codex_runtime(arguments)
+    return _context_store(arguments).status()
+
+
+def _handle_dhee_context_state(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    _maybe_sync_codex_runtime(arguments)
+    store = _context_store(arguments)
+    fmt = str(arguments.get("format") or "card").lower()
+    if fmt == "json":
+        return {"format": "dhee_context_state", "state": store.load(), "status": store.status()}
+    if fmt == "markdown":
+        return {"format": "markdown", "text": store.render_markdown()}
+    return {"format": "card", "text": store.render_state_card(), "status": store.status()}
+
+
+def _handle_dhee_context_checkpoint(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    _maybe_sync_codex_runtime(arguments)
+    return _context_store(arguments).checkpoint(reason=str(arguments.get("reason") or "mcp checkpoint"))
+
+
+def _handle_dhee_context_rollover(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    _maybe_sync_codex_runtime(arguments)
+    return _context_store(arguments).rollover(reason=str(arguments.get("reason") or "mcp rollover"))
+
+
+def _handle_dhee_context_provision(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    _maybe_sync_codex_runtime(arguments)
+    return _context_store(arguments).provision(str(arguments.get("task") or arguments.get("query") or ""))
+
+
+def _handle_dhee_tools_list(_memory, _arguments: Dict[str, Any]) -> Dict[str, Any]:
+    default_tools = [
+        "remember",
+        "recall",
+        "dhee_context_status",
+        "dhee_context_state",
+        "dhee_context_checkpoint",
+        "dhee_context_rollover",
+        "dhee_context_provision",
+        "dhee_shell",
+        "dhee_read",
+        "dhee_grep",
+        "dhee_bash",
+        "dhee_agent",
+        "dhee_expand_result",
+        "dhee_inbox",
+        "dhee_broadcast",
+        "dhee_handoff",
+    ]
+    return {
+        "format": "dhee_tools",
+        "default_server": "dhee-mcp",
+        "advanced_server": "dhee-mcp-full",
+        "default_tools": default_tools,
+        "advanced_tools": [tool.name for tool in TOOLS if tool.name not in default_tools],
+        "note": "Use compiled-state and router tools first; full MCP is for administration and manual inspection.",
+    }
 
 
 def _handle_dhee_list_assets(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -2060,6 +2217,12 @@ HANDLERS = {
     "dhee_submit_learning": _handle_dhee_submit_learning,
     "dhee_search_learnings": _handle_dhee_search_learnings,
     "dhee_promote_learning": _handle_dhee_promote_learning,
+    "dhee_context_status": _handle_dhee_context_status,
+    "dhee_context_state": _handle_dhee_context_state,
+    "dhee_context_checkpoint": _handle_dhee_context_checkpoint,
+    "dhee_context_rollover": _handle_dhee_context_rollover,
+    "dhee_context_provision": _handle_dhee_context_provision,
+    "dhee_tools_list": _handle_dhee_tools_list,
     "dhee_shell": _handle_dhee_shell,
     "dhee_list_assets": _handle_dhee_list_assets,
     "dhee_get_asset": _handle_dhee_get_asset,
@@ -2081,7 +2244,8 @@ HANDLERS = {
 _MEMORY_FREE_TOOLS = {
     "get_last_session", "save_session_digest",
     "record_outcome", "reflect", "store_intention",
-    "dhee_submit_learning", "dhee_search_learnings", "dhee_promote_learning", "dhee_shell",
+    "dhee_submit_learning", "dhee_search_learnings", "dhee_promote_learning",
+    "dhee_context_status", "dhee_context_state", "dhee_context_checkpoint", "dhee_context_rollover", "dhee_context_provision", "dhee_tools_list", "dhee_shell",
     "dhee_list_assets", "dhee_get_asset", "dhee_sync_codex_artifacts", "dhee_why", "dhee_thread_state", "dhee_shared_task", "dhee_shared_task_results", "dhee_inbox", "dhee_broadcast", "dhee_handoff",
     "dhee_read", "dhee_bash", "dhee_agent", "dhee_grep", "dhee_expand_result",
 }

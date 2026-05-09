@@ -253,6 +253,66 @@ def _record_route_decision(decision: Dict[str, Any]) -> None:
         return
 
 
+def _context_store():
+    try:
+        from dhee.context_state import ContextStateStore
+
+        ctx = _shared_context()
+        return ContextStateStore(
+            repo=ctx.get("repo"),
+            workspace_id=ctx.get("repo"),
+            user_id=ctx.get("user_id") or "default",
+            agent_id=ctx.get("agent_id") or "router",
+        )
+    except Exception:
+        return None
+
+
+def _state_routing_context(*, extra: str = "") -> Dict[str, Any]:
+    store = _context_store()
+    if store is None:
+        return {}
+    try:
+        return store.routing_query(extra=extra)
+    except Exception:
+        return {}
+
+
+def _stable_context_hash(*parts: Any) -> str:
+    seed = "\0".join(str(part or "") for part in parts)
+    return hashlib.sha256(seed.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _record_context_admission(
+    *,
+    kind: str,
+    text: str,
+    source: str,
+    ptr: str | None,
+    metadata: Dict[str, Any],
+    content_hash: str | None = None,
+) -> None:
+    try:
+        from dhee.context_state import ContextAdmissionController, ContextBlock
+
+        store = _context_store()
+        if store is None:
+            return
+        controller = ContextAdmissionController(store)
+        controller.decide(
+            ContextBlock(
+                kind=kind,
+                text=text,
+                source=source,
+                ptr=ptr,
+                content_hash=content_hash,
+                metadata=metadata,
+            )
+        )
+    except Exception:
+        return
+
+
 def handle_dhee_read(arguments: Dict[str, Any]) -> Dict[str, Any]:
     """Digest-returning wrapper for file reads."""
     _evict_stale_ptr_sessions()
@@ -275,11 +335,30 @@ def handle_dhee_read(arguments: Dict[str, Any]) -> Dict[str, Any]:
         return {"error": f"limit must be >= 0, got: {limit}"}
     # Phase 4/8: if caller didn't pin depth, consult the tuned policy.
     intent_label = _intent.classify_read(file_path)
+    task_query = str(arguments.get("query") or arguments.get("task") or "").strip()
+    task_intent = str(arguments.get("task_intent") or "").strip()
+    state_route = {}
+    if not task_query or not task_intent:
+        state_route = _state_routing_context(extra=file_path)
+        if not task_query:
+            task_query = str(state_route.get("query") or "").strip()
+        if not task_intent:
+            candidate_intent = str(state_route.get("intent") or "").strip()
+            if candidate_intent and candidate_intent != "general":
+                task_intent = candidate_intent
+    schema = None
+    if task_query or task_intent:
+        try:
+            from dhee.context_state import task_aware_read_schema
+
+            schema = task_aware_read_schema(file_path, query=task_query, task_intent=task_intent)
+        except Exception:
+            schema = None
     explicit_depth = arguments.get("digest_depth")
     if explicit_depth in ("shallow", "normal", "deep"):
         depth = explicit_depth
     else:
-        depth = _policy.get_depth("Read", intent_label)
+        depth = (schema or {}).get("preferred_depth") or _policy.get_depth("Read", intent_label)
     shared_event_id = _shared_event_id("Read", file_path, offset, limit, depth)
     _publish_shared_claim(
         packet_kind="routed_read",
@@ -344,7 +423,11 @@ def handle_dhee_read(arguments: Dict[str, Any]) -> Dict[str, Any]:
         text=content,
         depth=depth,
         range_=range_,
+        query=task_query,
+        task_intent=(schema or {}).get("intent") or task_intent,
     )
+    if schema and schema.get("note"):
+        d.notes.append(str(schema["note"]))
     stored = ptr_store.store(
         content,
         tool="Read",
@@ -357,6 +440,8 @@ def handle_dhee_read(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "est_tokens": d.est_tokens,
             "kind": d.kind,
             "intent": intent_label,
+            "task_intent": (schema or {}).get("intent"),
+            "task_source": state_route.get("source") if state_route else ("explicit" if (task_query or task_intent) else ""),
             "depth": depth,
         }),
     )
@@ -394,10 +479,28 @@ def handle_dhee_read(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "est_tokens": d.est_tokens,
             "kind": d.kind,
             "inlined": inlined,
+            "task_intent": (schema or {}).get("intent"),
+            "focus_count": len(d.focus),
         },
         # Hash this routed_read against the per-file baseline so a second
         # read of the same unchanged file produces no broadcast at all.
         baseline_content=content,
+    )
+    _record_context_admission(
+        kind="routed_read",
+        text=rendered,
+        source=file_path,
+        ptr=stored.ptr,
+        metadata={
+            "token_estimate": d.est_tokens,
+            "intent": intent_label,
+            "task_intent": (schema or {}).get("intent"),
+            "task_source": state_route.get("source") if state_route else ("explicit" if (task_query or task_intent) else ""),
+            "depth": depth,
+            "inlined": inlined,
+            "focus_count": len(d.focus),
+        },
+        content_hash=_stable_context_hash("routed_read", file_path, offset, limit, content),
     )
     return {
         "ptr": stored.ptr,
@@ -407,6 +510,9 @@ def handle_dhee_read(arguments: Dict[str, Any]) -> Dict[str, Any]:
         "est_tokens": d.est_tokens,
         "kind": d.kind,
         "inlined": inlined,
+        "task_intent": (schema or {}).get("intent"),
+        "task_source": state_route.get("source") if state_route else ("explicit" if (task_query or task_intent) else ""),
+        "focus_count": len(d.focus),
     }
 
 
@@ -433,6 +539,14 @@ def handle_dhee_bash(arguments: Dict[str, Any]) -> Dict[str, Any]:
     cwd = arguments.get("cwd")
     if cwd and not os.path.isdir(cwd):
         return {"error": f"cwd does not exist: {cwd}"}
+    preflight = _bash_digest.preflight_command(cmd)
+    if bool(arguments.get("preview_only") or arguments.get("dry_run")):
+        return {
+            "command": cmd,
+            "cwd": cwd,
+            "will_execute": False,
+            "preflight": preflight,
+        }
     shared_event_id = _shared_event_id("Bash", cwd or os.getcwd(), cmd)
     _publish_shared_claim(
         packet_kind="routed_bash",
@@ -483,6 +597,9 @@ def handle_dhee_bash(arguments: Dict[str, Any]) -> Dict[str, Any]:
         stdout=stdout,
         stderr=stderr,
     )
+    d.notes.append(f"preflight_risk={preflight.get('output_risk')} reason={preflight.get('reason')}")
+    if preflight.get("suggested_bounded_command"):
+        d.notes.append(f"suggested_bounded_command={preflight.get('suggested_bounded_command')}")
     if timed_out:
         d.notes.append(f"TIMED OUT after {timeout:.0f}s")
     for s in truncated_streams:
@@ -507,6 +624,7 @@ def handle_dhee_bash(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "stdout_bytes": d.stdout_bytes,
             "stderr_bytes": d.stderr_bytes,
             "timed_out": timed_out,
+            "preflight": preflight,
         }),
     )
     rendered = d.render(stored.ptr)
@@ -545,7 +663,22 @@ def handle_dhee_bash(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "stderr_bytes": d.stderr_bytes,
             "timed_out": timed_out,
             "inlined": inlined,
+            "preflight": preflight,
         },
+    )
+    _record_context_admission(
+        kind="routed_bash",
+        text=rendered,
+        source=str(cwd or os.getcwd()),
+        ptr=stored.ptr,
+        metadata={
+            "token_estimate": d.est_tokens if hasattr(d, "est_tokens") else int((raw_output_bytes or 0) / 3.5),
+            "command": cmd,
+            "class": d.cls,
+            "exit_code": exit_code,
+            "preflight": preflight,
+        },
+        content_hash=_stable_context_hash("routed_bash", cwd or os.getcwd(), cmd, exit_code, raw_blob),
     )
     return {
         "ptr": stored.ptr,
@@ -557,6 +690,7 @@ def handle_dhee_bash(arguments: Dict[str, Any]) -> Dict[str, Any]:
         "stderr_bytes": d.stderr_bytes,
         "timed_out": timed_out,
         "inlined": inlined,
+        "preflight": preflight,
     }
 
 
@@ -602,15 +736,26 @@ def handle_dhee_agent(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "est_tokens": d.est_tokens,
             "file_refs": d.file_refs[:50],
             "error_hits": d.error_hits,
+            "schema": getattr(d, "schema", "GenericDigest"),
         }),
+    )
+    rendered = d.render(stored.ptr)
+    _record_context_admission(
+        kind="routed_agent",
+        text=rendered,
+        source=source or d.kind,
+        ptr=stored.ptr,
+        metadata={"token_estimate": d.est_tokens, "kind": d.kind, "schema": getattr(d, "schema", "GenericDigest")},
+        content_hash=_stable_context_hash("routed_agent", source or d.kind, text),
     )
     return {
         "ptr": stored.ptr,
-        "digest": d.render(stored.ptr),
+        "digest": rendered,
         "char_count": d.char_count,
         "line_count": d.line_count,
         "est_tokens": d.est_tokens,
         "kind": d.kind,
+        "schema": getattr(d, "schema", "GenericDigest"),
         "file_ref_count": len(d.file_refs),
     }
 
@@ -741,6 +886,19 @@ def handle_dhee_grep(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "inlined": inlined,
         },
     )
+    _record_context_admission(
+        kind="routed_grep",
+        text=rendered,
+        source=path,
+        ptr=stored.ptr,
+        metadata={
+            "token_estimate": digest.est_tokens,
+            "pattern": pattern,
+            "match_count": digest.match_count,
+            "file_count": digest.file_count,
+        },
+        content_hash=_stable_context_hash("routed_grep", path, pattern, glob, raw),
+    )
     return {
         "ptr": stored.ptr,
         "digest": rendered,
@@ -860,6 +1018,8 @@ def handle_dhee_expand_result(arguments: Dict[str, Any]) -> Dict[str, Any]:
     slice_info: dict[str, Any] = {}
     range_spec = arguments.get("range")
     symbol = arguments.get("symbol")
+    reason = str(arguments.get("reason") or arguments.get("why") or "").strip()
+    expected = str(arguments.get("expected") or "").strip()
     sliced = content
     if range_spec is not None:
         sliced, slice_info = _slice_by_range(content, range_spec)
@@ -874,8 +1034,34 @@ def handle_dhee_expand_result(arguments: Dict[str, Any]) -> Dict[str, Any]:
         intent=str(meta.get("intent") or meta.get("class") or meta.get("kind") or ""),
         depth=str(meta.get("depth") or ""),
         agent_id=str(meta.get("agent_id") or os.environ.get("DHEE_AGENT_ID") or ""),
+        reason=reason,
+        slice_mode=str(slice_info.get("mode") or "full"),
+        expected=expected,
     )
+    try:
+        store = _context_store()
+        if store is not None:
+            store._append_audit(  # local audit only; raw content is not stored in the ledger
+                {
+                    "event": "pointer_expansion",
+                    "ptr": ptr,
+                    "tool": str(meta.get("tool") or ""),
+                    "intent": str(meta.get("intent") or meta.get("class") or meta.get("kind") or ""),
+                    "tokens": int(len(str(sliced or "")) / 3.5),
+                    "slice": slice_info,
+                    "reason": reason,
+                    "expected": expected,
+                }
+            )
+    except Exception:
+        pass
     result: dict[str, Any] = {"ptr": ptr, "meta": meta, "content": sliced}
     if slice_info:
         result["slice"] = slice_info
+    result["expansion"] = {
+        "reason": reason,
+        "expected": expected,
+        "slice_mode": slice_info.get("mode") or "full",
+        "tokens": int(len(str(sliced or "")) / 3.5),
+    }
     return result
