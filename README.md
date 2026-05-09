@@ -2,12 +2,12 @@
   <img src="docs/dhee-logo.png" alt="Dhee" width="80">
 </p>
 
-<h1 align="center">Dhee — the context compiler for AI coding agents</h1>
+<h1 align="center">Dhee — the context manager for AI coding agents</h1>
 
-<h3 align="center">Local context infrastructure that compiles working state, routes tool output, and shares audited learnings across Hermes, Claude Code, Codex, Cursor, Gemini CLI, Aider, Cline, and any MCP client.</h3>
+<h3 align="center">Dhee decides what your coding agent should see, remember, and forget each turn, so it stays cheap, reliable, and auditable.</h3>
 
 <p align="center">
-  Dhee is not another coding agent, IDE, or vector database. It is the control plane that decides what context reaches the next turn: goal, facts, decisions, plan, active files, tests, and pointer-backed evidence.
+  It runs locally under Claude Code, Codex, Cursor, Gemini CLI, Aider, Cline, Hermes, and any MCP client.
 </p>
 
 <p align="center">
@@ -22,14 +22,14 @@
 </p>
 
 <p align="center">
-  <img src="docs/demo/demo.gif" alt="Dhee demo — fat skills, thin tokens, self-tuning retrieval" width="900">
+  <img src="docs/demo/demo.gif" alt="Dhee demo — smaller context for coding agents" width="900">
 </p>
 
 <p align="center">
   <a href="#what-is-dhee">What is Dhee</a> ·
-  <a href="#compiled-state">Compiled State</a> ·
-  <a href="#shared-agent-learning">Shared Agent Learning</a> ·
-  <a href="#dheefs">DheeFS</a> ·
+  <a href="#compiled-state">Current State</a> ·
+  <a href="#shared-agent-learning">Team Knowledge</a> ·
+  <a href="#dheefs">File Interface</a> ·
   <a href="#quick-start">Quick Start</a> ·
   <a href="#repo-shared-context">Repo-Shared Context</a> ·
   <a href="#benchmarks">Benchmarks</a> ·
@@ -42,25 +42,29 @@
 
 ## What is Dhee?
 
-**Dhee is the local context compiler for agentic development.** It runs on your machine, uses SQLite and local state files, plugs into Hermes, Claude Code, Codex, and any MCP client, and turns scattered transcripts, tool output, repo docs, memories, and subagent digests into a small auditable working set.
+**Dhee decides what your coding agent should see, remember, and forget each turn, so it stays cheap, reliable, and auditable.**
 
-This is the category Dhee is built to own: **context governance for AI coding agents**. As models get cheaper and more capable, the scarce resource is not the prompt box; it is the quality, stability, provenance, and cost of the context that gets admitted into every agent turn. Dhee sits between agents and their workspace as the compiler for that context.
+Every serious coding agent now hits the same bottleneck: not model intelligence, but context. Transcripts grow, tool output piles up, compaction drops decisions, and useful project knowledge gets trapped in one session.
 
-It does five jobs the model can't reliably do for itself:
+Dhee runs locally between your agent and your workspace. It keeps the agent focused on the goal, decisions, files, tests, and evidence that matter now, while preserving the raw history for audit and reuse.
 
-1. **Maintains compiled state.** Every turn gets a small regenerated state card instead of the whole journey: current goal, canonical facts, active decisions, next action, active files, test status, and pointer-backed evidence.
+The buyer problem is simple:
 
-2. **Remembers.** Doc chunks, decisions, what worked, what failed, user preferences. Decay and promotion keep stale knowledge out of the hot path while preserving what should transfer.
+- Agents waste money re-reading files, logs, and old conversation.
+- Agents lose decisions after compaction, handoff, or tool-output overload.
+- Teams cannot reuse what one agent learned in another agent without copying a pile of text.
 
-3. **Routes.** A 10 MB `git log` becomes a compact digest with a pointer. Raw output only re-enters context when the model explicitly expands it.
+Dhee handles the context layer:
 
-4. **Shares learnings.** Hermes memory, session traces, and agent-created skills flow into Dhee as auditable learning candidates. Only promoted learnings appear as Learned Playbooks for Claude Code, Codex, Hermes, and any Dhee-enabled agent.
+1. **Keeps current state.** Goal, facts, decisions, active files, tests, and next step stay visible without replaying the whole session.
 
-5. **Self-tunes.** Dhee watches which digests the model expands and which retrieval depths are useful, then tunes router policy per tool, per intent, per file type. The goal is not a bigger prompt; it is a smaller, better working set.
+2. **Shrinks noisy tool output.** Large reads, searches, logs, and test runs become compact digests with pointers back to the raw evidence.
+
+3. **Reuses team knowledge safely.** Decisions, docs, handoffs, and promoted learnings move across agents with provenance instead of becoming prompt sludge.
 
 ### Who it's for
 
-- **AI-native engineering teams** whose agents are now expensive, forgetful, repetitive, or hard to audit.
+- **AI-native engineering teams** whose agents are expensive, forgetful, repetitive, or hard to audit.
 - **Claude Code / Cursor / Codex / Gemini CLI / Aider / Cline users** who have hit context limits, compaction loops, or runaway tool-output bills.
 - **Teams standardizing on `AGENTS.md`, `CLAUDE.md`, Skills, MCP tools, and subagents** who need governed delivery instead of bigger prompts.
 - **Hermes users** who already have a self-evolving agent and want those learnings to make Claude Code and Codex smarter too.
@@ -68,7 +72,7 @@ It does five jobs the model can't reliably do for itself:
 
 ---
 
-## <span id="compiled-state">Compiled State — the transcript is audit, state is truth</span>
+## <span id="compiled-state">Current State — keep the agent oriented</span>
 
 Long coding sessions get expensive and less reliable when old tool output, repeated reads, failed attempts, and superseded plans keep influencing the next token. Dhee's answer is not to trim the transcript. Dhee keeps a canonical working state and regenerates a small state card for each turn.
 
@@ -99,9 +103,9 @@ Quality is the gate. Dhee suppresses duplicate and stale context only when the p
 
 ---
 
-## <span id="shared-agent-learning">Shared Agent Learning — one promoted learning, every agent benefits</span>
+## <span id="shared-agent-learning">Team Knowledge — reuse what agents learn</span>
 
-Hermes can evolve its own skills and memories. Claude Code has native hooks. Codex has MCP config, `AGENTS.md`, and a persisted session stream. Dhee is the information layer underneath them: it turns separate agent histories into shared, gated context.
+Hermes can evolve its own skills and memories. Claude Code has native hooks. Codex has MCP config, `AGENTS.md`, and a persisted session stream. Dhee turns those separate agent histories into reusable context that other agents can trust.
 
 ```text
 Hermes MemoryProvider
@@ -111,7 +115,7 @@ Hermes MemoryProvider
   └─ self-evolution traces
           │
           ▼
-      Dhee Learning Exchange
+      Dhee Review Layer
           │
           ├─ candidate  -> review / evidence / score
           ├─ promoted   -> injected as Learned Playbooks
@@ -140,9 +144,9 @@ This is the product contract: **with Dhee, a learning proven in one agent can be
 
 ---
 
-## <span id="dheefs">DheeFS — one local learning space every agent already understands</span>
+## <span id="dheefs">File Interface — inspect agent context like local files</span>
 
-Agents already understand files and shell verbs. DheeFS exposes Dhee's memory, router, handoff, artifacts, shared tasks, and learning exchange as one virtual context space:
+Agents already understand files and shell verbs. Dhee exposes memory, handoff, artifacts, shared tasks, and learning review as one virtual context space:
 
 ```bash
 dhee shell "ls /learnings"
@@ -338,7 +342,7 @@ Four MCP tools replace `Read` / `Bash` / `Agent` on heavy calls:
 
 A 10 MB `git log --oneline -50000` becomes a ~200-token digest. This is where the serious savings live.
 
-### Self-tuning retrieval
+### Learns what to show
 
 Most memory layers are static: you write rules, they retrieve. Dhee watches what happens and tunes itself.
 
@@ -357,7 +361,7 @@ Frontend-heavy teams get deeper JS/TS digests. Data teams get richer CSV/JSONL s
 |:--|:-:|:-:|:-:|:-:|:-:|:-:|
 | **Tokens / turn** | **~300** | 2,000+ | varies | ~1K+ | varies | ~1,900 |
 | **LongMemEval R@5** | **99.4%** | — | — | — | 96.6% | 95.2% |
-| **Self-tuning retrieval** | **Yes** | No | No | No | No | No |
+| **Adapts from expansions** | **Yes** | No | No | No | No | No |
 | **Hermes → Claude/Codex learning exchange** | **Yes** | No | No | No | No | No |
 | **Auto-digest tool output** | **Yes** | No | No | No | No | No |
 | **Git-shared team context** | **Yes** | Manual | No | No | No | No |
@@ -365,7 +369,7 @@ Frontend-heavy teams get deeper JS/TS digests. Data teams get richer CSV/JSONL s
 | **External DB required** | No (SQLite) | No | Qdrant/pgvector | Postgres+vector | No | No |
 | **License** | MIT | — | Apache-2 | Apache-2 | MIT | MIT |
 
-Dhee is not trying to be the agent, the IDE, or the memory SaaS. It is the **context governance layer** those systems need underneath them: token reduction, reproducible recall, self-tuning retrieval policy, git-shared team context, and promoted cross-agent learning in one local-first control plane.
+Dhee is not trying to be the agent, the IDE, or the memory SaaS. It is the **context manager** those systems need underneath them: smaller prompts, reproducible recall, adaptive retrieval, git-shared team context, and auditable knowledge reuse in one local-first package.
 
 ---
 
