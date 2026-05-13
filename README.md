@@ -2,10 +2,6 @@
   <img src="docs/dhee-hero.png" alt="Dhee - the context firewall for AI coding agents" width="100%">
 </p>
 
-<h1 align="center">Dhee</h1>
-
-<h3 align="center">The context firewall for AI coding agents.</h3>
-
 <p align="center">
   Dhee decides what your agent should see, remember, forget, compress, and expand each turn.
 </p>
