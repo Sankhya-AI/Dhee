@@ -26,6 +26,7 @@ def test_ui_source_is_canvas_router_app():
     canvas = (WEB_DIR / "src" / "components" / "canvas" / "useInfiniteCanvas.ts").read_text(encoding="utf-8")
     app = (WEB_DIR / "src" / "App.tsx").read_text(encoding="utf-8")
     product_views = (WEB_DIR / "src" / "views" / "ProductViews.tsx").read_text(encoding="utf-8")
+    router_view = (WEB_DIR / "src" / "views" / "RouterView.tsx").read_text(encoding="utf-8")
 
     for label in ["HOME", "FIREWALL", "BRAIN", "HANDOFF", "REPLAY", "LEARN", "PACKS"]:
         assert f'label: "{label}"' in nav
@@ -39,6 +40,7 @@ def test_ui_source_is_canvas_router_app():
     assert 'view === "portability"' in app
     assert 'label="CURRENT WORK"' in product_views
     assert 'label="LATEST SAVED HANDOFF"' in product_views
+    assert "Loading active Claude Code and Codex sessions..." in router_view
 
 
 def test_ui_serves_built_spa_and_core_api(tmp_path, monkeypatch):

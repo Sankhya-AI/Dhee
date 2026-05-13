@@ -221,15 +221,25 @@ function RouterSavingsDashboard({
   const load = async (silent = false) => {
     if (!silent) setLoading(true);
     setError(null);
+    const activeRequest = api.routerSessions({ active: true, limit: 50 }).then(
+      (page) => ({ ok: true as const, page }),
+      (error) => ({ ok: false as const, error })
+    );
+    const historyRequest = api.routerSessions({ active: false, limit: 100 }).then(
+      (page) => ({ ok: true as const, page }),
+      (error) => ({ ok: false as const, error })
+    );
+    const errors: string[] = [];
     try {
-      const [history, active] = await Promise.all([
-        api.routerSessions({ active: false, limit: 100 }),
-        api.routerSessions({ active: true, limit: 50 }),
-      ]);
-      setHistoryPage(history);
-      setActivePage(active);
-    } catch (e) {
-      setError(String(e));
+      const active = await activeRequest;
+      if (active.ok) setActivePage(active.page);
+      else errors.push(String(active.error));
+
+      const history = await historyRequest;
+      if (history.ok) setHistoryPage(history.page);
+      else errors.push(String(history.error));
+
+      if (errors.length) setError(errors.join("; "));
     } finally {
       if (!silent) setLoading(false);
     }
@@ -537,7 +547,9 @@ function RouterSavingsDashboard({
           }
         >
           {activeRows.length === 0 ? (
-            <EmptyState>No active Claude Code or Codex sessions detected.</EmptyState>
+            <EmptyState>
+              {loading ? "Loading active Claude Code and Codex sessions..." : "No active Claude Code or Codex sessions detected."}
+            </EmptyState>
           ) : (
             <div style={{ display: "grid", gap: 8 }}>
               {activeRows.map((row) => (

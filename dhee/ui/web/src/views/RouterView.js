@@ -177,16 +177,22 @@ function RouterSavingsDashboard({ onOpenFolders, onOpenSetup, }) {
         if (!silent)
             setLoading(true);
         setError(null);
+        const activeRequest = api.routerSessions({ active: true, limit: 50 }).then((page) => ({ ok: true, page }), (error) => ({ ok: false, error }));
+        const historyRequest = api.routerSessions({ active: false, limit: 100 }).then((page) => ({ ok: true, page }), (error) => ({ ok: false, error }));
+        const errors = [];
         try {
-            const [history, active] = await Promise.all([
-                api.routerSessions({ active: false, limit: 100 }),
-                api.routerSessions({ active: true, limit: 50 }),
-            ]);
-            setHistoryPage(history);
-            setActivePage(active);
-        }
-        catch (e) {
-            setError(String(e));
+            const active = await activeRequest;
+            if (active.ok)
+                setActivePage(active.page);
+            else
+                errors.push(String(active.error));
+            const history = await historyRequest;
+            if (history.ok)
+                setHistoryPage(history.page);
+            else
+                errors.push(String(history.error));
+            if (errors.length)
+                setError(errors.join("; "));
         }
         finally {
             if (!silent)
@@ -343,7 +349,7 @@ function RouterSavingsDashboard({ onOpenFolders, onOpenSetup, }) {
                         fontSize: 10,
                         padding: "7px 10px",
                         whiteSpace: "nowrap",
-                    }, children: "HISTORY" }), children: activeRows.length === 0 ? (_jsx(EmptyState, { children: "No active Claude Code or Codex sessions detected." })) : (_jsx("div", { style: { display: "grid", gap: 8 }, children: activeRows.map((row) => (_jsx(ActiveSessionCard, { row: row, selected: selected?.session_id === row.session_id, onSelect: () => setSelectedId((current) => current === row.session_id ? "" : row.session_id) }, row.session_id))) })) }))] }));
+                    }, children: "HISTORY" }), children: activeRows.length === 0 ? (_jsx(EmptyState, { children: loading ? "Loading active Claude Code and Codex sessions..." : "No active Claude Code or Codex sessions detected." })) : (_jsx("div", { style: { display: "grid", gap: 8 }, children: activeRows.map((row) => (_jsx(ActiveSessionCard, { row: row, selected: selected?.session_id === row.session_id, onSelect: () => setSelectedId((current) => current === row.session_id ? "" : row.session_id) }, row.session_id))) })) }))] }));
 }
 function ActiveSessionCard({ row, selected, onSelect, }) {
     const color = agentColor(row.agent || row.runtime);
