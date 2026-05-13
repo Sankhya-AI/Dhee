@@ -721,7 +721,7 @@ input {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 18px;
-  padding: 14px 0;
+  padding: 16px 0;
   border-bottom: 1px solid var(--border);
   align-items: start;
 }
@@ -730,12 +730,29 @@ input {
   font-weight: 700;
   line-height: 1.25;
   overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.product-learning-meta {
+  margin-top: 6px;
+  color: var(--ink3);
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.45;
+  text-transform: uppercase;
+  overflow-wrap: anywhere;
 }
 .product-learning-body {
-  margin-top: 6px;
+  margin-top: 8px;
   color: var(--ink2);
   line-height: 1.55;
   overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 .product-learning-actions {
   display: flex;

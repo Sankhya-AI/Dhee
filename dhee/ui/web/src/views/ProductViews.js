@@ -35,7 +35,15 @@ function shortPath(value) {
 function timeLabel(value) {
     if (!value)
         return "no timestamp";
-    const t = new Date(value).getTime();
+    let t;
+    if (typeof value === "number") {
+        t = value < 10000000000 ? value * 1000 : value;
+    }
+    else {
+        const raw = String(value).trim();
+        const numeric = Number(raw);
+        t = raw && !Number.isNaN(numeric) ? (numeric < 10000000000 ? numeric * 1000 : numeric) : new Date(raw).getTime();
+    }
     if (Number.isNaN(t))
         return String(value);
     const delta = Date.now() - t;
@@ -46,6 +54,21 @@ function timeLabel(value) {
     if (delta < 86400000)
         return `${Math.floor(delta / 3600000)}h ago`;
     return `${Math.floor(delta / 86400000)}d ago`;
+}
+function learningPreview(row) {
+    const preview = String(row.preview || row.body || "").replace(/\s+/g, " ").trim();
+    return preview || "No evidence preview captured yet.";
+}
+function learningMeta(row) {
+    const rawChars = Number(row.raw_body_chars || 0);
+    const evidenceCount = Number(row.evidence_count || 0);
+    return [
+        row.kind ? String(row.kind) : null,
+        row.scope ? `${String(row.scope)} scope` : null,
+        evidenceCount ? `${compact(evidenceCount)} evidence` : null,
+        rawChars ? `${compact(rawChars)} raw chars compacted` : null,
+        timeLabel(row.updated_at || row.created_at),
+    ].filter(Boolean).join(" - ");
 }
 function toneFor(value) {
     const raw = String(value || "").toLowerCase();
@@ -168,7 +191,10 @@ export function LearningInboxView() {
     return (_jsxs(Screen, { eyebrow: "LEARNING INBOX", title: "Only evidence-backed learnings get promoted.", subtitle: "Clear pending review candidates from agent work. Dhee should learn from success, avoided failure, repeated utility, or explicit approval.", action: _jsx("button", { onClick: refresh, style: buttonStyle, children: "refresh" }), children: [_jsx(LoadingState, { loading: loading, error: error }), _jsxs("div", { className: "product-metric-grid", children: [_jsx(Metric, { label: "candidates", value: compact(get(totals, "candidate", 0)), tone: "var(--accent)" }), _jsx(Metric, { label: "promoted", value: compact(get(totals, "promoted", 0)), tone: "var(--green)" }), _jsx(Metric, { label: "rejected", value: compact(get(totals, "rejected", 0)), tone: "var(--rose)" }), _jsx(Metric, { label: "all learnings", value: compact(get(totals, "all", rows.length)) })] }), _jsx(Panel, { label: "LEARNING REVIEW", children: _jsx(RowList, { rows: rows, empty: "No learning candidates yet.", render: (row) => {
                         const id = String(row.id || "");
                         const status = String(row.status || "candidate");
-                        return (_jsxs("div", { className: "product-learning-row", children: [_jsxs("div", { style: { minWidth: 0 }, children: [_jsxs("div", { style: { display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }, children: [_jsx(Pill, { tone: toneFor(status), children: status }), _jsx(Pill, { children: String(row.evidence_gate || "needs approval") }), _jsx(Pill, { children: String(row.source_harness || row.source_agent_id || "agent") })] }), _jsx("div", { className: "product-learning-title", children: String(row.title || id) }), _jsx("div", { className: "product-learning-body", children: String(row.body || "") })] }), _jsxs("div", { className: "product-learning-actions", children: [_jsx("button", { disabled: !id || busy === id || status === "promoted", onClick: () => act(id, "promote"), style: buttonStyle, children: "promote" }), _jsx("button", { disabled: !id || busy === id || status === "rejected", onClick: () => act(id, "reject"), style: ghostButtonStyle, children: "reject" })] })] }, id));
+                        const preview = learningPreview(row);
+                        const source = String(row.source_harness || row.source_agent_id || "agent");
+                        const sourceModel = String(row.source_model || "");
+                        return (_jsxs("div", { className: "product-learning-row", children: [_jsxs("div", { style: { minWidth: 0 }, children: [_jsxs("div", { style: { display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }, children: [_jsx(Pill, { tone: toneFor(status), children: status }), _jsx(Pill, { children: String(row.evidence_gate || "needs approval") }), row.needs_distillation ? _jsx(Pill, { tone: "var(--rose)", children: "needs distillation" }) : null, _jsx(Pill, { children: source }), sourceModel ? _jsx(Pill, { children: sourceModel }) : null] }), _jsx("div", { className: "product-learning-title", children: String(row.title || id) }), _jsx("div", { className: "product-learning-meta", children: learningMeta(row) }), _jsx("div", { className: "product-learning-body", title: preview, children: preview })] }), _jsxs("div", { className: "product-learning-actions", children: [_jsx("button", { "aria-label": `Promote ${id || "learning"}`, disabled: !id || busy === id || status === "promoted", onClick: () => act(id, "promote"), style: buttonStyle, children: "promote" }), _jsx("button", { "aria-label": `Reject ${id || "learning"}`, disabled: !id || busy === id || status === "rejected", onClick: () => act(id, "reject"), style: ghostButtonStyle, children: "reject" })] })] }, id));
                     } }) })] }));
 }
 export function PortabilityTrustView() {

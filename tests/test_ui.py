@@ -5,6 +5,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from dhee.core.learnings import LearningExchange
 from dhee.db.sqlite import SQLiteManager
 from dhee.router import ptr_store
 from dhee.ui.server import create_app
@@ -80,6 +81,47 @@ def test_ui_product_screen_apis(tmp_path, monkeypatch):
         payload = response.json()
         for key in keys:
             assert key in payload
+
+
+def test_ui_learning_rows_are_digest_first(tmp_path, monkeypatch):
+    monkeypatch.setenv("DHEE_DATA_DIR", str(tmp_path / "dhee-data"))
+    monkeypatch.setenv("ENGRAM_HANDOFF_DB", str(tmp_path / "handoff.db"))
+    monkeypatch.setenv("DHEE_UI_REPO", str(tmp_path))
+
+    exchange = LearningExchange()
+    raw_body = "\n".join(
+        [
+            "Model: internal-model",
+            "Session: session-123",
+            "<think>private reasoning should not be shown in review lists</think>",
+            "Representative turns:",
+            "Use routed grep before reading raw files when the repo is large.",
+            " ".join(["extra-noise"] * 120),
+        ]
+    )
+    candidate = exchange.submit(
+        title="Inspect before reading",
+        body=raw_body,
+        source_agent_id="codex",
+        source_harness="codex",
+        evidence=[{"kind": "successful_outcome"}],
+        metadata={"model": "codex-local"},
+    )
+
+    client = TestClient(create_app())
+    response = client.get("/api/ui/learnings")
+    assert response.status_code == 200
+    items = response.json()["items"]
+    row = next(item for item in items if item["id"] == candidate.id)
+
+    assert "<think>" not in row["body"]
+    assert "private reasoning" not in row["body"]
+    assert "Representative turns" not in row["body"]
+    assert len(row["body"]) <= 420
+    assert row["raw_body_chars"] > len(row["body"])
+    assert row["evidence_count"] == 1
+    assert row["needs_distillation"] is True
+    assert "evidence" not in row
 
 
 def test_ui_product_router_metrics_use_real_pointer_rollup(tmp_path, monkeypatch):

@@ -39,15 +39,39 @@ function shortPath(value?: string | null) {
   return parts.length > 3 ? `.../${parts.slice(-3).join("/")}` : raw;
 }
 
-function timeLabel(value?: string | null) {
+function timeLabel(value?: string | number | null) {
   if (!value) return "no timestamp";
-  const t = new Date(value).getTime();
+  let t: number;
+  if (typeof value === "number") {
+    t = value < 10_000_000_000 ? value * 1000 : value;
+  } else {
+    const raw = String(value).trim();
+    const numeric = Number(raw);
+    t = raw && !Number.isNaN(numeric) ? (numeric < 10_000_000_000 ? numeric * 1000 : numeric) : new Date(raw).getTime();
+  }
   if (Number.isNaN(t)) return String(value);
   const delta = Date.now() - t;
   if (delta < 60_000) return "just now";
   if (delta < 3_600_000) return `${Math.floor(delta / 60_000)}m ago`;
   if (delta < 86_400_000) return `${Math.floor(delta / 3_600_000)}h ago`;
   return `${Math.floor(delta / 86_400_000)}d ago`;
+}
+
+function learningPreview(row: AnyRow) {
+  const preview = String(row.preview || row.body || "").replace(/\s+/g, " ").trim();
+  return preview || "No evidence preview captured yet.";
+}
+
+function learningMeta(row: AnyRow) {
+  const rawChars = Number(row.raw_body_chars || 0);
+  const evidenceCount = Number(row.evidence_count || 0);
+  return [
+    row.kind ? String(row.kind) : null,
+    row.scope ? `${String(row.scope)} scope` : null,
+    evidenceCount ? `${compact(evidenceCount)} evidence` : null,
+    rawChars ? `${compact(rawChars)} raw chars compacted` : null,
+    timeLabel(row.updated_at || row.created_at),
+  ].filter(Boolean).join(" - ");
 }
 
 function toneFor(value?: string | null) {
@@ -401,22 +425,28 @@ export function LearningInboxView() {
           render={(row) => {
             const id = String(row.id || "");
             const status = String(row.status || "candidate");
+            const preview = learningPreview(row);
+            const source = String(row.source_harness || row.source_agent_id || "agent");
+            const sourceModel = String(row.source_model || "");
             return (
               <div key={id} className="product-learning-row">
                 <div style={{ minWidth: 0 }}>
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
                     <Pill tone={toneFor(status)}>{status}</Pill>
                     <Pill>{String(row.evidence_gate || "needs approval")}</Pill>
-                    <Pill>{String(row.source_harness || row.source_agent_id || "agent")}</Pill>
+                    {row.needs_distillation ? <Pill tone="var(--rose)">needs distillation</Pill> : null}
+                    <Pill>{source}</Pill>
+                    {sourceModel ? <Pill>{sourceModel}</Pill> : null}
                   </div>
                   <div className="product-learning-title">{String(row.title || id)}</div>
-                  <div className="product-learning-body">{String(row.body || "")}</div>
+                  <div className="product-learning-meta">{learningMeta(row)}</div>
+                  <div className="product-learning-body" title={preview}>{preview}</div>
                 </div>
                 <div className="product-learning-actions">
-                  <button disabled={!id || busy === id || status === "promoted"} onClick={() => act(id, "promote")} style={buttonStyle}>
+                  <button aria-label={`Promote ${id || "learning"}`} disabled={!id || busy === id || status === "promoted"} onClick={() => act(id, "promote")} style={buttonStyle}>
                     promote
                   </button>
-                  <button disabled={!id || busy === id || status === "rejected"} onClick={() => act(id, "reject")} style={ghostButtonStyle}>
+                  <button aria-label={`Reject ${id || "learning"}`} disabled={!id || busy === id || status === "rejected"} onClick={() => act(id, "reject")} style={ghostButtonStyle}>
                     reject
                   </button>
                 </div>

@@ -4424,6 +4424,33 @@ def create_app(*, serve_static: bool = True, dev_mode: bool = False) -> FastAPI:
                 return {**fallback, "live": False, "error": str(exc)}
             return fallback
 
+    def _learning_preview(value: Any, limit: int = 420) -> str:
+        text = str(value or "")
+        text = re.sub(r"<think>[\s\S]*?</think>", " ", text, flags=re.IGNORECASE)
+        text = re.sub(r"</?think>", " ", text, flags=re.IGNORECASE)
+        lines: List[str] = []
+        for line in text.splitlines():
+            clean = " ".join(line.strip().split())
+            if not clean:
+                continue
+            lowered = clean.lower()
+            if lowered.startswith(("model:", "session:", "source:", "messages:", "representative turns:")):
+                continue
+            lines.append(clean)
+        preview = " ".join(lines)
+        preview = " ".join(preview.split())
+        if len(preview) <= limit:
+            return preview
+        clipped = preview[: max(0, limit - 3)].rstrip()
+        boundary = max(clipped.rfind("."), clipped.rfind(";"), clipped.rfind(","), clipped.rfind(" "))
+        if boundary > limit * 0.65:
+            clipped = clipped[:boundary].rstrip()
+        return f"{clipped}..."
+
+    def _learning_needs_distillation(value: Any) -> bool:
+        text = str(value or "").lower()
+        return "representative turns:" in text or bool(re.search(r"(^|\n)\s*(user|assistant|tool):", text))
+
     def _compact_learning_row(row: Dict[str, Any]) -> Dict[str, Any]:
         evidence = row.get("evidence") or []
         if not isinstance(evidence, list):
@@ -4440,7 +4467,41 @@ def create_app(*, serve_static: bool = True, dev_mode: bool = False) -> FastAPI:
             gate = str((evidence[0] or {}).get("kind") or "evidence backed")
         else:
             gate = "needs approval"
-        return {**row, "evidence_gate": gate, "evidence_count": len(evidence)}
+        metadata = row.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        body = str(row.get("body") or "")
+        needs_distillation = _learning_needs_distillation(body)
+        preview = _learning_preview(body)
+        if needs_distillation:
+            preview = "Raw session import compacted for review. Promote only after distilling a reusable, evidence-backed rule."
+        return {
+            "id": row.get("id"),
+            "kind": row.get("kind"),
+            "title": _learning_preview(row.get("title"), limit=140) or str(row.get("id") or "Learning"),
+            "body": preview,
+            "preview": preview,
+            "source_agent_id": row.get("source_agent_id"),
+            "source_harness": row.get("source_harness"),
+            "source_model": metadata.get("source_model") or metadata.get("model"),
+            "task_type": row.get("task_type"),
+            "repo": row.get("repo"),
+            "scope": row.get("scope"),
+            "confidence": row.get("confidence"),
+            "utility": row.get("utility"),
+            "status": row.get("status"),
+            "reuse_count": row.get("reuse_count"),
+            "success_count": success_count,
+            "failure_count": failure_count,
+            "created_at": row.get("created_at"),
+            "updated_at": row.get("updated_at"),
+            "promoted_at": row.get("promoted_at"),
+            "rejected_reason": row.get("rejected_reason"),
+            "evidence_gate": gate,
+            "evidence_count": len(evidence),
+            "raw_body_chars": len(body),
+            "needs_distillation": needs_distillation,
+        }
 
     def _learning_snapshot(limit: int = 80) -> Dict[str, Any]:
         from dhee.core.learnings import LearningExchange
