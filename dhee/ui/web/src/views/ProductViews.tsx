@@ -5,13 +5,6 @@ import type { View } from "../components/NavRail";
 
 type AnyRow = Record<string, any>;
 
-const mono: CSSProperties = {
-  fontFamily: "var(--mono)",
-  fontSize: 10,
-  letterSpacing: "0.04em",
-  textTransform: "uppercase",
-};
-
 function asRows(value: unknown): AnyRow[] {
   return Array.isArray(value) ? (value.filter(Boolean) as AnyRow[]) : [];
 }
@@ -102,36 +95,15 @@ function Screen({
   action?: ReactNode;
 }) {
   return (
-    <div style={{ height: "100%", overflowY: "auto", background: "var(--surface)" }}>
-      <div
-        style={{
-          minHeight: "100%",
-          padding: 24,
-          display: "flex",
-          flexDirection: "column",
-          gap: 18,
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            alignItems: "flex-start",
-            justifyContent: "space-between",
-            gap: 20,
-            borderBottom: "1px solid var(--border)",
-            paddingBottom: 18,
-          }}
-        >
-          <div style={{ maxWidth: 760 }}>
-            <div style={{ ...mono, color: "var(--accent)", marginBottom: 8 }}>{eyebrow}</div>
-            <h1 style={{ fontSize: 30, lineHeight: 1.08, fontWeight: 700, letterSpacing: 0 }}>
-              {title}
-            </h1>
-            <p style={{ marginTop: 8, color: "var(--ink2)", fontSize: 14, lineHeight: 1.55 }}>
-              {subtitle}
-            </p>
+    <div className="product-screen">
+      <div className="product-content">
+        <div className="product-hero">
+          <div className="product-hero-copy">
+            <div className="product-eyebrow">{eyebrow}</div>
+            <h1 className="product-title">{title}</h1>
+            <p className="product-subtitle">{subtitle}</p>
           </div>
-          {action}
+          {action ? <div className="product-hero-action">{action}</div> : null}
         </div>
         {children}
       </div>
@@ -150,15 +122,12 @@ function Panel({
 }) {
   return (
     <section
+      className="product-panel"
       style={{
-        background: "white",
-        border: "1px solid var(--border)",
-        padding: 16,
-        minWidth: 0,
         ...style,
       }}
     >
-      {label ? <div style={{ ...mono, color: "var(--ink3)", marginBottom: 12 }}>{label}</div> : null}
+      {label ? <div className="product-panel-label">{label}</div> : null}
       {children}
     </section>
   );
@@ -166,11 +135,11 @@ function Panel({
 
 function Metric({ label, value, tone }: { label: string; value: ReactNode; tone?: string }) {
   return (
-    <Panel style={{ minHeight: 94 }}>
-      <div style={{ fontSize: 26, lineHeight: 1, fontWeight: 700, color: tone || "var(--ink)" }}>
+    <Panel style={{ minHeight: 96 }}>
+      <div className="product-metric-value" style={{ color: tone || "var(--ink)" }}>
         {value}
       </div>
-      <div style={{ marginTop: 8, color: "var(--ink3)", fontSize: 12 }}>{label}</div>
+      <div className="product-metric-label">{label}</div>
     </Panel>
   );
 }
@@ -178,15 +147,9 @@ function Metric({ label, value, tone }: { label: string; value: ReactNode; tone?
 function Pill({ children, tone }: { children: ReactNode; tone?: string }) {
   return (
     <span
+      className="product-pill"
       style={{
-        ...mono,
-        display: "inline-flex",
-        alignItems: "center",
-        minHeight: 22,
-        padding: "3px 8px",
         color: tone || "var(--ink2)",
-        background: "var(--surface2)",
-        border: "1px solid var(--border)",
       }}
     >
       {children}
@@ -204,9 +167,9 @@ function RowList({
   render: (row: AnyRow, index: number) => ReactNode;
 }) {
   if (!rows.length) {
-    return <div style={{ color: "var(--ink3)", fontSize: 13 }}>{empty}</div>;
+    return <div className="product-empty">{empty}</div>;
   }
-  return <div style={{ display: "grid", gap: 10 }}>{rows.map(render)}</div>;
+  return <div className="product-list">{rows.map(render)}</div>;
 }
 
 function LoadingState({ loading, error }: { loading: boolean; error: string }) {
@@ -225,6 +188,7 @@ export function CommandCenterView({ onNavigate }: { onNavigate: (view: View) => 
   const sessions = asRows(get(data, "router_sessions", []));
   const learningTotals = get(learnings, "totals", {});
   const inboxTotals = get(inbox, "totals", {});
+  const aliases = ((get(data, "dhee_aliases", []) as string[]) || []).filter(Boolean);
 
   return (
     <Screen
@@ -236,13 +200,13 @@ export function CommandCenterView({ onNavigate }: { onNavigate: (view: View) => 
       <LoadingState loading={loading} error={error} />
       {data ? (
         <>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 12 }}>
+          <div className="product-metric-grid">
             <Metric label="tokens avoided" value={compact(get(router, "sessionTokensSaved", 0))} tone="var(--green)" />
             <Metric label="router calls" value={compact(get(router, "totalCalls", 0))} tone="var(--accent)" />
             <Metric label="repo context" value={compact(get(get(context, "totals", {}), "repo_entries", 0))} tone="var(--indigo)" />
             <Metric label="learning candidates" value={compact(get(learningTotals, "candidate", 0))} tone="var(--accent)" />
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1.1fr 0.9fr", gap: 14 }}>
+          <div className="product-grid product-grid--two">
             <Panel label="ACTIVE WORK">
               {activeTask ? (
                 <div>
@@ -269,7 +233,7 @@ export function CommandCenterView({ onNavigate }: { onNavigate: (view: View) => 
               </div>
             </Panel>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14 }}>
+          <div className="product-grid product-grid--three">
             <Panel label="LIVE SESSIONS">
               <RowList
                 rows={sessions.slice(0, 5)}
@@ -290,12 +254,15 @@ export function CommandCenterView({ onNavigate }: { onNavigate: (view: View) => 
               <SmallRow title="conflicts" meta={compact(get(inboxTotals, "conflicts", 0))} tone="var(--indigo)" />
             </Panel>
             <Panel label="ADDRESSABLE CONTEXT">
-              {asRows(get(data, "dhee_aliases", [])).length ? null : null}
-              {((get(data, "dhee_aliases", []) as string[]) || []).map((alias) => (
-                <div key={alias} style={{ fontFamily: "var(--mono)", fontSize: 11, padding: "5px 0", color: "var(--ink2)" }}>
-                  {alias}
-                </div>
-              ))}
+              {aliases.length ? (
+                aliases.map((alias) => (
+                  <div key={alias} style={{ fontFamily: "var(--mono)", fontSize: 11, padding: "5px 0", color: "var(--ink2)" }}>
+                    {alias}
+                  </div>
+                ))
+              ) : (
+                <div className="product-empty">No dhee:// aliases exposed yet.</div>
+              )}
             </Panel>
           </div>
         </>
@@ -323,7 +290,7 @@ export function HandoffHubView() {
     >
       <LoadingState loading={loading} error={error} />
       {data ? (
-        <div style={{ display: "grid", gridTemplateColumns: "1.1fr 0.9fr", gap: 14 }}>
+        <div className="product-grid product-grid--two">
           <Panel label="LATEST HANDOFF">
             <div style={{ fontSize: 24, lineHeight: 1.15, fontWeight: 700 }}>
               {String(get(last, "task_summary", "No handoff saved yet"))}
@@ -370,7 +337,7 @@ export function ProofReplayView() {
       action={<button onClick={refresh} style={buttonStyle}>refresh</button>}
     >
       <LoadingState loading={loading} error={error} />
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 12 }}>
+      <div className="product-metric-grid">
         <Metric label="events" value={compact(get(totals, "events", rows.length))} />
         <Metric label="digests" value={compact(get(totals, "digests", 0))} tone="var(--green)" />
         <Metric label="expansion trace" value={compact(get(totals, "expansions", 0))} tone="var(--accent)" />
@@ -421,7 +388,7 @@ export function LearningInboxView() {
       action={<button onClick={refresh} style={buttonStyle}>refresh</button>}
     >
       <LoadingState loading={loading} error={error} />
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 12 }}>
+      <div className="product-metric-grid">
         <Metric label="candidates" value={compact(get(totals, "candidate", 0))} tone="var(--accent)" />
         <Metric label="promoted" value={compact(get(totals, "promoted", 0))} tone="var(--green)" />
         <Metric label="rejected" value={compact(get(totals, "rejected", 0))} tone="var(--rose)" />
@@ -435,17 +402,17 @@ export function LearningInboxView() {
             const id = String(row.id || "");
             const status = String(row.status || "candidate");
             return (
-              <div key={id} style={listRowStyle}>
+              <div key={id} className="product-learning-row">
                 <div style={{ minWidth: 0 }}>
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
                     <Pill tone={toneFor(status)}>{status}</Pill>
                     <Pill>{String(row.evidence_gate || "needs approval")}</Pill>
                     <Pill>{String(row.source_harness || row.source_agent_id || "agent")}</Pill>
                   </div>
-                  <div style={{ fontSize: 17, fontWeight: 700, lineHeight: 1.25 }}>{String(row.title || id)}</div>
-                  <div style={{ marginTop: 6, color: "var(--ink2)", lineHeight: 1.55 }}>{String(row.body || "")}</div>
+                  <div className="product-learning-title">{String(row.title || id)}</div>
+                  <div className="product-learning-body">{String(row.body || "")}</div>
                 </div>
-                <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+                <div className="product-learning-actions">
                   <button disabled={!id || busy === id || status === "promoted"} onClick={() => act(id, "promote")} style={buttonStyle}>
                     promote
                   </button>
@@ -500,14 +467,14 @@ export function PortabilityTrustView() {
       action={<button onClick={refresh} style={buttonStyle}>refresh</button>}
     >
       <LoadingState loading={loading} error={error} />
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 12 }}>
+      <div className="product-metric-grid">
         <Metric label="memories" value={compact(get(counts, "memories", 0))} />
         <Metric label="artifacts" value={compact(get(counts, "artifacts", 0))} tone="var(--indigo)" />
         <Metric label="repo context" value={compact(get(counts, "repo_context_entries", 0))} tone="var(--green)" />
         <Metric label="packs found" value={compact(packs.length)} tone="var(--accent)" />
       </div>
       {actionError ? <Panel><span style={{ color: "var(--rose)" }}>{actionError}</span></Panel> : null}
-      <div style={{ display: "grid", gridTemplateColumns: "0.9fr 1.1fr", gap: 14 }}>
+      <div className="product-grid product-grid--split">
         <Panel label="PORTABLE SUBSTRATE">
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             {contract.map((item) => <Pill key={item} tone="var(--green)">{item}</Pill>)}
@@ -570,11 +537,11 @@ export function RepoBrainHeader({ onOpenContext }: { onOpenContext?: () => void 
 }
 
 function TextList({ rows, empty }: { rows: unknown[]; empty: string }) {
-  if (!rows.length) return <div style={{ color: "var(--ink3)" }}>{empty}</div>;
+  if (!rows.length) return <div className="product-empty">{empty}</div>;
   return (
-    <div style={{ display: "grid", gap: 8 }}>
+    <div className="product-list product-list--tight">
       {rows.map((row, index) => (
-        <div key={index} style={{ padding: "8px 0", borderBottom: "1px solid var(--border)", color: "var(--ink2)" }}>
+        <div key={index} className="product-text-row">
           {String(row)}
         </div>
       ))}
@@ -597,11 +564,11 @@ function MetricStack({ rows }: { rows: [string, number][] }) {
 
 function SmallRow({ title, meta, tone }: { title: string; meta: string; tone?: string }) {
   return (
-    <div style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "7px 0", borderBottom: "1px solid var(--border)" }}>
-      <span style={{ width: 8, height: 8, marginTop: 6, background: tone || "var(--ink3)", flexShrink: 0 }} />
+    <div className="product-small-row">
+      <span className="product-row-dot" style={{ background: tone || "var(--ink3)" }} />
       <div style={{ minWidth: 0 }}>
-        <div style={{ fontSize: 13, fontWeight: 650, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</div>
-        <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--ink3)", marginTop: 2 }}>{meta}</div>
+        <div className="product-small-title">{title}</div>
+        <div className="product-small-meta">{meta}</div>
       </div>
     </div>
   );
@@ -623,16 +590,16 @@ function TimelineRow({
   derived: boolean;
 }) {
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "44px 1fr", gap: 14, padding: "12px 0", borderBottom: "1px solid var(--border)" }}>
-      <div style={{ ...mono, color: "var(--ink3)" }}>{String(index + 1).padStart(2, "0")}</div>
+    <div className="product-timeline-row">
+      <div className="product-timeline-index">{String(index + 1).padStart(2, "0")}</div>
       <div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
           <Pill tone={toneFor(kind)}>{kind}</Pill>
           {derived ? <Pill tone="var(--accent)">derived</Pill> : <Pill tone="var(--green)">recorded</Pill>}
           <Pill>{meta}</Pill>
         </div>
-        <div style={{ fontSize: 16, fontWeight: 700 }}>{title}</div>
-        {detail ? <div style={{ marginTop: 4, color: "var(--ink2)", lineHeight: 1.55 }}>{detail}</div> : null}
+        <div className="product-timeline-title">{title}</div>
+        {detail ? <div className="product-timeline-detail">{detail}</div> : null}
       </div>
     </div>
   );
@@ -647,6 +614,11 @@ const buttonStyle: CSSProperties = {
   fontSize: 10,
   letterSpacing: "0.04em",
   textTransform: "uppercase",
+  borderRadius: 4,
+  minHeight: 34,
+  whiteSpace: "nowrap",
+  cursor: "pointer",
+  boxShadow: "0 1px 0 rgba(255, 255, 255, 0.22) inset",
 };
 
 const ghostButtonStyle: CSSProperties = {
@@ -675,13 +647,4 @@ const preStyle: CSSProperties = {
   fontSize: 11,
   whiteSpace: "pre-wrap",
   overflowX: "auto",
-};
-
-const listRowStyle: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "1fr auto",
-  gap: 18,
-  padding: "14px 0",
-  borderBottom: "1px solid var(--border)",
-  alignItems: "start",
 };

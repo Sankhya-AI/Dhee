@@ -4523,6 +4523,37 @@ def create_app(*, serve_static: bool = True, dev_mode: bool = False) -> FastAPI:
             pass
         return counts
 
+    def _ui_workspace_summary() -> Dict[str, Any]:
+        """Small command-center summary; avoid shipping the full workspace tree."""
+        db = _get_db()
+        try:
+            workspaces = db.list_workspaces(user_id=_ui_user_id(), limit=200) or []
+        except Exception:  # noqa: BLE001
+            workspaces = []
+        project_count = 0
+        current_project_id = ""
+        for workspace in workspaces[:50]:
+            workspace_id = str(workspace.get("id") or "")
+            if not workspace_id:
+                continue
+            try:
+                projects = db.list_workspace_projects(
+                    workspace_id=workspace_id,
+                    user_id=_ui_user_id(),
+                    limit=200,
+                ) or []
+            except Exception:  # noqa: BLE001
+                projects = []
+            project_count += len(projects)
+            if not current_project_id and projects:
+                current_project_id = str(projects[0].get("id") or "")
+        return {
+            "count": len(workspaces),
+            "project_count": project_count,
+            "currentWorkspaceId": str(workspaces[0].get("id") or "") if workspaces else "",
+            "currentProjectId": current_project_id,
+        }
+
     def _latest_dheemem_packs(limit: int = 8) -> List[Dict[str, Any]]:
         try:
             from dhee.protocol import inspect_pack
@@ -4585,7 +4616,7 @@ def create_app(*, serve_static: bool = True, dev_mode: bool = False) -> FastAPI:
             {"linked": False, "repo_entries": [], "totals": {}},
         )
         learnings = _product_safe("learnings", lambda: _learning_snapshot(limit=24), {"items": [], "totals": {}})
-        workspaces = _product_safe("workspaces", lambda: list_workspaces_api(), {"workspaces": []})
+        workspaces = _product_safe("workspaces", lambda: _ui_workspace_summary(), {"count": 0, "project_count": 0})
         sessions = router_sessions.get("items") or []
         active_task = next(
             (row for row in (task_data.get("tasks") or []) if str(row.get("status") or "") == "active"),
