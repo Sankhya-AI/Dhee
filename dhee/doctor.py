@@ -37,7 +37,7 @@ MOVEMENT_CAPABILITIES = {
     "M2": "Propositional substrate + supersede chains (tier, superseded_by, preferences, retrieval integration)",
     "M3": "Years-of-memory (tier promotion, background consolidator, lineage UI, Epistemic Control Loop)",
     "M4": "Honest self-evolution (real MetaBuddhi loop, Nididhyasana scheduler, group-relative confidence, step-level utility)",
-    "M5": ".dheemem protocol v1 (portable core + optional extensions, export/import/migrate CLI, signed manifests)",
+    "M5": ".dheemem protocol v1 (portable core, export/import/migrate CLI, signed manifests)",
     "M6": "Harness adapters (base + ClaudeCode + Codex, canonical event vocabulary)",
     "M7": "Public proof (replay corpus, decades synthetic corpus, portability eval, README rewritten to measured numbers)",
 }
@@ -48,9 +48,12 @@ class DoctorReport:
     dhee_version: str = ""
     generated_at: float = 0.0
     core: dict[str, Any] = field(default_factory=dict)
+    runtime: dict[str, Any] = field(default_factory=dict)
     router: dict[str, Any] = field(default_factory=dict)
+    context: dict[str, Any] = field(default_factory=dict)
     cognition: dict[str, Any] = field(default_factory=dict)
     memory: dict[str, Any] = field(default_factory=dict)
+    portability: dict[str, Any] = field(default_factory=dict)
     capabilities: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -58,9 +61,12 @@ class DoctorReport:
             "dhee_version": self.dhee_version,
             "generated_at": self.generated_at,
             "core": self.core,
+            "runtime": self.runtime,
             "router": self.router,
+            "context": self.context,
             "cognition": self.cognition,
             "memory": self.memory,
+            "portability": self.portability,
             "capabilities": self.capabilities,
         }
 
@@ -106,6 +112,65 @@ def _core_section() -> dict[str, Any]:
         "config_path": config_path,
         "dbs": dbs,
     }
+
+
+def _runtime_section() -> dict[str, Any]:
+    try:
+        from dhee.runtime import status
+
+        return status()
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def _context_section() -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    try:
+        from dhee.context_state import ContextStateStore
+
+        store = ContextStateStore(repo=os.getcwd(), workspace_id=os.getcwd())
+        out["state"] = store.status()
+        out["debt"] = store.debt_summary(top=True)
+    except Exception as exc:
+        out["state"] = {"error": f"{type(exc).__name__}: {exc}"}
+
+    try:
+        from dhee import repo_link
+
+        repo = repo_link.repo_for_path(os.getcwd())
+        if repo is None:
+            out["repo_context"] = {"linked": False}
+        else:
+            manifest = repo_link._read_json(repo_link.repo_manifest_path(repo), {})
+            conflicts = repo_link.detect_conflicts(repo)
+            out["repo_context"] = {
+                "linked": True,
+                "repo_root": str(repo),
+                "entry_count": manifest.get("entry_count", 0),
+                "conflict_count": len(conflicts),
+                "ok": not conflicts,
+            }
+    except Exception as exc:
+        out["repo_context"] = {"error": f"{type(exc).__name__}: {exc}"}
+    return out
+
+
+def _portability_section() -> dict[str, Any]:
+    try:
+        from dhee.protocol import PACK_EXTENSION
+
+        return {
+            "format": PACK_EXTENSION,
+            "contract": "signed manifest + per-file hashes + memories/history/vectors/artifacts/repo-context/handoff",
+            "commands": [
+                "dhee export --output pack.dheemem --repo /path/to/repo",
+                "dhee import pack.dheemem --strategy merge|replace|dry-run --repo /path/to/repo",
+            ],
+            "latest_pack_checked": None,
+            "note": "Run `dhee portability-eval` for a destructive-safe round-trip scorecard.",
+        }
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
 
 
 def _router_section() -> dict[str, Any]:
@@ -454,7 +519,7 @@ def _capabilities_section(router: dict[str, Any]) -> dict[str, Any]:
         "run_portability_eval() round-trips a user's Dhee state "
         "through a signed .dheemem pack and scores per-substrate "
         "retention (memories / memory_history / distillation_provenance "
-        "/ artifacts / vectors) + handoff survival. CLI: "
+        "/ artifacts / vectors / repo context) + handoff survival. CLI: "
         "`dhee portability-eval [--user-id X] [--threshold F] [--json]`. "
         "M7.6b fix: intra-pack content_hash + history-signature "
         "collisions no longer collapse distinct source rows on merge — "
@@ -531,18 +596,24 @@ def build_report() -> DoctorReport:
         __version__ = "unknown"
 
     core = _core_section()
+    runtime = _runtime_section()
     router = _router_section()
+    context = _context_section()
     cognition = _cognition_section()
     memory = _memory_section()
+    portability = _portability_section()
     capabilities = _capabilities_section(router)
 
     return DoctorReport(
         dhee_version=__version__,
         generated_at=time.time(),
         core=core,
+        runtime=runtime,
         router=router,
+        context=context,
         cognition=cognition,
         memory=memory,
+        portability=portability,
         capabilities=capabilities,
     )
 
@@ -555,9 +626,12 @@ def build_report() -> DoctorReport:
 def format_human(report: DoctorReport) -> str:
     lines: list[str] = []
     core = report.core
+    runtime = report.runtime
     router = report.router
+    context = report.context
     cog = report.cognition
     mem = report.memory
+    portability = report.portability
     cap = report.capabilities
 
     ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(report.generated_at))
@@ -576,6 +650,28 @@ def format_human(report: DoctorReport) -> str:
             size = info.get("bytes", 0)
             size_h = f"{size / 1_000_000:.1f} MB" if size >= 1_000_000 else f"{size / 1_000:.1f} KB"
             lines.append(f"  {label:<13} {info.get('path')} ({size_h})")
+    lines.append("")
+
+    # Runtime
+    lines.append("[ runtime ]")
+    if "error" in runtime:
+        lines.append(f"  error: {runtime['error']}")
+    else:
+        daemon = runtime.get("daemon") or {}
+        venv = runtime.get("venv") or {}
+        paths = runtime.get("paths") or {}
+        lines.append(f"  daemon:      {'running' if daemon.get('running') else 'stopped'}")
+        if daemon.get("pid"):
+            lines.append(f"  pid:         {daemon.get('pid')}")
+        if daemon.get("endpoint"):
+            lines.append(f"  endpoint:    {daemon.get('endpoint')}")
+        health = daemon.get("health") or {}
+        if health.get("error"):
+            lines.append(f"  health:      {health.get('error')}")
+        elif daemon.get("running"):
+            lines.append("  health:      ok")
+        lines.append(f"  managed venv:{' present' if venv.get('exists') else ' missing'} ({venv.get('path')})")
+        lines.append(f"  runtime dir: {paths.get('runtime_dir')}")
     lines.append("")
 
     # Router
@@ -598,6 +694,26 @@ def format_human(report: DoctorReport) -> str:
             f"(~{ptr.get('est_tokens_diverted', 0):,} tokens); "
             f"expansion {ptr.get('expansion_rate', 0):.1%}"
         )
+    lines.append("")
+
+    # Context
+    lines.append("[ context ]")
+    state = context.get("state") or {}
+    if "error" in state:
+        lines.append(f"  state:       error: {state['error']}")
+    else:
+        revision = state.get("state_revision", state.get("revision", 0))
+        epoch = state.get("task_epoch", state.get("epoch", 0))
+        debt_level = state.get("level") or state.get("debt_level") or "unknown"
+        lines.append(f"  state:       revision={revision} epoch={epoch} debt={debt_level}")
+    repo_ctx = context.get("repo_context") or {}
+    if repo_ctx.get("linked"):
+        lines.append(
+            f"  repo:        linked entries={repo_ctx.get('entry_count', 0)} "
+            f"conflicts={repo_ctx.get('conflict_count', 0)}"
+        )
+    else:
+        lines.append("  repo:        not linked for current cwd")
     lines.append("")
 
     # Cognition
@@ -645,6 +761,16 @@ def format_human(report: DoctorReport) -> str:
                 )
             else:
                 lines.append(f"  supersede_chain           {sup.get('column')}")
+    lines.append("")
+
+    # Portability
+    lines.append("[ portability ]")
+    if "error" in portability:
+        lines.append(f"  error: {portability['error']}")
+    else:
+        lines.append(f"  format:      {portability.get('format')}")
+        lines.append(f"  integrity:   {portability.get('contract')}")
+        lines.append(f"  latest pack: {portability.get('latest_pack_checked') or 'not checked'}")
     lines.append("")
 
     # Capabilities

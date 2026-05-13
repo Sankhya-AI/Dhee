@@ -96,6 +96,8 @@ def _detect_kind(path: str, text: str) -> str:
         ".go": "go",
         ".rs": "rust",
         ".java": "java",
+        ".kt": "kotlin", ".kts": "kotlin",
+        ".c": "c", ".h": "c", ".cc": "cpp", ".cpp": "cpp", ".hpp": "cpp",
         ".rb": "ruby",
         ".md": "markdown", ".mdx": "markdown",
         ".json": "json",
@@ -202,10 +204,13 @@ _JS_FN_RE = re.compile(
 )
 _JS_CLASS_RE = re.compile(r"^\s*(?:export\s+)?class\s+([A-Za-z_$][\w$]*)", re.MULTILINE)
 _JS_CONST_FN_RE = re.compile(
-    r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\(([^)]*)\)\s*=>",
+    r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*(?:async\s*)?(?:\(([^)]*)\)|([A-Za-z_$][\w$]*))\s*=>",
     re.MULTILINE,
 )
 _JS_IMPORT_RE = re.compile(r"""^\s*import\s+[^;'"]*['"]([^'"]+)['"]""", re.MULTILINE)
+_TS_INTERFACE_RE = re.compile(r"^\s*(?:export\s+)?interface\s+([A-Za-z_$][\w$]*)", re.MULTILINE)
+_TS_TYPE_RE = re.compile(r"^\s*(?:export\s+)?type\s+([A-Za-z_$][\w$]*)\s*=", re.MULTILINE)
+_JS_NAMED_EXPORT_RE = re.compile(r"^\s*export\s+\{([^}]+)\}", re.MULTILINE)
 
 
 def _js_ts_symbols(text: str) -> dict[str, list[str]]:
@@ -213,10 +218,31 @@ def _js_ts_symbols(text: str) -> dict[str, list[str]]:
     for m in _JS_FN_RE.finditer(text):
         functions.append(f"{m.group(1)}({m.group(2).strip()})")
     for m in _JS_CONST_FN_RE.finditer(text):
-        functions.append(f"{m.group(1)}({m.group(2).strip()})")
+        args = (m.group(2) if m.group(2) is not None else m.group(3) or "").strip()
+        functions.append(f"{m.group(1)}({args})")
     classes = [m.group(1) for m in _JS_CLASS_RE.finditer(text)]
     imports = [m.group(1) for m in _JS_IMPORT_RE.finditer(text)]
-    return {"classes": classes, "functions": functions, "imports": imports}
+    types = [f"{m.group(1)} (interface)" for m in _TS_INTERFACE_RE.finditer(text)]
+    types.extend(f"{m.group(1)} (type)" for m in _TS_TYPE_RE.finditer(text))
+    exports: list[str] = []
+    for m in _JS_NAMED_EXPORT_RE.finditer(text):
+        for item in m.group(1).split(","):
+            name = item.strip().split(" as ", 1)[0].strip()
+            if name and name not in exports:
+                exports.append(name)
+    component_names = [
+        item.split("(", 1)[0]
+        for item in [*classes, *functions]
+        if item and item.split("(", 1)[0][:1].isupper()
+    ]
+    return {
+        "classes": classes,
+        "functions": functions,
+        "types": types,
+        "components": component_names,
+        "imports": imports,
+        "exports": exports,
+    }
 
 
 _GO_FN_RE = re.compile(
@@ -248,6 +274,73 @@ def _rust_symbols(text: str) -> dict[str, list[str]]:
     types = [f"{m.group(2)} ({m.group(1)})" for m in _RUST_STRUCT_RE.finditer(text)]
     imports = [m.group(1).strip() for m in _RUST_USE_RE.finditer(text)]
     return {"types": types, "functions": functions, "imports": imports}
+
+
+_JAVA_TYPE_RE = re.compile(
+    r"^\s*(?:@\w+(?:\([^)]*\))?\s*)*(?:(?:public|protected|private|abstract|final|static|sealed|non-sealed)\s+)*(class|interface|enum|record)\s+([A-Za-z_][\w]*)",
+    re.MULTILINE,
+)
+_JAVA_METHOD_RE = re.compile(
+    r"^\s*(?:@\w+(?:\([^)]*\))?\s*)*(?:(?:public|protected|private|static|final|abstract|synchronized|native|default)\s+)+(?:<[^>]+>\s+)?[\w<>\[\], ?]+\s+([A-Za-z_][\w]*)\s*\(([^;{}]*)\)",
+    re.MULTILINE,
+)
+_JAVA_IMPORT_RE = re.compile(r"^\s*import\s+(?:static\s+)?([^;]+);", re.MULTILINE)
+
+
+def _java_symbols(text: str) -> dict[str, list[str]]:
+    types = [f"{m.group(2)} ({m.group(1)})" for m in _JAVA_TYPE_RE.finditer(text)]
+    methods = [f"{m.group(1)}({m.group(2).strip()})" for m in _JAVA_METHOD_RE.finditer(text)]
+    imports = [m.group(1).strip() for m in _JAVA_IMPORT_RE.finditer(text)]
+    return {"types": types, "methods": methods, "imports": imports}
+
+
+_SHELL_FN_RE = re.compile(
+    r"^\s*(?:function\s+)?([A-Za-z_][\w-]*)\s*(?:\(\))?\s*\{",
+    re.MULTILINE,
+)
+_SHELL_EXPORT_RE = re.compile(r"^\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)=", re.MULTILINE)
+
+
+def _shell_symbols(text: str) -> dict[str, list[str]]:
+    functions = [f"{m.group(1)}()" for m in _SHELL_FN_RE.finditer(text)]
+    variables = [m.group(1) for m in _SHELL_EXPORT_RE.finditer(text)]
+    return {"functions": functions, "variables": variables}
+
+
+_SQL_CREATE_RE = re.compile(
+    r"\bcreate\s+(table|view|index|function|procedure)\s+(?:if\s+not\s+exists\s+)?[`\"[]?([A-Za-z_][\w.$]*)",
+    re.IGNORECASE,
+)
+
+
+def _sql_symbols(text: str) -> dict[str, list[str]]:
+    objects: list[str] = []
+    for m in _SQL_CREATE_RE.finditer(text):
+        objects.append(f"{m.group(2)} ({m.group(1).lower()})")
+    return {"objects": objects}
+
+
+_LOG_LEVEL_RE = re.compile(r"\b(TRACE|DEBUG|INFO|WARN|WARNING|ERROR|FATAL|CRITICAL)\b", re.IGNORECASE)
+
+
+def _log_symbols(text: str) -> dict[str, list[str]]:
+    counts: dict[str, int] = {}
+    signals: list[str] = []
+    for i, line in enumerate(text.splitlines(), start=1):
+        m = _LOG_LEVEL_RE.search(line)
+        if not m:
+            continue
+        level = m.group(1).upper()
+        if level == "WARNING":
+            level = "WARN"
+        counts[level] = counts.get(level, 0) + 1
+        if level in {"WARN", "ERROR", "FATAL", "CRITICAL"} and len(signals) < 10:
+            snippet = line.strip()
+            if len(snippet) > 180:
+                snippet = snippet[:177] + "..."
+            signals.append(f"{i}: {level} {snippet}")
+    levels = [f"{level}={count}" for level, count in sorted(counts.items())]
+    return {"levels": levels, "signals": signals}
 
 
 def _generic_symbols(_text: str) -> dict[str, list[str]]:
@@ -452,6 +545,14 @@ def digest_read(
         symbols = _go_symbols(text)
     elif kind == "rust":
         symbols = _rust_symbols(text)
+    elif kind == "java":
+        symbols = _java_symbols(text)
+    elif kind == "shell":
+        symbols = _shell_symbols(text)
+    elif kind == "sql":
+        symbols = _sql_symbols(text)
+    elif kind == "log":
+        symbols = _log_symbols(text)
     else:
         symbols = _generic_symbols(text)
 

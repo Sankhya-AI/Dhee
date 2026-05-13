@@ -32,6 +32,7 @@ from dhee.fs.types import (
     DheeMount,
     entries_to_text,
 )
+from dhee.fs.uri import normalize_dhee_uri
 
 
 _PTR_PATTERN = re.compile(r"\b[A-Z]-[0-9a-f]{10}\b")
@@ -236,7 +237,7 @@ class ContextWorkspace:
             )
 
     def normalize_path(self, path: str) -> str:
-        value = str(path or "/").strip()
+        value = normalize_dhee_uri(str(path or "/").strip())
         if not value:
             value = "/"
         if not value.startswith("/"):

@@ -43,6 +43,7 @@ class QualityReport:
     context_governance: dict[str, Any] = field(default_factory=dict)
     tool_schema: dict[str, Any] = field(default_factory=dict)
     replay: dict[str, Any] = field(default_factory=dict)
+    quality_gates: dict[str, Any] = field(default_factory=dict)
     edits: dict[str, Any] = field(default_factory=dict)
     hooks: dict[str, Any] = field(default_factory=dict)
     settings: dict[str, Any] = field(default_factory=dict)
@@ -134,78 +135,169 @@ def _tool_schema_section() -> dict[str, Any]:
             return {"error": f"{type(exc).__name__}: {exc}"}
 
 
-def _replay_section(sessions_dir: Path | None = None, limit: int = 0) -> dict[str, Any]:
+def _replay_section(
+    sessions_dir: Path | None = None,
+    limit: int = 0,
+    *,
+    harness: str = "claude_code",
+    golden_path: Path | None = None,
+) -> dict[str, Any]:
     """Run the replay harness in-process and collect aggregate numbers."""
     try:
         from dhee.benchmarks.router_replay import (
-            _default_sessions_dir,
+            aggregate_reports,
+            discover_transcripts,
+            load_golden_annotations,
             replay_session,
         )
 
-        sdir = sessions_dir or _default_sessions_dir()
-        if not sdir.exists():
-            return {"error": f"sessions dir missing: {sdir}"}
-
-        transcripts = sorted(
-            sdir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True
+        transcripts = discover_transcripts(
+            sessions_dir=sessions_dir,
+            harness=harness,
+            limit=limit,
         )
-        if limit:
-            transcripts = transcripts[:limit]
-
-        raw = digest = calls = 0
-        by_tool: dict[str, int] = {}
-        warnings = 0
-        turns = 0
-        cache_read = 0
-        cache_creation = 0
-        tool_result_tokens = 0
-        for p in transcripts:
-            r = replay_session(p)
-            raw += r.raw_tokens
-            digest += r.digest_tokens
-            calls += r.total_calls
-            for t, n in r.calls_by_tool.items():
-                by_tool[t] = by_tool.get(t, 0) + n
-            warnings += len(r.warnings)
-            turns += r.assistant_turns
-            cache_read += r.cache_read_input_tokens
-            cache_creation += r.cache_creation_input_tokens
-            tool_result_tokens += r.tool_result_tokens
-
-        net_saved = raw - digest
-        saved_pct = round(net_saved / raw * 100, 2) if raw else 0.0
-        cache_read_per_turn = int(cache_read / turns) if turns else 0
-        projected_cache_read_per_turn = (
-            int((cache_read - net_saved) / turns) if turns and cache_read else 0
-        )
-        tool_result_share = round(tool_result_tokens / cache_read, 3) if cache_read else 0.0
+        if sessions_dir and not sessions_dir.exists():
+            return {"error": f"sessions dir missing: {sessions_dir}"}
+        annotations = load_golden_annotations(golden_path)
+        replay_harness = "auto" if harness == "all" else harness
+        reports = [
+            replay_session(p, harness=replay_harness, annotations=annotations)
+            for p in transcripts
+        ]
+        aggregate = aggregate_reports(reports)
 
         # Promise #1 gate: target < 30K avg cache-read tokens per turn.
         cache_read_target = 30_000
-        promise1_met = projected_cache_read_per_turn < cache_read_target if turns else None
+        promise1_met = (
+            aggregate["projected_cache_read_per_turn"] < cache_read_target
+            if aggregate["assistant_turns"]
+            else None
+        )
 
         return {
-            "sessions_dir": str(sdir),
-            "sessions": len(transcripts),
-            "assistant_turns": turns,
-            "total_calls": calls,
-            "calls_by_tool": by_tool,
-            "raw_tokens": raw,
-            "digest_tokens": digest,
-            "net_saved_tokens": net_saved,
-            "saved_pct": saved_pct,
-            "cache_read_tokens_total": cache_read,
-            "cache_creation_tokens_total": cache_creation,
-            "cache_read_per_turn": cache_read_per_turn,
-            "projected_cache_read_per_turn": projected_cache_read_per_turn,
+            "sessions_dir": str(sessions_dir) if sessions_dir else "",
+            "harness": harness,
+            "golden_path": str(golden_path) if golden_path else "",
+            **aggregate,
             "cache_read_target_per_turn": cache_read_target,
             "promise1_met": promise1_met,
-            "tool_result_tokens": tool_result_tokens,
-            "tool_result_share": tool_result_share,
-            "warnings_count": warnings,
         }
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def _gate_status(value: Any, *, op: str, target: float, samples: int = 1) -> dict[str, Any]:
+    try:
+        actual = float(value)
+    except (TypeError, ValueError):
+        return {"passed": None, "actual": value, "target": target, "reason": "missing_value"}
+    if samples <= 0:
+        return {"passed": None, "actual": actual, "target": target, "reason": "insufficient_samples"}
+    if op == ">=":
+        passed = actual >= target
+    elif op == "<=":
+        passed = actual <= target
+    else:
+        passed = False
+    return {"passed": passed, "actual": actual, "target": target}
+
+
+def _quality_gates_section(
+    *,
+    router: dict[str, Any],
+    replay: dict[str, Any],
+    context_governance: dict[str, Any],
+) -> dict[str, Any]:
+    """Release-facing gates for the Developer Brain north-star metrics."""
+    replay_calls = int(replay.get("total_calls", 0) or 0) if not replay.get("error") else 0
+    router_calls = int(router.get("total_calls", 0) or 0) if not router.get("error") else 0
+    receipt_count = int(context_governance.get("receipt_count", 0) or 0) if not context_governance.get("error") else 0
+    parity = replay.get("task_parity") if isinstance(replay.get("task_parity"), dict) else {}
+    parity_failures = int(parity.get("fail", 0) or 0)
+    parity_avg_score = parity.get("avg_score")
+    parity_score_count = int(parity.get("score_count", 0) or 0)
+    annotated_sessions = int(replay.get("annotated_sessions", 0) or 0)
+    pending_reviews = int(replay.get("pending_review_sessions", 0) or 0)
+
+    gates = {
+        "router_token_savings": {
+            **_gate_status(replay.get("saved_pct"), op=">=", target=50.0, samples=replay_calls),
+            "unit": "percent",
+            "source": "router replay projection",
+        },
+        "expansion_rate": {
+            **_gate_status((float(router.get("expansion_rate", 0) or 0) * 100.0), op="<=", target=15.0, samples=router_calls),
+            "unit": "percent",
+            "source": "ptr-store expansion telemetry",
+        },
+        "cache_read_per_turn": {
+            **_gate_status(replay.get("projected_cache_read_per_turn"), op="<=", target=30_000.0, samples=int(replay.get("assistant_turns", 0) or 0)),
+            "unit": "tokens",
+            "source": "assistant usage + replay projection",
+        },
+        "context_governance": {
+            **_gate_status(context_governance.get("assertion_mismatch_count", 0), op="<=", target=0.0, samples=max(1, receipt_count)),
+            "unit": "incidents",
+            "source": "compiled context admission receipts",
+        },
+        "stale_context_incidents": {
+            **_gate_status(replay.get("stale_context_incidents", 0), op="<=", target=0.0, samples=int(replay.get("annotated_sessions", 0) or 0)),
+            "unit": "incidents",
+            "source": "golden replay annotations",
+        },
+        "task_parity_failures": {
+            **_gate_status(parity_failures, op="<=", target=0.0, samples=annotated_sessions),
+            "unit": "sessions",
+            "source": "golden replay annotations",
+        },
+        "task_parity_pending_review": {
+            **_gate_status(pending_reviews, op="<=", target=0.0, samples=annotated_sessions),
+            "unit": "sessions",
+            "source": "golden replay annotations",
+        },
+        "task_parity_score": {
+            **_gate_status(parity_avg_score, op=">=", target=0.95, samples=parity_score_count),
+            "unit": "score",
+            "source": "golden replay annotations",
+        },
+    }
+    statuses = [gate.get("passed") for gate in gates.values()]
+    if any(status is False for status in statuses):
+        verdict = "attention"
+    elif statuses and all(status is True for status in statuses):
+        verdict = "pass"
+    else:
+        verdict = "insufficient_data"
+    return {
+        "verdict": verdict,
+        "targets": {
+            "router_token_savings_pct": 50.0,
+            "expansion_rate_pct_max": 15.0,
+            "cache_read_per_turn_max": 30_000,
+            "context_governance_incidents_max": 0,
+            "stale_context_incidents_max": 0,
+            "task_parity_failures_max": 0,
+            "task_parity_pending_review_max": 0,
+            "task_parity_score_min": 0.95,
+        },
+        "gates": gates,
+        "note": "These gates are release-quality signals. None alone proves live task parity; replay and expansion data must be read together.",
+    }
+
+
+def gate_summary(report: QualityReport, *, allow_insufficient: bool = False) -> dict[str, Any]:
+    gates = (report.quality_gates or {}).get("gates") or {}
+    failed = sorted(name for name, gate in gates.items() if gate.get("passed") is False)
+    pending = sorted(name for name, gate in gates.items() if gate.get("passed") is None)
+    verdict = (report.quality_gates or {}).get("verdict", "unknown")
+    ok = not failed and (allow_insufficient or not pending)
+    return {
+        "ok": ok,
+        "verdict": verdict if ok or not allow_insufficient else ("pass_with_insufficient_data" if not failed else verdict),
+        "failed_gates": failed,
+        "pending_gates": pending,
+        "allow_insufficient": bool(allow_insufficient),
+    }
 
 
 def _edits_section() -> dict[str, Any]:
@@ -272,20 +364,41 @@ def _settings_section() -> dict[str, Any]:
         return {"error": f"{type(exc).__name__}: {exc}"}
 
 
-def build_report(sessions_dir: Path | None = None, limit: int = 0) -> QualityReport:
+def build_report(
+    sessions_dir: Path | None = None,
+    limit: int = 0,
+    *,
+    harness: str = "claude_code",
+    golden_path: Path | None = None,
+) -> QualityReport:
     try:
         from dhee import __version__
     except Exception:
         __version__ = "unknown"
 
+    router = _router_section()
+    critical_surface = _critical_surface_section()
+    context_governance = _context_governance_section()
+    tool_schema = _tool_schema_section()
+    replay = _replay_section(
+        sessions_dir=sessions_dir,
+        limit=limit,
+        harness=harness,
+        golden_path=golden_path,
+    )
     return QualityReport(
         dhee_version=__version__,
         generated_at=time.time(),
-        router=_router_section(),
-        critical_surface=_critical_surface_section(),
-        context_governance=_context_governance_section(),
-        tool_schema=_tool_schema_section(),
-        replay=_replay_section(sessions_dir=sessions_dir, limit=limit),
+        router=router,
+        critical_surface=critical_surface,
+        context_governance=context_governance,
+        tool_schema=tool_schema,
+        replay=replay,
+        quality_gates=_quality_gates_section(
+            router=router,
+            replay=replay,
+            context_governance=context_governance,
+        ),
         edits=_edits_section(),
         hooks=_hooks_section(),
         settings=_settings_section(),
@@ -305,6 +418,7 @@ def format_human(report: QualityReport) -> str:
     cg = report.context_governance
     ts = report.tool_schema
     rep = report.replay
+    qg = report.quality_gates
     e = report.edits
     s = report.settings
     h = report.hooks
@@ -342,6 +456,19 @@ def format_human(report: QualityReport) -> str:
             f" structural={cs.get('avg_structural_fit', 0):.2f}"
             f" confidence={cs.get('avg_confidence', 0):.2f}",
         ]
+    if qg:
+        lines += [
+            "",
+            "[ quality gates ]",
+            f"  verdict:        {qg.get('verdict', 'unknown')}",
+        ]
+        for name, gate in (qg.get("gates") or {}).items():
+            status = gate.get("passed")
+            marker = "pass" if status is True else ("attention" if status is False else "pending")
+            actual = gate.get("actual")
+            target = gate.get("target")
+            unit = gate.get("unit") or ""
+            lines.append(f"  {name}: {marker}  actual={actual} target={target} {unit}".rstrip())
     if cg and not cg.get("error"):
         lines += [
             "",
@@ -366,12 +493,14 @@ def format_human(report: QualityReport) -> str:
     lines += [
         "",
         "[ replay projection (counterfactual) ]",
-        f"  sessions:       {rep.get('sessions', 0)}",
+        f"  harness:        {rep.get('harness', 'claude_code')}",
+        f"  sessions:       {rep.get('sessions', 0)}   by harness: {rep.get('sessions_by_harness', {})}",
         f"  assistant turns: {rep.get('assistant_turns', 0)}",
         f"  tool calls:     {rep.get('total_calls', 0)}   by tool: {rep.get('calls_by_tool', {})}",
         f"  raw tokens:     {rep.get('raw_tokens', 0):,}",
         f"  digest tokens:  {rep.get('digest_tokens', 0):,}",
         f"  net saved:      {rep.get('net_saved_tokens', 0):,}  ({rep.get('saved_pct', 0):.1f}%)",
+        f"  golden:         annotated={rep.get('annotated_sessions', 0)} pending={rep.get('pending_review_sessions', 0)} stale={rep.get('stale_context_incidents', 0)} parity={rep.get('task_parity', {})}",
         "",
         "[ promise 1 — token savings (target < 30K cache-read / turn) ]",
         f"  cache-read / turn today:     {rep.get('cache_read_per_turn', 0):,}",
@@ -404,6 +533,7 @@ def format_share(report: QualityReport) -> str:
     cg = report.context_governance or {}
     ts = report.tool_schema or {}
     rep = report.replay or {}
+    qg = report.quality_gates or {}
     s = report.settings or {}
     h = report.hooks or {}
 
@@ -424,10 +554,16 @@ def format_share(report: QualityReport) -> str:
         f"- dhee version: `{report.dhee_version}`",
         f"- router enabled: **{enabled}**, enforce: **{enforce}**",
         f"- hooks installed: {hooks}",
+        f"- quality gate verdict: **{qg.get('verdict', 'insufficient_data')}**",
         "",
         "## Projected savings (counterfactual replay of real sessions)",
         "",
         f"- sessions replayed: **{rep.get('sessions', 0)}**",
+        f"- sessions by harness: `{rep.get('sessions_by_harness', {})}`",
+        f"- golden annotations: **{rep.get('annotated_sessions', 0)}** sessions, "
+        f"pending review: **{rep.get('pending_review_sessions', 0)}**, "
+        f"stale-context incidents: **{rep.get('stale_context_incidents', 0)}**, "
+        f"task parity: `{rep.get('task_parity', {})}`",
         f"- assistant turns: **{rep.get('assistant_turns', 0)}**",
         f"- tool calls replayed: **{calls:,}**",
         f"- raw tokens (native flow): **{raw:,}**",

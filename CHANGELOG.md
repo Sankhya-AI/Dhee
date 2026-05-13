@@ -8,9 +8,63 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 - Public Dhee is now positioned and packaged as **Dhee Developer Brain**:
   local memory, handoff, harness setup, and git-backed repo context.
-- Removed the public web UI package and `dhee ui` command surface. The
-  enterprise dashboard and commercial code now live in the private
-  `dhee-enterprise` repository.
+- Rewrote the README as a concise first-read product page focused on why Dhee
+  matters, the 30-second token-router proof, install, integrations, benchmarks,
+  and the public-core/paid-team-layer boundary.
+- Added `dhee demo token-router`, a deterministic context-firewall demo that
+  shows raw tool-output tokens, digest tokens, savings, and expansion pointers
+  without requiring a live agent session.
+- Added a public `SECURITY.md` with Dhee's local-first trust boundaries,
+  threat model, `.dheemem`/repo-context/daemon controls, reporting process, and
+  public-core vs paid-governance security split.
+- Added canonical `dhee://` URI aliases over DheeFS for stable cross-tool
+  references such as `dhee://state/current` and `dhee://handoff/latest`.
+- Added `dhee runtime status|restart|stop|doctor` with a local-only runtime
+  daemon, managed-venv visibility, and doctor integration.
+- `dhee shell`, MCP `dhee_shell`, and compiled context actions now use the
+  local runtime daemon when it is healthy, with automatic fallback and
+  `DHEE_RUNTIME_DISABLE=1` escape hatch.
+- `dhee uninstall` now performs packaging-grade cleanup: stops the daemon,
+  disables native harness wiring, removes only installer-owned symlinks, strips
+  the exact managed `# dhee` shell PATH block, and deletes the managed data/venv
+  directory.
+- MCP `dhee_read` and `dhee_grep` now use the local runtime daemon when
+  healthy. MCP `dhee_bash` can also use the daemon, but only when the daemon
+  process is started with `DHEE_RUNTIME_ENABLE_BASH=1`, a cwd allowlist, and a
+  timeout cap; successful results include runtime audit metadata.
+- Source-side read routing now extracts richer language-aware digests for
+  TS/TSX components and types, Java contracts, shell scripts, SQL objects,
+  and log severity signals.
+- Router quality reports now include explicit release-facing quality gates
+  for token savings, expansion rate, projected cache-read per turn, and
+  context-governance incidents.
+- Router replay now supports Claude Code and Codex JSONL transcript streams
+  plus golden annotations for task parity scores and stale-context incidents.
+- Added `dhee router gate` for CI/release gating and wired the checked-in
+  Claude/Codex golden replay corpus into GitHub Actions. It exits non-zero on
+  failed replay quality gates and supports `--allow-insufficient` for partial
+  telemetry jobs.
+- Added `dhee router harvest` and `dhee router corpus` to grow the golden
+  replay suite from real Claude Code/Codex sessions without checking in raw
+  prompts, tool outputs, absolute paths, or secrets. Harvested annotations are
+  marked `needs_review` until a human validates task parity.
+- Golden replay reports now count `pending_review_sessions`, release gates fail
+  when included annotations are still pending, and `dhee router annotate` can
+  promote a reviewed session to `pass` or `fail` without hand-editing JSONL.
+- Hardened signed `.dheemem` v1 import/inspect validation: manifest signature
+  failures now report cleanly, required payload files and `handoff.json` are
+  enforced, and duplicate, unexpected, absolute, or traversal archive members
+  are rejected before import.
+- `.dheemem` import and dry-run results now include a compact
+  `handoff_bootstrap` summary from the signed `handoff.json`, so a receiving
+  harness can inspect continuity before or after import.
+- `.dheemem` packs now also carry signed repo-shared context payloads
+  (`repo_context/manifest.json` and `repo_context/entries.jsonl`); import
+  dry-runs report the repo-context bootstrap and merge/replace can restore
+  entries into a target repo while rejecting tampered, symlinked, or
+  likely-secret-bearing context.
+- Public Dhee exposes local CLI/MCP/data primitives so dashboard products can
+  render governance without duplicating core context logic.
 - Added repo-shared context commands: `dhee link`, `dhee unlink`,
   `dhee links`, `dhee promote`, `dhee demote`, and `dhee context`.
 - Repo-shared context uses append-only `.dhee/context/entries.jsonl` with

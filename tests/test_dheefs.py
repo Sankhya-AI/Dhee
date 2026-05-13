@@ -59,6 +59,37 @@ def test_shell_exposes_compiled_state_and_context_debt(tmp_path):
     assert "projected_cache_read_tokens" in debt.stdout
 
 
+def test_dheefs_accepts_canonical_dhee_uri_aliases(tmp_path):
+    ws = make_workspace(tmp_path)
+    store = ws.context_state_store()
+    store.observe_prompt("Win the developer brain workflow")
+    store.add_fact("Dhee URI aliases resolve onto DheeFS paths", source="test")
+
+    current = ws.execute("cat dhee://state/current")
+    handoff = ws.execute("cat dhee://handoff/latest")
+    shared = ws.execute("cat dhee://shared/task-results")
+    agent = ws.execute("cat dhee://agents/codex/memory")
+
+    assert current.ok
+    assert "Dhee URI aliases" in current.stdout
+    assert handoff.ok
+    assert "# Latest Handoff" in handoff.stdout
+    assert shared.ok
+    assert '"results"' in shared.stdout
+    assert agent.ok
+    assert "# codex" in agent.stdout
+
+
+def test_context_kernel_reads_dhee_uri_aliases(tmp_path):
+    from dhee.context_kernel import DheeContextKernel, KernelScope
+
+    kernel = DheeContextKernel(KernelScope(repo=str(tmp_path), user_id="test-user", agent_id="test-agent"))
+    kernel.workspace().context_state_store().add_fact("Kernel path boundary is stable", source="test")
+
+    assert kernel.normalize("dhee://state/current") == "/state/current.md"
+    assert "Kernel path boundary" in kernel.read("dhee://state/current")
+
+
 def test_context_checkpoint_visible_in_dheefs(tmp_path):
     ws = make_workspace(tmp_path)
     checkpoint = ws.context_checkpoint(reason="test")

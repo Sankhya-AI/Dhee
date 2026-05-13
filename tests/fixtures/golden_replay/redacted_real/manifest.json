@@ -1,0 +1,138 @@
+{
+  "aggregate": {
+    "annotated_sessions": 4,
+    "assistant_turns": 10,
+    "cache_creation_tokens_total": 30797,
+    "cache_read_per_turn": 38774,
+    "cache_read_tokens_total": 387743,
+    "calls_by_tool": {
+      "Bash": 723,
+      "Read": 3
+    },
+    "digest_tokens": 155884,
+    "net_saved_tokens": 543702,
+    "pending_review_sessions": 4,
+    "projected_cache_read_per_turn": -15595,
+    "raw_tokens": 699586,
+    "saved_pct": 77.72,
+    "sessions": 4,
+    "sessions_by_harness": {
+      "claude_code": 1,
+      "codex": 3
+    },
+    "stale_context_incidents": 0,
+    "task_parity": {
+      "avg_score": null,
+      "fail": 0,
+      "pass": 0,
+      "score_count": 0,
+      "unknown": 4
+    },
+    "tool_result_share": 1.804,
+    "tool_result_tokens": 699586,
+    "total_calls": 726,
+    "warnings_count": 726
+  },
+  "format": "dhee_replay_corpus_manifest",
+  "generated_at": 1778669028.4784482,
+  "golden_path": "tests/fixtures/golden_replay/redacted_real/golden_needs_review.jsonl",
+  "output_dir": "tests/fixtures/golden_replay/redacted_real",
+  "privacy": {
+    "raw_paths": false,
+    "raw_prompts": false,
+    "raw_tool_outputs": false,
+    "secret_filter": "dhee.hooks.claude_code.privacy.filter_secrets"
+  },
+  "sessions": [
+    {
+      "annotation_status": "needs_review",
+      "calls_by_tool": {
+        "Bash": 320
+      },
+      "digest_tokens": 68293,
+      "harness": "codex",
+      "output_path": "tests/fixtures/golden_replay/redacted_real/sessions/redacted_real_codex_ac99c6113f58f19a.jsonl",
+      "raw_tokens": 348538,
+      "sanitized_records": 1102,
+      "saved_pct": 80.41,
+      "session_id": "redacted_real_codex_ac99c6113f58f19a",
+      "source_path_sha256": "37cf3073bd86f55e",
+      "source_size_bytes": 68669775,
+      "total_calls": 320,
+      "warnings_count": 320
+    },
+    {
+      "annotation_status": "needs_review",
+      "calls_by_tool": {
+        "Bash": 171
+      },
+      "digest_tokens": 39200,
+      "harness": "codex",
+      "output_path": "tests/fixtures/golden_replay/redacted_real/sessions/redacted_real_codex_e9aab5e70135fb15.jsonl",
+      "raw_tokens": 160095,
+      "sanitized_records": 769,
+      "saved_pct": 75.51,
+      "session_id": "redacted_real_codex_e9aab5e70135fb15",
+      "source_path_sha256": "4d2220f97262ac25",
+      "source_size_bytes": 1008621842,
+      "total_calls": 171,
+      "warnings_count": 171
+    },
+    {
+      "annotation_status": "needs_review",
+      "calls_by_tool": {
+        "Bash": 225
+      },
+      "digest_tokens": 46456,
+      "harness": "codex",
+      "output_path": "tests/fixtures/golden_replay/redacted_real/sessions/redacted_real_codex_c918764edfc5535b.jsonl",
+      "raw_tokens": 180087,
+      "sanitized_records": 778,
+      "saved_pct": 74.2,
+      "session_id": "redacted_real_codex_c918764edfc5535b",
+      "source_path_sha256": "4db261a7c93167d9",
+      "source_size_bytes": 9281592,
+      "total_calls": 225,
+      "warnings_count": 225
+    },
+    {
+      "annotation_status": "needs_review",
+      "calls_by_tool": {
+        "Bash": 7,
+        "Read": 3
+      },
+      "digest_tokens": 1935,
+      "harness": "claude_code",
+      "output_path": "tests/fixtures/golden_replay/redacted_real/sessions/redacted_real_claude_code_d15b0f834020060a.jsonl",
+      "raw_tokens": 10866,
+      "sanitized_records": 20,
+      "saved_pct": 82.19,
+      "session_id": "redacted_real_claude_code_d15b0f834020060a",
+      "source_path_sha256": "f4eb7d0ecca2ef20",
+      "source_size_bytes": 462780,
+      "total_calls": 10,
+      "warnings_count": 10
+    }
+  ],
+  "skipped": [
+    {
+      "reason": "too_few_calls",
+      "source_path_sha256": "9e852a36ebbf2e86"
+    },
+    {
+      "reason": "too_few_calls",
+      "source_path_sha256": "3a157dd4676c1c23"
+    },
+    {
+      "reason": "too_few_calls",
+      "source_path_sha256": "b7ce3efbf6c55a59"
+    },
+    {
+      "reason": "too_few_calls",
+      "source_path_sha256": "f7683fe005e57e5f"
+    }
+  ],
+  "source": "redacted_real_sessions",
+  "transcripts_considered": 8,
+  "version": 1
+}

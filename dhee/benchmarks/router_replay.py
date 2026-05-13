@@ -1,9 +1,9 @@
 """Router replay harness — projects token savings on real session transcripts.
 
-Reads Claude Code session JSONL files, finds each native `Read` / `Bash`
-/ `Task` tool_use + tool_result pair, and re-runs the corresponding
-router digest function to compute what the context would have held if
-the router had been active.
+Reads Claude Code or Codex session JSONL files, finds native `Read` /
+`Bash` / `Task` tool pairs, and re-runs the corresponding router digest
+function to compute what the context would have held if the router had
+been active.
 
 This is *counterfactual projection*, not a live A/B. It answers the
 question: given the tool calls the model actually made, how many tokens
@@ -17,12 +17,16 @@ Reports per-session and aggregate:
     - tool_result projected tokens (digest length via our renderer)
     - absolute savings, % savings
     - count of tool calls split by tool
+    - stale-context incidents and task parity when golden annotations
+      are present
     - warnings when source file no longer exists / command can't be
       replayed (we fall back to transcript length for those)
 
 Usage:
     python -m dhee.benchmarks.router_replay
         [--sessions-dir ~/.claude/projects/<slug>]
+        [--harness claude_code|codex|all|auto]
+        [--golden golden_annotations.jsonl]
         [--limit 5]
         [--json]
 """
@@ -79,15 +83,48 @@ class CallProjection:
         return (self.saved_tokens / self.raw_tokens) * 100.0
 
 
+def _parse_boolish(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text in {"pass", "passed", "success", "succeeded", "true", "yes", "1", "parity"}:
+        return True
+    if text in {"fail", "failed", "failure", "false", "no", "0", "regression"}:
+        return False
+    return None
+
+
+def _stale_incident_count(value: Any) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, list):
+        return len(value)
+    if isinstance(value, dict):
+        return len(value) if "count" not in value else _stale_incident_count(value.get("count"))
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
 @dataclass
 class SessionReport:
     session_id: str
+    harness: str = "claude_code"
     total_calls: int = 0
     calls_by_tool: Counter = field(default_factory=Counter)
     raw_tokens: int = 0
     digest_tokens: int = 0
     saved_tokens: int = 0
     warnings: list[str] = field(default_factory=list)
+    annotations_count: int = 0
+    stale_context_incidents: int = 0
+    task_parity: bool | None = None
+    task_parity_score: float | None = None
+    pending_review: bool = False
+    golden_notes: list[str] = field(default_factory=list)
     # Ground-truth usage, read from each assistant record's `usage` field.
     assistant_turns: int = 0
     cache_read_input_tokens: int = 0
@@ -107,6 +144,40 @@ class SessionReport:
         self.digest_tokens += p.digest_tokens
         if p.note:
             self.warnings.append(p.note)
+
+    def apply_annotation(self, annotation: dict[str, Any]) -> None:
+        self.annotations_count += 1
+        parity_value = (
+            annotation.get("task_parity")
+            if "task_parity" in annotation
+            else annotation.get("parity")
+        )
+        parity = _parse_boolish(parity_value)
+        if parity is not None:
+            self.task_parity = parity
+        else:
+            review_text = str(
+                annotation.get("review_status")
+                or annotation.get("status")
+                or parity_value
+                or ""
+            ).strip().lower()
+            if review_text in {"needs_review", "pending_review", "pending", "review"}:
+                self.pending_review = True
+        score = annotation.get("task_parity_score", annotation.get("parity_score"))
+        if score is not None:
+            try:
+                self.task_parity_score = float(score)
+            except (TypeError, ValueError):
+                pass
+        self.stale_context_incidents += _stale_incident_count(
+            annotation.get("stale_context_incidents", annotation.get("stale_incidents"))
+        )
+        note = annotation.get("note") or annotation.get("notes")
+        if isinstance(note, list):
+            self.golden_notes.extend(str(item) for item in note if item)
+        elif note:
+            self.golden_notes.append(str(note))
 
     @property
     def net_saved(self) -> int:
@@ -184,10 +255,10 @@ def _project_bash(tool_input: dict[str, Any], result_text: str) -> CallProjectio
     raw_tokens = _tokens(raw)
     d = _bash_digest.digest_bash(
         cmd=cmd,
-        exit_code=0,
+        exit_code=int(tool_input.get("exit_code", 0) or 0),
         duration_ms=0,
         stdout=raw,
-        stderr="",
+        stderr=str(tool_input.get("stderr") or ""),
     )
     rendered = d.render("B-replayXXXX")
     digest_tokens = _tokens(rendered)
@@ -222,7 +293,103 @@ _PROJECTORS = {
 }
 
 
-def replay_session(path: Path) -> SessionReport:
+def _jsonl_records(path: Path):
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+
+def _annotation_from_record(rec: dict[str, Any], *, session_id: str) -> dict[str, Any] | None:
+    rec_type = rec.get("type") or rec.get("format")
+    payload = rec.get("payload") if isinstance(rec.get("payload"), dict) else rec
+    if rec_type not in {
+        "dhee_golden",
+        "dhee_golden_replay",
+        "golden_annotation",
+        "golden_replay",
+        "dhee_replay_annotation",
+    } and not any(k in payload for k in ("task_parity", "parity", "stale_context_incidents", "stale_incidents")):
+        return None
+    ann = dict(payload)
+    ann.setdefault("session_id", session_id)
+    return ann
+
+
+def load_golden_annotations(path: Path | None) -> dict[str, list[dict[str, Any]]]:
+    if not path:
+        return {}
+    files: list[Path]
+    if path.is_dir():
+        files = sorted(path.glob("*.jsonl"))
+    else:
+        files = [path]
+    out: dict[str, list[dict[str, Any]]] = {}
+    for f in files:
+        if not f.exists():
+            continue
+        for rec in _jsonl_records(f):
+            ann = _annotation_from_record(rec, session_id=str(rec.get("session_id") or f.stem))
+            if ann is None:
+                continue
+            sid = str(ann.get("session_id") or f.stem)
+            out.setdefault(sid, []).append(ann)
+    return out
+
+
+def _detect_harness(path: Path) -> str:
+    for rec in _jsonl_records(path):
+        payload = rec.get("payload") if isinstance(rec.get("payload"), dict) else {}
+        if rec.get("type") in {"response_item", "event_msg"} and payload.get("type"):
+            return "codex"
+        msg = rec.get("message") or rec
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if isinstance(content, list):
+            return "claude_code"
+    return "claude_code"
+
+
+def _command_text(value: Any) -> str:
+    if isinstance(value, list):
+        if len(value) >= 3 and value[-2] == "-lc":
+            return str(value[-1])
+        return " ".join(str(part) for part in value)
+    return str(value or "")
+
+
+def _loads_tool_args(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        data = json.loads(value)
+    except json.JSONDecodeError:
+        return {"command": value}
+    return data if isinstance(data, dict) else {}
+
+
+def _normalise_codex_tool(name: str, args: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+    lower = str(name or "").lower()
+    if lower in {"exec_command", "shell", "bash"}:
+        cmd = args.get("cmd") or args.get("command") or args.get("script") or ""
+        return "Bash", {"command": _command_text(cmd), **args}
+    if lower in {"read_file", "read"}:
+        path = args.get("file_path") or args.get("path") or ""
+        return "Read", {"file_path": path, **args}
+    return None
+
+
+def _replay_claude_session(
+    path: Path,
+    *,
+    annotations: dict[str, list[dict[str, Any]]] | None = None,
+) -> SessionReport:
     """Walk a transcript, pairing tool_use records with their tool_result.
 
     Also collects ground-truth usage per assistant turn (cache-read,
@@ -231,69 +398,141 @@ def replay_session(path: Path) -> SessionReport:
     share).
     """
     pending: dict[str, dict[str, Any]] = {}
-    report = SessionReport(session_id=path.stem)
+    report = SessionReport(session_id=path.stem, harness="claude_code")
 
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
+    for rec in _jsonl_records(path):
+        ann = _annotation_from_record(rec, session_id=path.stem)
+        if ann is not None:
+            report.apply_annotation(ann)
+            continue
+        rec_type = rec.get("type")
+        msg = rec.get("message") or rec
+        # Assistant usage (ground-truth API cache/output counts).
+        if rec_type == "assistant" and isinstance(msg, dict):
+            usage = msg.get("usage") or {}
+            if isinstance(usage, dict):
+                report.assistant_turns += 1
+                try:
+                    report.cache_read_input_tokens += int(
+                        usage.get("cache_read_input_tokens", 0) or 0
+                    )
+                    report.cache_creation_input_tokens += int(
+                        usage.get("cache_creation_input_tokens", 0) or 0
+                    )
+                    report.output_tokens += int(usage.get("output_tokens", 0) or 0)
+                except (TypeError, ValueError):
+                    pass
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            if btype == "tool_use":
+                tid = block.get("id")
+                name = block.get("name") or ""
+                if tid and name in _PROJECTORS:
+                    pending[tid] = {
+                        "tool": name,
+                        "input": block.get("input") or {},
+                    }
+            elif btype == "tool_result":
+                tid = block.get("tool_use_id")
+                text = _flatten_result(block.get("content"))
+                # Every tool_result contributes to cache-replay load
+                # on subsequent turns, regardless of whether we
+                # project a digest for it. Track the raw token mass.
+                report.tool_result_tokens += _tokens(text)
+                if not tid or tid not in pending:
+                    continue
+                entry = pending.pop(tid)
+                projector = _PROJECTORS[entry["tool"]]
+                try:
+                    p = projector(entry["input"], text)
+                except Exception as exc:  # noqa: BLE001
+                    report.warnings.append(
+                        f"{entry['tool']} projector failed: {type(exc).__name__}: {exc}"
+                    )
+                    continue
+                report.add(p)
+    for ann in (annotations or {}).get(path.stem, []):
+        report.apply_annotation(ann)
+    return report
+
+
+def _replay_codex_session(
+    path: Path,
+    *,
+    annotations: dict[str, list[dict[str, Any]]] | None = None,
+) -> SessionReport:
+    pending: dict[str, dict[str, Any]] = {}
+    report = SessionReport(session_id=path.stem, harness="codex")
+
+    for rec in _jsonl_records(path):
+        ann = _annotation_from_record(rec, session_id=path.stem)
+        if ann is not None:
+            report.apply_annotation(ann)
+            continue
+        payload = rec.get("payload") if isinstance(rec.get("payload"), dict) else {}
+        ptype = payload.get("type")
+        if rec.get("type") == "response_item" and ptype == "function_call":
+            call_id = str(payload.get("call_id") or payload.get("id") or "")
+            normalised = _normalise_codex_tool(
+                str(payload.get("name") or ""),
+                _loads_tool_args(payload.get("arguments")),
+            )
+            if call_id and normalised:
+                tool, tool_input = normalised
+                pending[call_id] = {"tool": tool, "input": tool_input}
+            continue
+        if rec.get("type") == "event_msg" and ptype in {"exec_command_end", "function_call_output", "tool_result"}:
+            call_id = str(payload.get("call_id") or payload.get("id") or payload.get("tool_call_id") or "")
+            entry = pending.pop(call_id, None)
+            if entry is None and ptype == "exec_command_end":
+                entry = {"tool": "Bash", "input": {"command": _command_text(payload.get("command"))}}
+            if entry is None:
+                continue
+            text = str(
+                payload.get("aggregated_output")
+                or payload.get("output")
+                or payload.get("stdout")
+                or payload.get("content")
+                or ""
+            )
+            if payload.get("stderr"):
+                entry["input"]["stderr"] = str(payload.get("stderr") or "")
+            if payload.get("exit_code") is not None:
+                entry["input"]["exit_code"] = payload.get("exit_code")
+            if not entry["input"].get("command") and payload.get("command"):
+                entry["input"]["command"] = _command_text(payload.get("command"))
+            projector = _PROJECTORS.get(entry["tool"])
+            if projector is None:
                 continue
             try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
+                p = projector(entry["input"], text)
+            except Exception as exc:  # noqa: BLE001
+                report.warnings.append(
+                    f"{entry['tool']} projector failed: {type(exc).__name__}: {exc}"
+                )
                 continue
-            rec_type = rec.get("type")
-            msg = rec.get("message") or rec
-            # Assistant usage (ground-truth API cache/output counts).
-            if rec_type == "assistant" and isinstance(msg, dict):
-                usage = msg.get("usage") or {}
-                if isinstance(usage, dict):
-                    report.assistant_turns += 1
-                    try:
-                        report.cache_read_input_tokens += int(
-                            usage.get("cache_read_input_tokens", 0) or 0
-                        )
-                        report.cache_creation_input_tokens += int(
-                            usage.get("cache_creation_input_tokens", 0) or 0
-                        )
-                        report.output_tokens += int(usage.get("output_tokens", 0) or 0)
-                    except (TypeError, ValueError):
-                        pass
-            content = msg.get("content") if isinstance(msg, dict) else None
-            if not isinstance(content, list):
-                continue
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-                btype = block.get("type")
-                if btype == "tool_use":
-                    tid = block.get("id")
-                    name = block.get("name") or ""
-                    if tid and name in _PROJECTORS:
-                        pending[tid] = {
-                            "tool": name,
-                            "input": block.get("input") or {},
-                        }
-                elif btype == "tool_result":
-                    tid = block.get("tool_use_id")
-                    text = _flatten_result(block.get("content"))
-                    # Every tool_result contributes to cache-replay load
-                    # on subsequent turns, regardless of whether we
-                    # project a digest for it. Track the raw token mass.
-                    report.tool_result_tokens += _tokens(text)
-                    if not tid or tid not in pending:
-                        continue
-                    entry = pending.pop(tid)
-                    projector = _PROJECTORS[entry["tool"]]
-                    try:
-                        p = projector(entry["input"], text)
-                    except Exception as exc:  # noqa: BLE001
-                        report.warnings.append(
-                            f"{entry['tool']} projector failed: {type(exc).__name__}: {exc}"
-                        )
-                        continue
-                    report.add(p)
+            report.add(p)
+            report.tool_result_tokens += _tokens(text)
+    for ann in (annotations or {}).get(path.stem, []):
+        report.apply_annotation(ann)
     return report
+
+
+def replay_session(
+    path: Path,
+    *,
+    harness: str = "auto",
+    annotations: dict[str, list[dict[str, Any]]] | None = None,
+) -> SessionReport:
+    selected = _detect_harness(path) if harness == "auto" else harness
+    if selected in {"codex", "codex_cli"}:
+        return _replay_codex_session(path, annotations=annotations)
+    return _replay_claude_session(path, annotations=annotations)
 
 
 def _default_sessions_dir() -> Path:
@@ -302,80 +541,179 @@ def _default_sessions_dir() -> Path:
     return Path.home() / ".claude" / "projects" / cwd_slug
 
 
+def _default_codex_sessions_dir() -> Path:
+    return Path.home() / ".codex" / "sessions"
+
+
+def discover_transcripts(
+    *,
+    sessions_dir: Path | None = None,
+    harness: str = "claude_code",
+    limit: int = 0,
+) -> list[Path]:
+    if sessions_dir is not None:
+        transcripts = sorted(
+            sessions_dir.rglob("*.jsonl") if sessions_dir.is_dir() else [sessions_dir],
+            key=lambda p: p.stat().st_mtime if p.exists() else 0,
+            reverse=True,
+        )
+    elif harness in {"codex", "codex_cli"}:
+        root = _default_codex_sessions_dir()
+        transcripts = sorted(root.rglob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True) if root.exists() else []
+    elif harness == "all":
+        roots = [_default_sessions_dir(), _default_codex_sessions_dir()]
+        found: list[Path] = []
+        for root in roots:
+            if root.exists():
+                found.extend(root.rglob("*.jsonl"))
+        transcripts = sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)
+    else:
+        root = _default_sessions_dir()
+        transcripts = sorted(root.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True) if root.exists() else []
+    if limit:
+        return transcripts[:limit]
+    return transcripts
+
+
+def aggregate_reports(reports: list[SessionReport]) -> dict[str, Any]:
+    raw = digest = calls = turns = cache_read = cache_creation = tool_result_tokens = 0
+    by_tool: Counter = Counter()
+    by_harness: Counter = Counter()
+    warnings = 0
+    stale = 0
+    annotated = 0
+    pending_review = 0
+    parity_pass = parity_fail = parity_unknown = 0
+    parity_scores: list[float] = []
+    for r in reports:
+        calls += r.total_calls
+        by_tool.update(r.calls_by_tool)
+        by_harness[r.harness] += 1
+        raw += r.raw_tokens
+        digest += r.digest_tokens
+        warnings += len(r.warnings)
+        turns += r.assistant_turns
+        cache_read += r.cache_read_input_tokens
+        cache_creation += r.cache_creation_input_tokens
+        tool_result_tokens += r.tool_result_tokens
+        stale += r.stale_context_incidents
+        if r.annotations_count:
+            annotated += 1
+        if r.pending_review:
+            pending_review += 1
+        if r.task_parity is True:
+            parity_pass += 1
+        elif r.task_parity is False:
+            parity_fail += 1
+        else:
+            parity_unknown += 1
+        if r.task_parity_score is not None:
+            parity_scores.append(r.task_parity_score)
+    net_saved = raw - digest
+    return {
+        "sessions": len(reports),
+        "sessions_by_harness": dict(by_harness),
+        "annotated_sessions": annotated,
+        "pending_review_sessions": pending_review,
+        "assistant_turns": turns,
+        "total_calls": calls,
+        "calls_by_tool": dict(by_tool),
+        "raw_tokens": raw,
+        "digest_tokens": digest,
+        "net_saved_tokens": net_saved,
+        "saved_pct": round(net_saved / raw * 100, 2) if raw else 0.0,
+        "cache_read_tokens_total": cache_read,
+        "cache_creation_tokens_total": cache_creation,
+        "cache_read_per_turn": int(cache_read / turns) if turns else 0,
+        "projected_cache_read_per_turn": int((cache_read - net_saved) / turns) if turns and cache_read else 0,
+        "tool_result_tokens": tool_result_tokens,
+        "tool_result_share": round(tool_result_tokens / cache_read, 3) if cache_read else 0.0,
+        "warnings_count": warnings,
+        "stale_context_incidents": stale,
+        "task_parity": {
+            "pass": parity_pass,
+            "fail": parity_fail,
+            "unknown": parity_unknown,
+            "avg_score": round(sum(parity_scores) / len(parity_scores), 3) if parity_scores else None,
+            "score_count": len(parity_scores),
+        },
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--sessions-dir", type=Path, default=None)
+    ap.add_argument("--harness", choices=["claude_code", "codex", "all", "auto"], default="claude_code")
+    ap.add_argument("--golden", type=Path, default=None, help="JSONL file or directory with golden replay annotations")
     ap.add_argument("--limit", type=int, default=0, help="Only replay N most-recent sessions")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
-    sdir = args.sessions_dir or _default_sessions_dir()
-    if not sdir.exists():
-        print(f"sessions dir not found: {sdir}", file=sys.stderr)
+    transcripts = discover_transcripts(
+        sessions_dir=args.sessions_dir,
+        harness=args.harness,
+        limit=args.limit,
+    )
+    if args.sessions_dir and not args.sessions_dir.exists():
+        print(f"sessions dir not found: {args.sessions_dir}", file=sys.stderr)
         return 2
-
-    transcripts = sorted(sdir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-    if args.limit:
-        transcripts = transcripts[: args.limit]
-
-    reports = [replay_session(p) for p in transcripts]
-
-    # Aggregate — compute saved as raw - digest honestly (some calls
-    # produce digests larger than raw for tiny inputs; those increase
-    # digest_tokens and reduce net savings).
-    agg = SessionReport(session_id="__aggregate__")
-    for r in reports:
-        agg.total_calls += r.total_calls
-        agg.calls_by_tool.update(r.calls_by_tool)
-        agg.raw_tokens += r.raw_tokens
-        agg.digest_tokens += r.digest_tokens
-    agg.saved_tokens = agg.raw_tokens - agg.digest_tokens
+    annotations = load_golden_annotations(args.golden)
+    reports = [replay_session(p, harness=args.harness if args.harness != "all" else "auto", annotations=annotations) for p in transcripts]
+    aggregate = aggregate_reports(reports)
 
     if args.json:
         out = {
             "sessions": [
                 {
                     "session_id": r.session_id,
+                    "harness": r.harness,
                     "total_calls": r.total_calls,
                     "calls_by_tool": dict(r.calls_by_tool),
                     "raw_tokens": r.raw_tokens,
                     "digest_tokens": r.digest_tokens,
                     "saved_tokens": r.net_saved,
                     "saved_pct": round(r.saved_pct, 2),
+                    "annotations_count": r.annotations_count,
+                    "stale_context_incidents": r.stale_context_incidents,
+                    "task_parity": r.task_parity,
+                    "task_parity_score": r.task_parity_score,
+                    "pending_review": r.pending_review,
                     "warnings_count": len(r.warnings),
                 }
                 for r in reports
             ],
-            "aggregate": {
-                "sessions": len(reports),
-                "total_calls": agg.total_calls,
-                "calls_by_tool": dict(agg.calls_by_tool),
-                "raw_tokens": agg.raw_tokens,
-                "digest_tokens": agg.digest_tokens,
-                "saved_tokens": agg.net_saved,
-                "saved_pct": round(agg.saved_pct, 2),
-            },
+            "aggregate": aggregate,
         }
         print(json.dumps(out, indent=2))
         return 0
 
     # Pretty
-    print(f"Sessions dir: {sdir}")
+    print(f"Harness: {args.harness}")
+    print(f"Transcripts: {len(transcripts)}")
+    if args.sessions_dir:
+        print(f"Sessions dir: {args.sessions_dir}")
+    if args.golden:
+        print(f"Golden annotations: {args.golden}")
     print(f"Sessions replayed: {len(reports)}")
     print("")
-    print(f"{'session':<14} {'calls':>6} {'raw_tok':>10} {'digest_tok':>11} {'saved':>10} {'save%':>7}")
+    print(f"{'session':<14} {'harness':<11} {'calls':>6} {'raw_tok':>10} {'digest_tok':>11} {'saved':>10} {'save%':>7} {'stale':>5} {'parity':>7}")
     for r in reports:
+        parity = "pass" if r.task_parity is True else ("fail" if r.task_parity is False else "-")
         print(
-            f"{r.session_id[:14]:<14} {r.total_calls:>6} {r.raw_tokens:>10,} "
-            f"{r.digest_tokens:>11,} {r.net_saved:>10,} {r.saved_pct:>6.1f}%"
+            f"{r.session_id[:14]:<14} {r.harness:<11} {r.total_calls:>6} {r.raw_tokens:>10,} "
+            f"{r.digest_tokens:>11,} {r.net_saved:>10,} {r.saved_pct:>6.1f}% "
+            f"{r.stale_context_incidents:>5} {parity:>7}"
         )
     print("")
     print("Aggregate (net = raw - digest):")
-    print(f"  calls:       {agg.total_calls}")
-    print(f"  by tool:     {dict(agg.calls_by_tool)}")
-    print(f"  raw tokens:  {agg.raw_tokens:,}")
-    print(f"  digest:      {agg.digest_tokens:,}")
-    print(f"  net saved:   {agg.net_saved:,}  ({agg.saved_pct:.1f}%)")
+    print(f"  harnesses:   {aggregate['sessions_by_harness']}")
+    print(f"  calls:       {aggregate['total_calls']}")
+    print(f"  by tool:     {aggregate['calls_by_tool']}")
+    print(f"  raw tokens:  {aggregate['raw_tokens']:,}")
+    print(f"  digest:      {aggregate['digest_tokens']:,}")
+    print(f"  net saved:   {aggregate['net_saved_tokens']:,}  ({aggregate['saved_pct']:.1f}%)")
+    print(f"  stale ctx:   {aggregate['stale_context_incidents']}")
+    print(f"  parity:      {aggregate['task_parity']}")
     return 0
 
 

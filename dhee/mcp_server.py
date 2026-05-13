@@ -1641,11 +1641,23 @@ def _handle_dhee_promote_learning(_memory, arguments: Dict[str, Any]) -> Dict[st
 
 
 def _handle_dhee_shell(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
-    from dhee.fs import ContextWorkspace
-
     repo = arguments.get("repo")
     if repo:
         repo = os.path.abspath(str(repo))
+    from dhee import runtime
+
+    runtime_result = runtime.execute_shell(
+        str(arguments.get("command") or ""),
+        repo=repo,
+        user_id=_default_user_id(arguments),
+        agent_id=_default_agent_id(arguments),
+        workspace_id=arguments.get("workspace_id") or repo,
+    )
+    if runtime_result is not None:
+        return runtime_result
+
+    from dhee.fs import ContextWorkspace
+
     workspace = ContextWorkspace(
         repo=repo,
         user_id=_default_user_id(arguments),
@@ -1670,13 +1682,32 @@ def _context_store(arguments: Dict[str, Any]):
     )
 
 
+def _runtime_context(arguments: Dict[str, Any], action: str, extra: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    from dhee import runtime
+
+    repo = arguments.get("repo")
+    if repo:
+        repo = os.path.abspath(str(repo))
+    return runtime.execute_context(
+        action,
+        repo=repo,
+        workspace_id=arguments.get("workspace_id") or repo,
+        user_id=_default_user_id(arguments),
+        agent_id=_default_agent_id(arguments),
+        args=extra or {},
+    )
+
+
 def _handle_dhee_context_status(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
     _maybe_sync_codex_runtime(arguments)
-    return _context_store(arguments).status()
+    return _runtime_context(arguments, "status") or _context_store(arguments).status()
 
 
 def _handle_dhee_context_state(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
     _maybe_sync_codex_runtime(arguments)
+    runtime_result = _runtime_context(arguments, "state", {"format": str(arguments.get("format") or "card").lower()})
+    if runtime_result is not None:
+        return runtime_result
     store = _context_store(arguments)
     fmt = str(arguments.get("format") or "card").lower()
     if fmt == "json":
@@ -1688,17 +1719,20 @@ def _handle_dhee_context_state(_memory, arguments: Dict[str, Any]) -> Dict[str, 
 
 def _handle_dhee_context_checkpoint(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
     _maybe_sync_codex_runtime(arguments)
-    return _context_store(arguments).checkpoint(reason=str(arguments.get("reason") or "mcp checkpoint"))
+    reason = str(arguments.get("reason") or "mcp checkpoint")
+    return _runtime_context(arguments, "checkpoint", {"reason": reason}) or _context_store(arguments).checkpoint(reason=reason)
 
 
 def _handle_dhee_context_rollover(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
     _maybe_sync_codex_runtime(arguments)
-    return _context_store(arguments).rollover(reason=str(arguments.get("reason") or "mcp rollover"))
+    reason = str(arguments.get("reason") or "mcp rollover")
+    return _runtime_context(arguments, "rollover", {"reason": reason}) or _context_store(arguments).rollover(reason=reason)
 
 
 def _handle_dhee_context_provision(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
     _maybe_sync_codex_runtime(arguments)
-    return _context_store(arguments).provision(str(arguments.get("task") or arguments.get("query") or ""))
+    task = str(arguments.get("task") or arguments.get("query") or "")
+    return _runtime_context(arguments, "provision", {"task": task}) or _context_store(arguments).provision(task)
 
 
 def _handle_dhee_tools_list(_memory, _arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -2165,11 +2199,23 @@ def _handle_dhee_broadcast(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]
 
 
 def _handle_dhee_read(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee import runtime
+
+    runtime_result = runtime.execute_router("read", arguments)
+    if runtime_result is not None:
+        return runtime_result
+
     from dhee.router.handlers import handle_dhee_read
     return handle_dhee_read(arguments)
 
 
 def _handle_dhee_bash(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee import runtime
+
+    runtime_result = runtime.execute_router("bash", arguments)
+    if runtime_result is not None:
+        return runtime_result
+
     from dhee.router.handlers import handle_dhee_bash
     return handle_dhee_bash(arguments)
 
@@ -2180,6 +2226,12 @@ def _handle_dhee_agent(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _handle_dhee_grep(_memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee import runtime
+
+    runtime_result = runtime.execute_router("grep", arguments)
+    if runtime_result is not None:
+        return runtime_result
+
     from dhee.router.handlers import handle_dhee_grep
     return handle_dhee_grep(arguments)
 
