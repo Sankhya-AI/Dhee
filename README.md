@@ -68,15 +68,17 @@ dhee ui --open
 
 The first screen shows:
 
+- the same dashboard screens used by the team layer: Org Chart, Teams, Repo
+  Brain, Context Firewall, Context, and Findings
+- an OSS backend that maps those screens onto your local repo, Dhee context,
+  router proof, and code index summary
 - router savings from noisy pytest logs, git diffs, and long source reads
-- current state health and latest handoff
-- local runtime status
-- repo-shared context entries
-- integration surfaces for Claude Code, Codex, MCP clients, and Hermes
-- export/import/uninstall commands so the local data stays portable
+- repo-shared context entries and local findings
+- Connect Real / Sync Repos flows that operate against your current workspace
 
-The UI is a view over the same public CLI/MCP primitives. The raw evidence still
-stays behind `dhee_expand_result(ptr="...")`; the dashboard makes that visible.
+The OSS UI copies the same frontend and API shape used by the team dashboard.
+The raw evidence still stays behind `dhee_expand_result(ptr="...")`; the
+dashboard makes that visible.
 
 ---
 

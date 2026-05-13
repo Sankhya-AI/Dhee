@@ -11,10 +11,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Rewrote the README as a concise first-read product page focused on why Dhee
   matters, the UI demo, install, integrations, benchmarks, and the
   public-core/paid-team-layer boundary.
-- Restored the public `dhee ui` dashboard and `dhee-ui` entrypoint. The OSS UI
-  uses the same dashboard design language while rendering local developer-brain
-  surfaces: context firewall, current state, runtime, integrations, repo
-  context, and portability.
+- Restored the public `dhee ui` dashboard and `dhee-ui` entrypoint by copying
+  the same dashboard UI and API shape into OSS. The public backend maps those
+  screens onto local repo/Dhee data instead of requiring paid-team services.
 - Added `dhee demo token-router`, a deterministic context-firewall demo that
   shows raw tool-output tokens, digest tokens, savings, and expansion pointers
   without requiring a live agent session.

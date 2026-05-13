@@ -3,102 +3,121 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Dhee UI</title>
+    <title>Dhee Enterprise</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <main class="app-shell">
       <header class="topbar">
         <div>
-          <p class="eyebrow">Local Dhee</p>
-          <h1 id="workspace-title">Developer Brain</h1>
+          <p class="eyebrow">Enterprise Dhee</p>
+          <h1 id="workspace-title">Company Brain</h1>
         </div>
         <div class="toolbar" role="toolbar" aria-label="Dashboard controls">
           <button id="refresh-button" class="icon-button" type="button" title="Refresh">
             <span class="icon refresh-icon" aria-hidden="true"></span>
             <span>Refresh</span>
           </button>
-          <button id="seed-button" class="icon-button primary" type="button" title="Reload demo">
+          <button id="seed-button" class="icon-button primary" type="button" title="Load demo">
             <span class="icon plus-icon" aria-hidden="true"></span>
-            <span>Reload Demo</span>
+            <span>Load Demo</span>
           </button>
-          <button id="snapshot-button" class="icon-button" type="button" title="Snapshot">
+          <button id="real-button" class="icon-button primary" type="button" title="Connect real workspace">
             <span class="icon repo-icon" aria-hidden="true"></span>
-            <span>Snapshot</span>
+            <span>Connect Real</span>
+          </button>
+          <button id="sync-button" class="icon-button" type="button" title="Sync mapped repos">
+            <span class="icon sync-icon" aria-hidden="true"></span>
+            <span>Sync Repos</span>
           </button>
         </div>
       </header>
 
-      <section class="metric-grid" aria-label="Dhee metrics">
+      <section class="metric-grid" aria-label="Enterprise metrics">
+        <article class="metric-tile">
+          <span class="metric-label">Projects</span>
+          <strong id="metric-projects">0</strong>
+        </article>
+        <article class="metric-tile">
+          <span class="metric-label">Teams</span>
+          <strong id="metric-teams">0</strong>
+        </article>
+        <article class="metric-tile">
+          <span class="metric-label">Context Managers</span>
+          <strong id="metric-managers">0</strong>
+        </article>
+        <article class="metric-tile">
+          <span class="metric-label">Mapped Repos</span>
+          <strong id="metric-repos">0</strong>
+        </article>
+        <article class="metric-tile">
+          <span class="metric-label">Context Items</span>
+          <strong id="metric-context">0</strong>
+        </article>
+        <article class="metric-tile attention">
+          <span class="metric-label">Open Findings</span>
+          <strong id="metric-findings">0</strong>
+        </article>
+        <article class="metric-tile">
+          <span class="metric-label">Indexed Files</span>
+          <strong id="metric-indexed">0</strong>
+        </article>
         <article class="metric-tile firewall">
           <span class="metric-label">Router Savings</span>
           <strong id="metric-firewall">0%</strong>
-        </article>
-        <article class="metric-tile">
-          <span class="metric-label">Raw Tokens</span>
-          <strong id="metric-raw">0</strong>
-        </article>
-        <article class="metric-tile">
-          <span class="metric-label">Digest Tokens</span>
-          <strong id="metric-digest">0</strong>
-        </article>
-        <article class="metric-tile">
-          <span class="metric-label">State Level</span>
-          <strong id="metric-state">-</strong>
-        </article>
-        <article class="metric-tile">
-          <span class="metric-label">Runtime</span>
-          <strong id="metric-runtime">Off</strong>
-        </article>
-        <article class="metric-tile">
-          <span class="metric-label">Repo Context</span>
-          <strong id="metric-repo-context">0</strong>
-        </article>
-        <article class="metric-tile">
-          <span class="metric-label">Integrations</span>
-          <strong id="metric-integrations">0</strong>
-        </article>
-        <article class="metric-tile">
-          <span class="metric-label">Portable</span>
-          <strong id="metric-portable">Yes</strong>
         </article>
       </section>
 
       <section class="workbench">
         <aside class="side-panel">
           <div class="panel-heading">
-            <h2>Agent Surfaces</h2>
-            <span id="branch-pill" class="pill">local</span>
+            <h2>Org Chart</h2>
+            <span id="org-id-pill" class="pill">default</span>
           </div>
-          <div id="integration-list" class="org-chart"></div>
+          <div id="org-chart" class="org-chart"></div>
         </aside>
 
         <section class="main-panel">
-          <div class="tabs" role="tablist" aria-label="Dhee views">
+          <div class="tabs" role="tablist" aria-label="Enterprise views">
             <button class="tab active" type="button" data-view="overview">Overview</button>
+            <button class="tab" type="button" data-view="teams">Teams</button>
+            <button class="tab" type="button" data-view="repos">Repo Brain</button>
             <button class="tab" type="button" data-view="firewall">Context Firewall</button>
-            <button class="tab" type="button" data-view="state">State</button>
-            <button class="tab" type="button" data-view="repo">Repo Context</button>
-            <button class="tab" type="button" data-view="portability">Portability</button>
+            <button class="tab" type="button" data-view="context">Context</button>
+            <button class="tab" type="button" data-view="findings">Findings</button>
           </div>
 
           <div id="view-overview" class="view active">
             <div class="split-grid">
               <section class="panel-block">
                 <div class="panel-heading">
-                  <h2>Why Dhee Is Running</h2>
-                  <span class="pill">local-first</span>
+                  <h2>Coverage</h2>
                 </div>
-                <div id="why-list" class="context-list"></div>
+                <div id="coverage-bars" class="bars"></div>
               </section>
               <section class="panel-block">
                 <div class="panel-heading">
-                  <h2>Workspace</h2>
-                  <span id="workspace-branch-pill" class="pill">branch</span>
+                  <h2>Repo Mappings</h2>
                 </div>
-                <div id="workspace-card" class="repo-list"></div>
+                <div id="repo-list" class="repo-list"></div>
               </section>
             </div>
+          </div>
+
+          <div id="view-teams" class="view">
+            <div class="panel-heading">
+              <h2>Teams</h2>
+              <span id="team-count-pill" class="pill">0 teams</span>
+            </div>
+            <div id="team-table" class="table"></div>
+          </div>
+
+          <div id="view-repos" class="view">
+            <div class="panel-heading">
+              <h2>Repo Brain</h2>
+              <span id="repo-brain-pill" class="pill">0 indexed</span>
+            </div>
+            <div id="repo-brain-list" class="repo-list"></div>
           </div>
 
           <div id="view-firewall" class="view">
@@ -107,33 +126,25 @@
               <span id="firewall-pill" class="pill">0 saved</span>
             </div>
             <div class="firewall-intro">
-              Agents see compact truth first. Raw evidence stays behind explicit expansion pointers.
+              Dhee shows agents compact truth first and keeps exact evidence behind pointers.
             </div>
             <div id="firewall-list" class="firewall-list"></div>
           </div>
 
-          <div id="view-state" class="view">
+          <div id="view-context" class="view">
             <div class="panel-heading">
-              <h2>Current State</h2>
-              <span id="state-pill" class="pill">unknown</span>
+              <h2>Context Inventory</h2>
+              <span id="context-count-pill" class="pill">0 items</span>
             </div>
-            <div id="state-list" class="context-list"></div>
+            <div id="context-list" class="context-list"></div>
           </div>
 
-          <div id="view-repo" class="view">
+          <div id="view-findings" class="view">
             <div class="panel-heading">
-              <h2>Repo Context</h2>
-              <span id="repo-context-pill" class="pill">0 entries</span>
+              <h2>Manager Findings</h2>
+              <span id="finding-count-pill" class="pill">0 open</span>
             </div>
-            <div id="repo-context-list" class="context-list"></div>
-          </div>
-
-          <div id="view-portability" class="view">
-            <div class="panel-heading">
-              <h2>Portability</h2>
-              <span class="pill">no lock-in</span>
-            </div>
-            <div id="portability-list" class="repo-list"></div>
+            <div id="finding-list" class="finding-list"></div>
           </div>
         </section>
       </section>
@@ -141,8 +152,8 @@
 
     <template id="empty-template">
       <div class="empty-state">
-        <strong>No data yet.</strong>
-        <span>Dhee will populate this as agents use the local context layer.</span>
+        <strong>No enterprise workspace data yet.</strong>
+        <span>Create a workspace or load the demo snapshot.</span>
       </div>
     </template>
 

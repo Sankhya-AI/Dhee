@@ -1248,6 +1248,7 @@ def cmd_ui(args: argparse.Namespace) -> None:
     serve(
         host=getattr(args, "host", "127.0.0.1"),
         port=int(getattr(args, "port", 8765) or 8765),
+        org_id=getattr(args, "org", None),
         repo=getattr(args, "repo", None),
         open_browser=bool(getattr(args, "open", False)),
     )
@@ -2548,6 +2549,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ui = sub.add_parser("ui", help="Run the local Dhee dashboard")
     p_ui.add_argument("--host", default="127.0.0.1", help="Bind host (loopback by default)")
     p_ui.add_argument("--port", type=int, default=8765, help="Bind port")
+    p_ui.add_argument("--org", help="Dashboard org/workspace id")
     p_ui.add_argument("--repo", help="Repo/workspace to inspect (default: cwd)")
     p_ui.add_argument("--open", action="store_true", help="Open in the default browser")
 

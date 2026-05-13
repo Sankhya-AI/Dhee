@@ -333,13 +333,6 @@ h3 {
   font-size: 12px;
 }
 
-.small-copy {
-  margin-top: 8px;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.45;
-}
-
 .team-stack {
   display: grid;
   gap: 8px;
