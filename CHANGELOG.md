@@ -11,9 +11,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Rewrote the README as a concise first-read product page focused on why Dhee
   matters, the UI demo, install, integrations, benchmarks, and the
   public-core/paid-team-layer boundary.
-- Restored the public `dhee ui` dashboard and `dhee-ui` entrypoint by copying
-  the same dashboard UI and API shape into OSS. The public backend maps those
-  screens onto local repo/Dhee data instead of requiring paid-team services.
+- Restored the public `dhee ui` Sankhya workspace app: router screen, infinite
+  folders canvas, workspace/task/memory/context views, and the FastAPI bridge
+  that maps those screens onto local Dhee state.
+- Added product-grade UI screens for Dhee's context-governance workflow:
+  Command Center, Context Firewall, Handoff Hub, Proof Replay, Repo Brain,
+  Learning Inbox, and Portability & Trust.
 - Added `dhee demo token-router`, a deterministic context-firewall demo that
   shows raw tool-output tokens, digest tokens, savings, and expansion pointers
   without requiring a live agent session.

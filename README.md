@@ -58,27 +58,25 @@ The promise is simple:
 
 ---
 
-## UI Demo
+## Dhee UI
 
-Run the local dashboard. It needs no API key and no connected agent:
+Run the local Dhee workspace UI. It needs no API key and no connected agent:
 
 ```bash
-dhee ui --open
+dhee ui
 ```
 
-The first screen shows:
+The UI opens on a command center, then lets you inspect:
 
-- the same dashboard screens used by the team layer: Org Chart, Teams, Repo
-  Brain, Context Firewall, Context, and Findings
-- an OSS backend that maps those screens onto your local repo, Dhee context,
-  router proof, and code index summary
-- router savings from noisy pytest logs, git diffs, and long source reads
-- repo-shared context entries and local findings
-- Connect Real / Sync Repos flows that operate against your current workspace
+- Context Firewall: token savings, digests, evidence pointers, expansions, and session history
+- Repo Brain: an infinite folders canvas for linked repos, projects, active sessions, tasks, and shared context
+- Handoff Hub: resumable task state without replaying the transcript
+- Proof Replay: what Dhee injected, hid, digested, expanded, promoted, or rejected
+- Learning Inbox: evidence-backed candidate learnings with promote/reject actions
+- Portability & Trust: signed `.dheemem` export/import readiness and dry-run inspection
 
-The OSS UI copies the same frontend and API shape used by the team dashboard.
-The raw evidence still stays behind `dhee_expand_result(ptr="...")`; the
-dashboard makes that visible.
+The raw evidence still stays behind `dhee_expand_result(ptr="...")`; the UI
+makes the routing and expansion decisions inspectable.
 
 ---
 
@@ -105,7 +103,7 @@ Useful first commands:
 ```bash
 dhee status
 dhee doctor
-dhee ui --open
+dhee ui
 dhee handoff
 dhee context state --card
 dhee runtime status

@@ -1242,16 +1242,17 @@ def cmd_demo(args: argparse.Namespace) -> None:
 
 
 def cmd_ui(args: argparse.Namespace) -> None:
-    """Run the local Dhee dashboard."""
-    from dhee.ui.server import serve
+    """Run the local Dhee web UI."""
+    from dhee.ui.cli import cmd_ui as run_ui
 
-    serve(
-        host=getattr(args, "host", "127.0.0.1"),
-        port=int(getattr(args, "port", 8765) or 8765),
-        org_id=getattr(args, "org", None),
-        repo=getattr(args, "repo", None),
-        open_browser=bool(getattr(args, "open", False)),
-    )
+    run_ui(args)
+
+
+def cmd_ui_build(args: argparse.Namespace) -> None:
+    """Build the local Dhee web UI assets."""
+    from dhee.ui.cli import cmd_ui_build as run_ui_build
+
+    run_ui_build(args)
 
 
 def cmd_status(args: argparse.Namespace) -> None:
@@ -2546,12 +2547,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_demo.add_argument("--json", action="store_true", help="JSON output")
 
     # ui
-    p_ui = sub.add_parser("ui", help="Run the local Dhee dashboard")
+    p_ui = sub.add_parser("ui", help="Run the local Dhee web UI")
     p_ui.add_argument("--host", default="127.0.0.1", help="Bind host (loopback by default)")
-    p_ui.add_argument("--port", type=int, default=8765, help="Bind port")
-    p_ui.add_argument("--org", help="Dashboard org/workspace id")
+    p_ui.add_argument("--port", type=int, default=8787, help="Bind port")
     p_ui.add_argument("--repo", help="Repo/workspace to inspect (default: cwd)")
-    p_ui.add_argument("--open", action="store_true", help="Open in the default browser")
+    p_ui.add_argument("--dev", action="store_true", help="Start the Vite frontend with hot reload")
+    p_ui.add_argument("--verbose", action="store_true", help="Show frontend logs in dev mode")
+    p_ui.add_argument("--open", action="store_true", help=argparse.SUPPRESS)
+    p_ui.add_argument("--no-open", action="store_true", help="Don't auto-open the UI in the default browser")
+
+    p_ui_build = sub.add_parser("ui-build", help="Build the Dhee web UI assets")
+    p_ui_build.add_argument("--install", action="store_true", help="Force `npm install` before building")
+    p_ui_build.set_defaults(func=cmd_ui_build)
 
     # list
     p_list = sub.add_parser("list", help="List all memories")

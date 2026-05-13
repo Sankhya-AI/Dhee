@@ -1,38 +1,79 @@
 from __future__ import annotations
 
-import json
+from pathlib import Path
 
-from dhee.ui.server import STATIC_DIR, build_dashboard_payload
+from fastapi.testclient import TestClient
+
+from dhee.ui.server import create_app
 
 
-def test_public_ui_payload_matches_team_dashboard_shape(tmp_path, monkeypatch):
+ROOT = Path(__file__).resolve().parents[1]
+WEB_DIR = ROOT / "dhee" / "ui" / "web"
+
+
+def test_ui_source_is_canvas_router_app():
+    assert (WEB_DIR / "dist" / "index.html").exists()
+    assert (WEB_DIR / "src" / "views" / "CanvasView.tsx").exists()
+    assert (WEB_DIR / "src" / "views" / "RouterView.tsx").exists()
+    assert (WEB_DIR / "src" / "views" / "ProductViews.tsx").exists()
+    assert (WEB_DIR / "src" / "components" / "canvas" / "useInfiniteCanvas.ts").exists()
+
+    nav = (WEB_DIR / "src" / "components" / "NavRail.tsx").read_text(encoding="utf-8")
+    canvas = (WEB_DIR / "src" / "components" / "canvas" / "useInfiniteCanvas.ts").read_text(encoding="utf-8")
+    app = (WEB_DIR / "src" / "App.tsx").read_text(encoding="utf-8")
+
+    for label in ["HOME", "FIREWALL", "BRAIN", "HANDOFF", "REPLAY", "LEARN", "PACKS"]:
+        assert f'label: "{label}"' in nav
+    assert "useInfiniteCanvas" in canvas
+    assert 'view === "command"' in app
+    assert 'view === "canvas"' in app
+    assert 'view === "router"' in app
+    assert 'view === "handoff"' in app
+    assert 'view === "replay"' in app
+    assert 'view === "learnings"' in app
+    assert 'view === "portability"' in app
+
+
+def test_ui_serves_built_spa_and_core_api(tmp_path, monkeypatch):
     monkeypatch.setenv("DHEE_DATA_DIR", str(tmp_path / "dhee-data"))
     monkeypatch.setenv("ENGRAM_HANDOFF_DB", str(tmp_path / "handoff.db"))
-    repo = tmp_path / "repo"
-    context_dir = repo / ".dhee" / "context"
-    context_dir.mkdir(parents=True)
-    (context_dir / "entries.jsonl").write_text(
-        json.dumps({"id": "ctx-1", "kind": "decision", "title": "Use compact digests", "content": "Keep raw logs behind ptrs."}) + "\n",
-        encoding="utf-8",
-    )
+    monkeypatch.setenv("DHEE_UI_REPO", str(tmp_path))
 
-    out = build_dashboard_payload(repo=str(repo))
+    client = TestClient(create_app())
 
-    assert out["workspace"]["root_path"] == str(repo.resolve())
-    assert out["org_chart"]["projects"][0]["project_id"] == "developer-brain"
-    assert out["team_rows"][0]["team_id"] == "local-dev"
-    assert out["context_firewall"]["aggregate"]["saved_pct"] > 50
-    assert out["totals"]["repo_mappings"] == 1
-    assert out["totals"]["context_items"] == 1
-    assert out["code_brain"]["mapping_status"][0]["sync_status"] in {"indexed", "not_indexed"}
-    assert out["context_index"][0]["title"] == "Use compact digests"
+    index = client.get("/")
+    assert index.status_code == 200
+    assert "text/html" in index.headers["content-type"]
+    assert "/assets/" in index.text
+
+    status = client.get("/api/status")
+    assert status.status_code == 200
+    assert status.json()["ok"] is True
+
+    graph = client.get("/api/workspace/graph")
+    assert graph.status_code == 200
+    data = graph.json()
+    assert "graph" in data
+    assert "nodes" in data["graph"]
 
 
-def test_public_ui_static_assets_are_the_same_dashboard_as_team_ui():
-    root = STATIC_DIR.parents[2]
-    team_static = root / "enterprise" / "dhee_enterprise" / "ui" / "static"
-    assert (STATIC_DIR / "index.html").exists()
-    assert (STATIC_DIR / "styles.css").exists()
-    assert (STATIC_DIR / "app.js").exists()
-    for name in ["index.html", "styles.css", "app.js"]:
-        assert (STATIC_DIR / name).read_text(encoding="utf-8") == (team_static / name).read_text(encoding="utf-8")
+def test_ui_product_screen_apis(tmp_path, monkeypatch):
+    monkeypatch.setenv("DHEE_DATA_DIR", str(tmp_path / "dhee-data"))
+    monkeypatch.setenv("ENGRAM_HANDOFF_DB", str(tmp_path / "handoff.db"))
+    monkeypatch.setenv("DHEE_UI_REPO", str(tmp_path))
+
+    client = TestClient(create_app())
+
+    expected = {
+        "/api/ui/command-center": ["router", "context", "learnings", "next_action"],
+        "/api/ui/handoff": ["continuity", "command", "resume_confidence"],
+        "/api/ui/proof-replay": ["items", "totals"],
+        "/api/ui/learnings": ["items", "totals"],
+        "/api/ui/portability": ["format", "counts", "contract"],
+    }
+    for path, keys in expected.items():
+        response = client.get(path)
+        assert response.status_code == 200
+        payload = response.json()
+        for key in keys:
+            assert key in payload
