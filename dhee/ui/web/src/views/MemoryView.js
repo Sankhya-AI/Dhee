@@ -661,14 +661,7 @@ export function MemoryView({ onMemoryCountChange, viewer, orgGraph, onInboxChang
         return (b.proven_tokens_saved || 0) - (a.proven_tokens_saved || 0);
     })
         .slice(0, 5), [contextUsage.items]);
-    return (_jsxs("div", { style: { display: "flex", height: "100%", minHeight: 0 }, children: [_jsxs("aside", { style: {
-                    width: 282,
-                    borderRight: "1px solid var(--border)",
-                    background: "white",
-                    display: "flex",
-                    flexDirection: "column",
-                    flexShrink: 0,
-                }, children: [_jsxs("div", { style: { padding: 14, borderBottom: "1px solid var(--border)" }, children: [_jsxs("div", { style: {
+    return (_jsxs("div", { className: "vault-shell", children: [_jsxs("aside", { className: "vault-nav", children: [_jsxs("div", { className: "vault-nav-head", children: [_jsxs("div", { style: {
                                     display: "flex",
                                     alignItems: "center",
                                     justifyContent: "space-between",
@@ -705,7 +698,7 @@ export function MemoryView({ onMemoryCountChange, viewer, orgGraph, onInboxChang
                                             sessionSavings.totals?.estimated_cost_saved_usd ??
                                             0, apiValue: sessionSavings.totals?.theoretical_api_value_usd ??
                                             sessionSavings.totals?.estimated_cost_saved_usd ??
-                                            0, totalSessions: sessionSavings.totals?.sessions || 0, budget: sessionSavings.budget })] })] }), _jsx("div", { style: { flex: 1, overflowY: "auto", padding: 10 }, role: "tree", "aria-label": "Context categories", children: vaultSections.map((section) => {
+                                            0, totalSessions: sessionSavings.totals?.sessions || 0, budget: sessionSavings.budget })] })] }), _jsx("div", { className: "vault-tree", role: "tree", "aria-label": "Context categories", children: vaultSections.map((section) => {
                             const sectionRow = {
                                 id: `section:${section.id}`,
                                 type: "section",
@@ -740,22 +733,7 @@ export function MemoryView({ onMemoryCountChange, viewer, orgGraph, onInboxChang
                                                 treeRefs.current[row.id] = el;
                                             }, focused: focusedTreeId === row.id, active: selection?.kind === "memory" && selection.id === memory.id, dot: "var(--indigo)", title: memoryTitle(memory), meta: `${memory.tier} · ${memory.tokens || 0} tok`, onFocus: () => setFocusedTreeId(row.id), onKeyDown: (event) => handleTreeKeyDown(event, row), onClick: () => selectMemory(memory) }, memory.id));
                                     }) }, section.id));
-                        }) })] }), _jsxs("main", { style: {
-                    flex: 1,
-                    minWidth: 0,
-                    display: "grid",
-                    gridTemplateColumns: "minmax(0, 1fr) 320px",
-                    background: "var(--bg)",
-                }, children: [_jsxs("section", { style: { minWidth: 0, display: "flex", flexDirection: "column" }, children: [_jsxs("header", { style: {
-                                    height: 52,
-                                    borderBottom: "1px solid var(--border)",
-                                    display: "flex",
-                                    alignItems: "center",
-                                    justifyContent: "space-between",
-                                    padding: "0 18px",
-                                    background: "white",
-                                    gap: 12,
-                                }, children: [_jsxs("div", { style: { minWidth: 0 }, children: [_jsxs("div", { style: {
+                        }) })] }), _jsxs("main", { className: "vault-main", children: [_jsxs("section", { className: "vault-editor", children: [_jsxs("header", { className: "vault-editor-header", children: [_jsxs("div", { style: { minWidth: 0 }, children: [_jsxs("div", { style: {
                                                     fontFamily: "var(--mono)",
                                                     fontSize: 9,
                                                     letterSpacing: "0.08em",
@@ -768,37 +746,14 @@ export function MemoryView({ onMemoryCountChange, viewer, orgGraph, onInboxChang
                                                     overflow: "hidden",
                                                     textOverflow: "ellipsis",
                                                     whiteSpace: "nowrap",
-                                                }, children: draft.title || "New context item" })] }), _jsxs("div", { style: { display: "flex", gap: 8, flexShrink: 0 }, children: [selectedItem?.proposal_status === "pending_review" &&
-                                                (viewer?.role === "manager" || viewer?.role === "admin") ? (_jsxs(_Fragment, { children: [_jsx(ActionButton, { label: "APPROVE", tone: "green", busy: busy === "approve", onClick: () => void decideProposal("approve") }), _jsx(ActionButton, { label: "REJECT", tone: "rose", busy: busy === "reject", onClick: () => void decideProposal("reject") })] })) : null, !selectedReadOnly ? (_jsxs(_Fragment, { children: [_jsx(ActionButton, { label: editing ? "PREVIEW" : "EDIT", onClick: () => setEditing((v) => !v) }), _jsx(ActionButton, { label: directWrite ? "SAVE" : "REQUEST", tone: directWrite ? "accent" : "indigo", busy: busy === "save", onClick: () => void saveDraft() })] })) : null] })] }), _jsxs("div", { style: {
-                                    flex: 1,
-                                    minHeight: 0,
-                                    overflow: "auto",
-                                    padding: 18,
-                                    display: "grid",
-                                    gridTemplateColumns: editing ? "minmax(0, 1fr) minmax(0, 1fr)" : "minmax(0, 760px)",
-                                    gap: 16,
-                                    alignContent: "start",
-                                }, children: [editing && !selectedReadOnly ? (_jsxs("div", { style: { display: "grid", gap: 10, alignContent: "start" }, children: [_jsx("input", { value: draft.title, onChange: (e) => setDraft((d) => ({ ...d, title: e.target.value })), placeholder: "Context title", style: inputStyle }), _jsxs("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }, children: [_jsxs("select", { value: draft.scope, onChange: (e) => setDraft((d) => ({ ...d, scope: e.target.value })), style: inputStyle, children: [_jsx("option", { value: "company", children: "company" }), _jsx("option", { value: "project", children: "project" }), _jsx("option", { value: "global_team", children: "global_team" }), _jsx("option", { value: "team", children: "team" }), _jsx("option", { value: "user", children: "user" }), _jsx("option", { value: "agent", children: "agent" })] }), _jsx("input", { value: draft.kind, onChange: (e) => setDraft((d) => ({ ...d, kind: e.target.value })), placeholder: "kind: runbook / policy / decision", style: inputStyle })] }), _jsxs("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }, children: [_jsx("input", { value: draft.project_id, onChange: (e) => setDraft((d) => ({ ...d, project_id: e.target.value })), placeholder: "project id", style: inputStyle }), _jsx("input", { value: draft.team_id, onChange: (e) => setDraft((d) => ({ ...d, team_id: e.target.value })), placeholder: "team id", style: inputStyle })] }), _jsx("input", { value: draft.tags, onChange: (e) => setDraft((d) => ({ ...d, tags: e.target.value })), placeholder: "tags, comma separated", style: inputStyle }), _jsx("textarea", { value: draft.content, onChange: (e) => setDraft((d) => ({ ...d, content: e.target.value })), rows: 20, placeholder: "Write markdown context here...", style: {
+                                                }, children: draft.title || "New context item" })] }), _jsxs("div", { className: "vault-editor-actions", children: [selectedItem?.proposal_status === "pending_review" &&
+                                                (viewer?.role === "manager" || viewer?.role === "admin") ? (_jsxs(_Fragment, { children: [_jsx(ActionButton, { label: "APPROVE", tone: "green", busy: busy === "approve", onClick: () => void decideProposal("approve") }), _jsx(ActionButton, { label: "REJECT", tone: "rose", busy: busy === "reject", onClick: () => void decideProposal("reject") })] })) : null, !selectedReadOnly ? (_jsxs(_Fragment, { children: [_jsx(ActionButton, { label: editing ? "PREVIEW" : "EDIT", onClick: () => setEditing((v) => !v) }), _jsx(ActionButton, { label: directWrite ? "SAVE" : "REQUEST", tone: directWrite ? "accent" : "indigo", busy: busy === "save", onClick: () => void saveDraft() })] })) : null] })] }), _jsxs("div", { className: `vault-body${editing && !selectedReadOnly ? " vault-body--editing" : ""}`, children: [editing && !selectedReadOnly ? (_jsxs("div", { style: { display: "grid", gap: 10, alignContent: "start" }, children: [_jsx("input", { value: draft.title, onChange: (e) => setDraft((d) => ({ ...d, title: e.target.value })), placeholder: "Context title", style: inputStyle }), _jsxs("div", { className: "vault-form-grid", children: [_jsxs("select", { value: draft.scope, onChange: (e) => setDraft((d) => ({ ...d, scope: e.target.value })), style: inputStyle, children: [_jsx("option", { value: "company", children: "company" }), _jsx("option", { value: "project", children: "project" }), _jsx("option", { value: "global_team", children: "global_team" }), _jsx("option", { value: "team", children: "team" }), _jsx("option", { value: "user", children: "user" }), _jsx("option", { value: "agent", children: "agent" })] }), _jsx("input", { value: draft.kind, onChange: (e) => setDraft((d) => ({ ...d, kind: e.target.value })), placeholder: "kind: runbook / policy / decision", style: inputStyle })] }), _jsxs("div", { className: "vault-form-grid", children: [_jsx("input", { value: draft.project_id, onChange: (e) => setDraft((d) => ({ ...d, project_id: e.target.value })), placeholder: "project id", style: inputStyle }), _jsx("input", { value: draft.team_id, onChange: (e) => setDraft((d) => ({ ...d, team_id: e.target.value })), placeholder: "team id", style: inputStyle })] }), _jsx("input", { value: draft.tags, onChange: (e) => setDraft((d) => ({ ...d, tags: e.target.value })), placeholder: "tags, comma separated", style: inputStyle }), _jsx("textarea", { value: draft.content, onChange: (e) => setDraft((d) => ({ ...d, content: e.target.value })), rows: 20, placeholder: "Write markdown context here...", style: {
                                                     ...inputStyle,
                                                     minHeight: 420,
                                                     resize: "vertical",
                                                     lineHeight: 1.55,
                                                     fontFamily: "var(--mono)",
-                                                } })] })) : null, _jsx("article", { style: {
-                                            border: "1px solid var(--border)",
-                                            background: "white",
-                                            padding: 18,
-                                            minHeight: 420,
-                                            boxShadow: "0 10px 28px rgba(20,16,10,0.04)",
-                                        }, children: _jsx(Markdown, { source: draft.content || "_No context selected._", wikiResolve: wikiResolve }) })] })] }), _jsxs("aside", { style: {
-                            borderLeft: "1px solid var(--border)",
-                            background: "white",
-                            padding: 16,
-                            overflowY: "auto",
-                            display: "flex",
-                            flexDirection: "column",
-                            gap: 14,
-                        }, children: [_jsxs(MetaBlock, { label: "Scope", children: [_jsx(Pill, { children: draft.scope }), draft.kind ? _jsx(Pill, { children: draft.kind }) : null, selectedItem?.proposal_status ? (_jsx(Pill, { color: statusTone(selectedItem.proposal_status), children: selectedItem.proposal_status })) : null] }), _jsxs(MetaBlock, { label: "Ownership", children: [_jsx(KV, { k: "org", v: viewer?.org_id }), _jsx(KV, { k: "project", v: draft.project_id || viewer?.project_id }), _jsx(KV, { k: "team", v: draft.team_id || viewer?.team_id }), _jsx(KV, { k: "viewer", v: viewer?.user_id }), _jsx(KV, { k: "role", v: viewer?.role || "developer" })] }), _jsxs(MetaBlock, { label: "Health", children: [_jsx(KV, { k: "quality", v: selectedItem?.quality_score }), _jsx(KV, { k: "freshness", v: selectedItem?.freshness_score }), _jsx(KV, { k: "confidence", v: selectedItem?.confidence }), _jsx(KV, { k: "token cost", v: selectedItem?.token_cost }), _jsx(KV, { k: "updated", v: selectedItem?.updated_at || selectedMemory?.created })] }), selectedItem ? (_jsxs(MetaBlock, { label: "Usage", children: [_jsx(KV, { k: "uses", v: selectedUsage?.usage_count ?? selectedItem.usage_count ?? 0 }), _jsx(KV, { k: "last used", v: selectedUsage?.last_used_at ?? selectedItem.last_used_at }), _jsx(KV, { k: "tokens served", v: selectedUsage?.tokens_served ?? 0 }), _jsx(KV, { k: "proven saved", v: selectedUsage?.proven_tokens_saved ?? 0 }), _jsx(KV, { k: "proven $", v: formatSavedDollars(selectedUsage?.realized_cost_saved_usd) }), _jsx(KV, { k: "evidence", v: selectedUsage?.evidence?.has_direct_savings_evidence
+                                                } })] })) : null, _jsx("article", { className: "vault-preview", children: _jsx(Markdown, { source: draft.content || "_No context selected._", wikiResolve: wikiResolve }) })] })] }), _jsxs("aside", { className: "vault-meta", children: [_jsxs(MetaBlock, { label: "Scope", children: [_jsx(Pill, { children: draft.scope }), draft.kind ? _jsx(Pill, { children: draft.kind }) : null, selectedItem?.proposal_status ? (_jsx(Pill, { color: statusTone(selectedItem.proposal_status), children: selectedItem.proposal_status })) : null] }), _jsxs(MetaBlock, { label: "Ownership", children: [_jsx(KV, { k: "org", v: viewer?.org_id }), _jsx(KV, { k: "project", v: draft.project_id || viewer?.project_id }), _jsx(KV, { k: "team", v: draft.team_id || viewer?.team_id }), _jsx(KV, { k: "viewer", v: viewer?.user_id }), _jsx(KV, { k: "role", v: viewer?.role || "developer" })] }), _jsxs(MetaBlock, { label: "Health", children: [_jsx(KV, { k: "quality", v: selectedItem?.quality_score }), _jsx(KV, { k: "freshness", v: selectedItem?.freshness_score }), _jsx(KV, { k: "confidence", v: selectedItem?.confidence }), _jsx(KV, { k: "token cost", v: selectedItem?.token_cost }), _jsx(KV, { k: "updated", v: selectedItem?.updated_at || selectedMemory?.created })] }), selectedItem ? (_jsxs(MetaBlock, { label: "Usage", children: [_jsx(KV, { k: "uses", v: selectedUsage?.usage_count ?? selectedItem.usage_count ?? 0 }), _jsx(KV, { k: "last used", v: selectedUsage?.last_used_at ?? selectedItem.last_used_at }), _jsx(KV, { k: "tokens served", v: selectedUsage?.tokens_served ?? 0 }), _jsx(KV, { k: "proven saved", v: selectedUsage?.proven_tokens_saved ?? 0 }), _jsx(KV, { k: "proven $", v: formatSavedDollars(selectedUsage?.realized_cost_saved_usd) }), _jsx(KV, { k: "evidence", v: selectedUsage?.evidence?.has_direct_savings_evidence
                                             ? "direct attribution"
                                             : "usage only" })] })) : null, _jsx(MetaBlock, { label: "Tags", children: parseTags(draft.tags).length ? (parseTags(draft.tags).map((tag) => _jsx(Pill, { children: tag }, tag))) : (_jsx("span", { style: { color: "var(--ink3)", fontSize: 12 }, children: "none" })) }), _jsx(MetaBlock, { label: "Backlinks", children: links?.backlinks?.length ? (links.backlinks.map((link) => (_jsx("button", { onClick: () => setSelection({ kind: "context", id: link.src }), style: linkButtonStyle, children: link.src_title || link.src }, `${link.src}:${link.edge_type}`)))) : (_jsx("span", { style: { color: "var(--ink3)", fontSize: 12 }, children: "none" })) }), _jsx(MetaBlock, { label: "Shares", children: links?.shares?.length ? (links.shares.map((share, idx) => (_jsx(Pill, { children: String(share.scope || share.team_id || "share") }, idx)))) : (_jsx("span", { style: { color: "var(--ink3)", fontSize: 12 }, children: "private" })) }), error ? (_jsx("div", { style: {
                                     border: "1px solid var(--rose)",
