@@ -301,6 +301,14 @@ export function HandoffHubView() {
   const last = get(continuity, "last_session", {}) || {};
   const tasks = asRows(get(data, "tasks", []));
   const sessions = asRows(get(data, "sessions", []));
+  const activeSession = sessions.find((row) => row.active || String(row.state || "").toLowerCase() === "active") || sessions[0] || {};
+  const activeTaskId = get(get(activeSession, "task", {}), "id", "");
+  const activeTask = tasks.find((row) => String(row.id || "") === String(activeTaskId)) || tasks.find((row) => String(row.status || "").toLowerCase() === "active") || {};
+  const currentTitle = String(get(activeTask, "title") || get(activeSession, "title") || get(last, "task_summary", "No active session yet"));
+  const currentUpdated = get(activeSession, "updated_at") || get(activeTask, "updatedAt") || get(last, "updated") || get(last, "ended_at");
+  const currentRuntime = String(get(activeSession, "runtime") || get(activeSession, "agent") || get(activeTask, "harness") || get(last, "agent_id", "agent"));
+  const currentModel = String(get(activeSession, "model") || "");
+  const currentCwd = String(get(activeSession, "cwd") || get(activeSession, "repo_root") || get(data, "repo", ""));
   const files = asRows(get(last, "files_touched", get(last, "filesTouched", [])));
   const decisions = asRows(get(last, "decisions", []));
   const todos = asRows(get(last, "todos", []));
@@ -315,16 +323,38 @@ export function HandoffHubView() {
       <LoadingState loading={loading} error={error} />
       {data ? (
         <div className="product-grid product-grid--two">
-          <Panel label="LATEST HANDOFF">
-            <div style={{ fontSize: 24, lineHeight: 1.15, fontWeight: 700 }}>
-              {String(get(last, "task_summary", "No handoff saved yet"))}
+          <Panel label="CURRENT WORK">
+            <div style={{ fontSize: 24, lineHeight: 1.15, fontWeight: 700, overflowWrap: "anywhere" }}>
+              {currentTitle}
             </div>
             <div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <Pill tone={toneFor(get(activeSession, "state") || get(activeTask, "status"))}>{String(get(activeSession, "state") || get(activeTask, "status") || "ready")}</Pill>
               <Pill tone="var(--green)">confidence {Math.round(Number(get(data, "resume_confidence", 0)) * 100)}%</Pill>
+              <Pill>{currentRuntime}</Pill>
+              {currentModel ? <Pill>{currentModel}</Pill> : null}
+              <Pill>{timeLabel(currentUpdated)}</Pill>
+            </div>
+            {currentCwd ? <div className="product-handoff-path">{shortPath(currentCwd)}</div> : null}
+            <div className="product-handoff-stats">
+              <SmallRow title="router calls" meta={compact(Number(get(activeSession, "router_calls", 0)))} tone="var(--accent)" />
+              <SmallRow title="tokens saved" meta={compact(Number(get(activeSession, "tokens_saved", 0)))} tone="var(--green)" />
+              <SmallRow title="task restore" meta={activeTaskId ? "linked" : "local handoff"} tone="var(--indigo)" />
+            </div>
+          </Panel>
+          <Panel label="RESUME COMMAND">
+            <div style={{ color: "var(--ink2)", lineHeight: 1.55 }}>
+              Run the handoff command when a new agent needs the current state without replaying chat.
+            </div>
+            <pre style={preStyle}>{String(get(data, "command", ""))}</pre>
+          </Panel>
+          <Panel label="LATEST SAVED HANDOFF">
+            <div style={{ fontSize: 20, lineHeight: 1.25, fontWeight: 700, overflowWrap: "anywhere" }}>
+              {String(get(last, "task_summary", "No saved handoff yet"))}
+            </div>
+            <div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
               <Pill>{timeLabel(get(last, "updated") || get(last, "ended_at"))}</Pill>
               <Pill>{String(get(last, "agent_id", get(last, "source", "dhee")))}</Pill>
             </div>
-            <pre style={preStyle}>{String(get(data, "command", ""))}</pre>
           </Panel>
           <Panel label="RESUME INVENTORY">
             <MetricStack
