@@ -9,8 +9,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Public Dhee is now positioned and packaged as **Dhee Developer Brain**:
   local memory, handoff, harness setup, and git-backed repo context.
 - Rewrote the README as a concise first-read product page focused on why Dhee
-  matters, the 30-second token-router proof, install, integrations, benchmarks,
-  and the public-core/paid-team-layer boundary.
+  matters, the UI demo, install, integrations, benchmarks, and the
+  public-core/paid-team-layer boundary.
+- Restored the public `dhee ui` Sankhya workspace app: router screen, infinite
+  folders canvas, workspace/task/memory/context views, and the FastAPI bridge
+  that maps those screens onto local Dhee state.
+- Added product-grade UI screens for Dhee's context-governance workflow:
+  Command Center, Context Firewall, Handoff Hub, Proof Replay, Repo Brain,
+  Learning Inbox, and Portability & Trust.
 - Added `dhee demo token-router`, a deterministic context-firewall demo that
   shows raw tool-output tokens, digest tokens, savings, and expansion pointers
   without requiring a live agent session.

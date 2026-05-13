@@ -31,6 +31,9 @@ dependencies = [
     "requests>=2.28.0",
     "pyyaml>=6.0",
     "cryptography>=42.0.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+    "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]
@@ -46,7 +49,7 @@ sqlite_vec = ["sqlite-vec>=0.1.1"]
 local = ["llama-cpp-python>=0.3", "sentence-transformers>=3.0"]
 # Integrations
 mcp = ["mcp>=1.0.0"]
-api = ["fastapi>=0.100.0", "uvicorn>=0.20.0"]
+api = ["fastapi>=0.100.0", "uvicorn>=0.20.0", "python-multipart>=0.0.9", "httpx>=0.25.0", "websockets>=12.0"]
 # Handoff bus ships inside Dhee's wheel. Keep the extra as a no-op
 # compatibility alias so `pip install dhee[bus]` remains valid.
 bus = []
@@ -67,6 +70,7 @@ all = [
     "mcp>=1.0.0",
     "fastapi>=0.100.0",
     "uvicorn>=0.20.0",
+    "python-multipart>=0.0.9",
     "huggingface_hub>=0.24.0",
     "llama-cpp-python>=0.3",
     "sentence-transformers>=3.0",
@@ -82,6 +86,7 @@ dev = [
 
 [project.scripts]
 dhee = "dhee.cli:main"
+dhee-ui = "dhee.ui.cli:main"
 dhee-mcp = "dhee.mcp_slim:run"
 dhee-mcp-full = "dhee.mcp_server:run"
 dhee-debugger-api = "dhee.debugger_api:run"
@@ -101,7 +106,6 @@ include-package-data = false
 where = [".", "engram-bus"]
 include = ["dhee*", "engram*", "engram_bus*"]
 exclude = [
-    "dhee.ui*",
     "engram-bus*",
     "engram-bridge*",
     "engram-enterprise*",
@@ -110,4 +114,21 @@ exclude = [
     "engram-identity*",
     "engram-metamemory*",
     "engram-policy*",
+]
+
+[tool.setuptools.package-data]
+"dhee.ui" = [
+    "web/dist/*",
+    "web/dist/assets/*",
+    "web/public/*",
+    "web/*.html",
+    "web/*.json",
+    "web/*.ts",
+    "web/src/*",
+    "web/src/components/*",
+    "web/src/components/canvas/*",
+    "web/src/components/cards/*",
+    "web/src/components/graph/*",
+    "web/src/components/ui/*",
+    "web/src/views/*",
 ]

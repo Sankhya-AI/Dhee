@@ -15,6 +15,11 @@ def test_handoff_bus_is_bundled_not_external_dependency():
 
     assert 'where = [".", "engram-bus"]' in pyproject
     assert 'include = ["dhee*", "engram*", "engram_bus*"]' in pyproject
+    assert '"dhee.ui*"' not in pyproject
+    assert 'dhee-ui = "dhee.ui.cli:main"' in pyproject
+    assert '"web/dist/*"' in pyproject
+    assert '"web/dist/assets/*"' in pyproject
+    assert '"web/src/components/canvas/*"' in pyproject
     assert (ROOT / "engram-bus" / "engram_bus" / "__init__.py").exists()
 
 

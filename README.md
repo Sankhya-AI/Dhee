@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/dhee-logo.png" alt="Dhee" width="80">
+  <img src="docs/dhee-hero.png" alt="Dhee - the context firewall for AI coding agents" width="100%">
 </p>
 
 <h1 align="center">Dhee</h1>
@@ -19,7 +19,7 @@
 
 <p align="center">
   <a href="#why-dhee">Why</a> |
-  <a href="#try-it">Try it</a> |
+  <a href="#dhee-ui">Dhee UI</a> |
   <a href="#install">Install</a> |
   <a href="#how-it-works">How it works</a> |
   <a href="#integrations">Integrations</a> |
@@ -58,32 +58,33 @@ The promise is simple:
 
 ---
 
-## Try It
+## Dhee UI
 
-Run the built-in context-router demo. It needs no API key and no connected agent:
+Run the local Dhee workspace UI. It needs no API key and no connected agent:
 
 ```bash
-dhee demo token-router
+dhee ui
 ```
 
-Example result:
+<p align="center">
+  <video src="docs/dhee-ui-demo.mp4" controls muted loop poster="docs/dhee-ui-demo-poster.png" width="100%"></video>
+</p>
 
-```text
-Dhee token-router demo
-  context firewall: agent sees the right thing, not everything
-  raw tokens:       25,208
-  digest tokens:    1,742
-  saved:            23,466 (93.1%)
-```
+<p align="center">
+  <a href="docs/dhee-ui-demo.mp4">Watch the 13-second UI demo</a>
+</p>
 
-The demo shows how Dhee handles three common agent hazards:
+The UI opens on a command center, then lets you inspect:
 
-- a noisy pytest failure log
-- a large git diff
-- a long source file read
+- Context Firewall: token savings, digests, evidence pointers, expansions, and session history
+- Repo Brain: an infinite folders canvas for linked repos, projects, active sessions, tasks, and shared context
+- Handoff Hub: resumable task state without replaying the transcript
+- Proof Replay: what Dhee injected, hid, digested, expanded, promoted, or rejected
+- Learning Inbox: evidence-backed candidate learnings with promote/reject actions
+- Portability & Trust: signed `.dheemem` export/import readiness and dry-run inspection
 
-In each case the agent receives a useful digest, while exact raw evidence stays
-behind `dhee_expand_result(ptr="...")` for explicit expansion.
+The raw evidence still stays behind `dhee_expand_result(ptr="...")`; the UI
+makes the routing and expansion decisions inspectable.
 
 ---
 
@@ -110,7 +111,7 @@ Useful first commands:
 ```bash
 dhee status
 dhee doctor
-dhee demo token-router
+dhee ui
 dhee handoff
 dhee context state --card
 dhee runtime status

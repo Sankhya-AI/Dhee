@@ -10,6 +10,8 @@ __pycache__/
 /build/
 develop-eggs/
 dist/
+!dhee/ui/web/dist/
+!dhee/ui/web/dist/**
 downloads/
 eggs/
 .eggs/
@@ -124,6 +126,7 @@ pip-delete-this-directory.txt
 
 # Node (dashboard)
 node_modules/
+*.tsbuildinfo
 
 # Rust build artifacts (dhee-accel)
 target/

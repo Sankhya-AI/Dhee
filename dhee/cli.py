@@ -14,6 +14,7 @@ Usage:
     dhee handoff            Emit structured resume JSON for a new harness/agent
     dhee harness status     Show native Claude Code / Codex integration state
     dhee demo token-router  Show how Dhee keeps raw tool output behind pointers
+    dhee ui                 Open the local Dhee dashboard
     dhee benchmark          Run performance benchmarks
     dhee status             Version, config, DB info
 """
@@ -1238,6 +1239,20 @@ def cmd_demo(args: argparse.Namespace) -> None:
         _json_out(report)
         return
     print(format_token_router_demo(report, show_digests=not getattr(args, "no_digests", False)))
+
+
+def cmd_ui(args: argparse.Namespace) -> None:
+    """Run the local Dhee web UI."""
+    from dhee.ui.cli import cmd_ui as run_ui
+
+    run_ui(args)
+
+
+def cmd_ui_build(args: argparse.Namespace) -> None:
+    """Build the local Dhee web UI assets."""
+    from dhee.ui.cli import cmd_ui_build as run_ui_build
+
+    run_ui_build(args)
 
 
 def cmd_status(args: argparse.Namespace) -> None:
@@ -2531,6 +2546,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_demo.add_argument("--no-digests", action="store_true", help="Hide digest previews")
     p_demo.add_argument("--json", action="store_true", help="JSON output")
 
+    # ui
+    p_ui = sub.add_parser("ui", help="Run the local Dhee web UI")
+    p_ui.add_argument("--host", default="127.0.0.1", help="Bind host (loopback by default)")
+    p_ui.add_argument("--port", type=int, default=8787, help="Bind port")
+    p_ui.add_argument("--repo", help="Repo/workspace to inspect (default: cwd)")
+    p_ui.add_argument("--dev", action="store_true", help="Start the Vite frontend with hot reload")
+    p_ui.add_argument("--verbose", action="store_true", help="Show frontend logs in dev mode")
+    p_ui.add_argument("--open", action="store_true", help=argparse.SUPPRESS)
+    p_ui.add_argument("--no-open", action="store_true", help="Don't auto-open the UI in the default browser")
+
+    p_ui_build = sub.add_parser("ui-build", help="Build the Dhee web UI assets")
+    p_ui_build.add_argument("--install", action="store_true", help="Force `npm install` before building")
+    p_ui_build.set_defaults(func=cmd_ui_build)
+
     # list
     p_list = sub.add_parser("list", help="List all memories")
     p_list.add_argument("--user-id", default="default", help="User ID")
@@ -3082,6 +3111,7 @@ COMMAND_MAP = {
     "search": cmd_search,
     "checkpoint": cmd_checkpoint,
     "demo": cmd_demo,
+    "ui": cmd_ui,
     "list": cmd_list,
     "stats": cmd_stats,
     "decay": cmd_decay,
