@@ -310,11 +310,11 @@ function RouterSavingsDashboard({ onOpenFolders, onOpenSetup, }) {
                                     fontSize: 10,
                                     cursor: "pointer",
                                 }, children: [item.label, _jsx("span", { style: { color: "var(--ink3)", marginLeft: 6 }, children: item.short })] }, item.key));
-                        }) }), _jsxs("div", { style: {
+                        }) }), loading && !hasAnySessions ? (_jsx(RouterMetricSkeleton, {})) : (_jsxs("div", { style: {
                             display: "grid",
                             gridTemplateColumns: "repeat(auto-fit, minmax(118px, 1fr))",
                             gap: 10,
-                        }, children: [_jsx(MetricCard, { label: `${selectedRange.label} API value`, value: formatMoney(rangeTotals.apiValue), sub: "official input-rate estimate", accent: "var(--green)" }), _jsx(MetricCard, { label: "Budget-capped savings", value: formatMoney(rangeTotals.cost), sub: cappedByBudget ? `capped at ${formatMoney(budgetCap)}` : "same as API value for this range", accent: "var(--green)" }), _jsx(MetricCard, { label: `${selectedRange.label} raw tokens avoided`, value: formatCompactNumber(rangeTotals.tokens), sub: `${formatInteger(rangeTotals.tokens)} avoided input tokens`, accent: "var(--green)" }), _jsx(MetricCard, { label: "Live governed sessions", value: formatInteger(activeTotals.sessions), sub: `${formatCompactNumber(activeTotals.tokens)} active-session savings`, accent: "var(--accent)" })] })] }), error ? (_jsxs("div", { style: {
+                        }, children: [_jsx(MetricCard, { label: `${selectedRange.label} API value`, value: formatMoney(rangeTotals.apiValue), sub: "official input-rate estimate", accent: "var(--green)" }), _jsx(MetricCard, { label: "Budget-capped savings", value: formatMoney(rangeTotals.cost), sub: cappedByBudget ? `capped at ${formatMoney(budgetCap)}` : "same as API value for this range", accent: "var(--green)" }), _jsx(MetricCard, { label: `${selectedRange.label} raw tokens avoided`, value: formatCompactNumber(rangeTotals.tokens), sub: `${formatInteger(rangeTotals.tokens)} avoided input tokens`, accent: "var(--green)" }), _jsx(MetricCard, { label: "Live governed sessions", value: formatInteger(activeTotals.sessions), sub: `${formatCompactNumber(activeTotals.tokens)} active-session savings`, accent: "var(--accent)" })] }))] }), error ? (_jsxs("div", { style: {
                     border: "1px solid var(--rose)",
                     background: "white",
                     color: "var(--rose)",
@@ -349,7 +349,7 @@ function RouterSavingsDashboard({ onOpenFolders, onOpenSetup, }) {
                         fontSize: 10,
                         padding: "7px 10px",
                         whiteSpace: "nowrap",
-                    }, children: "HISTORY" }), children: activeRows.length === 0 ? (_jsx(EmptyState, { children: loading ? "Loading active Claude Code and Codex sessions..." : "No active Claude Code or Codex sessions detected." })) : (_jsx("div", { style: { display: "grid", gap: 8 }, children: activeRows.map((row) => (_jsx(ActiveSessionCard, { row: row, selected: selected?.session_id === row.session_id, onSelect: () => setSelectedId((current) => current === row.session_id ? "" : row.session_id) }, row.session_id))) })) }))] }));
+                    }, children: "HISTORY" }), children: loading && activeRows.length === 0 ? (_jsx(ActiveSessionsSkeleton, {})) : activeRows.length === 0 ? (_jsx(EmptyState, { children: "No active Claude Code or Codex sessions detected." })) : (_jsx("div", { style: { display: "grid", gap: 8 }, children: activeRows.map((row) => (_jsx(ActiveSessionCard, { row: row, selected: selected?.session_id === row.session_id, onSelect: () => setSelectedId((current) => current === row.session_id ? "" : row.session_id) }, row.session_id))) })) }))] }));
 }
 function ActiveSessionCard({ row, selected, onSelect, }) {
     const color = agentColor(row.agent || row.runtime);
@@ -390,8 +390,11 @@ function ActiveSessionCard({ row, selected, onSelect, }) {
                 }, children: _jsx(SelectedSession, { row: row, showHeader: false }) })) : null] }));
 }
 function SessionTable({ rows, selectedId, onSelect, loading, }) {
+    if (loading && rows.length === 0) {
+        return _jsx(SessionTableSkeleton, {});
+    }
     if (rows.length === 0) {
-        return _jsx(EmptyState, { children: loading ? "Loading sessions..." : "No sessions in this range." });
+        return _jsx(EmptyState, { children: "No sessions in this range." });
     }
     return (_jsxs(_Fragment, { children: [_jsx("div", { className: "router-session-table", style: {
                     border: "1px solid var(--border)",
@@ -428,6 +431,65 @@ function SessionTable({ rows, selectedId, onSelect, loading, }) {
                     const selected = selectedId === row.session_id;
                     return (_jsxs("button", { type: "button", className: `router-session-card${selected ? " router-session-card--active" : ""}`, onClick: () => onSelect(row.session_id), "aria-pressed": selected, children: [_jsxs("div", { className: "router-session-card__head", children: [_jsx("div", { className: "router-session-card__title", title: row.title || row.session_id, children: row.title || row.session_id }), _jsx(StateBadge, { state: row.state, active: row.active })] }), _jsxs("div", { className: "router-session-card__meta", children: [_jsx(AgentBadge, { agent: row.agent || row.runtime || "unknown" }), _jsx("span", { children: relTime(row.updated_at) })] }), _jsx("div", { className: "router-session-card__path", title: row.cwd || row.repo_root || undefined, children: shortPath(row.repo_root || row.cwd) }), _jsxs("div", { className: "router-session-card__stats", children: [_jsx(MiniStat, { label: "saved", value: formatCompactNumber(row.tokens_saved) }), _jsx(MiniStat, { label: "API value", value: sessionCostLabel(row) }), _jsx(MiniStat, { label: "calls", value: formatInteger(row.router_calls) })] })] }, row.session_id));
                 }) })] }));
+}
+function ShimmerBlock({ width = "100%", height = 12, radius = 4, style, }) {
+    return (_jsx("div", { "aria-hidden": "true", style: {
+            width,
+            height,
+            borderRadius: radius,
+            background: "linear-gradient(90deg, rgba(20,16,10,0.045) 0%, rgba(224,107,63,0.13) 48%, rgba(20,16,10,0.045) 100%)",
+            backgroundSize: "220% 100%",
+            animation: "dhee-shimmer 1.35s linear infinite",
+            border: "1px solid rgba(20,16,10,0.055)",
+            ...style,
+        } }));
+}
+function SkeletonShell({ label, children, }) {
+    return (_jsxs("div", { role: "status", "aria-live": "polite", "aria-busy": "true", style: { display: "grid", gap: 10 }, children: [_jsx("div", { style: {
+                    fontFamily: "var(--mono)",
+                    fontSize: 10,
+                    color: "var(--ink3)",
+                    textTransform: "uppercase",
+                    letterSpacing: "0.08em",
+                }, children: label }), children] }));
+}
+function RouterMetricSkeleton() {
+    return (_jsx(SkeletonShell, { label: "Loading router savings", children: _jsx("div", { style: {
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(118px, 1fr))",
+                gap: 10,
+            }, children: Array.from({ length: 4 }).map((_, index) => (_jsxs("div", { style: {
+                    border: "1px solid var(--border)",
+                    background: "white",
+                    borderRadius: 6,
+                    padding: 11,
+                }, children: [_jsx(ShimmerBlock, { width: "42%", height: 10 }), _jsx(ShimmerBlock, { width: "70%", height: 28, style: { marginTop: 12 } }), _jsx(ShimmerBlock, { width: "82%", height: 11, style: { marginTop: 11 } })] }, index))) }) }));
+}
+function ActiveSessionsSkeleton() {
+    return (_jsx(SkeletonShell, { label: "Loading active sessions", children: Array.from({ length: 3 }).map((_, index) => (_jsx("div", { className: "router-active-card", style: {
+                width: "100%",
+                border: "1px solid var(--border)",
+                background: "white",
+                borderRadius: 6,
+                padding: 12,
+                boxSizing: "border-box",
+            }, children: _jsxs("div", { className: "router-active-card__grid", children: [_jsxs("div", { className: "router-active-card__main", children: [_jsx(ShimmerBlock, { width: index === 0 ? 76 : 92, height: 18, radius: 4 }), _jsx(ShimmerBlock, { width: `${72 - index * 8}%`, height: 16, style: { marginTop: 10 } }), _jsx(ShimmerBlock, { width: `${48 + index * 12}%`, height: 10, style: { marginTop: 7 } })] }), _jsxs("div", { className: "router-active-card__stats", children: [_jsx(ShimmerBlock, { height: 30 }), _jsx(ShimmerBlock, { height: 30 }), _jsx(ShimmerBlock, { height: 30 })] }), _jsx(ShimmerBlock, { width: 18, height: 18, radius: 9 })] }) }, index))) }));
+}
+function SessionTableSkeleton() {
+    return (_jsxs(SkeletonShell, { label: "Loading session history", children: [_jsx("div", { className: "router-session-table", style: {
+                    border: "1px solid var(--border)",
+                    borderRadius: 6,
+                    overflow: "hidden",
+                    background: "white",
+                    padding: 12,
+                }, children: Array.from({ length: 6 }).map((_, index) => (_jsxs("div", { style: {
+                        display: "grid",
+                        gridTemplateColumns: "minmax(220px, 1fr) 90px 80px 80px 110px 90px 70px",
+                        gap: 14,
+                        padding: "9px 0",
+                        borderTop: index === 0 ? 0 : "1px solid var(--border)",
+                        alignItems: "center",
+                    }, children: [_jsx(ShimmerBlock, { width: `${70 - index * 4}%`, height: 12 }), _jsx(ShimmerBlock, { width: "72%", height: 18 }), _jsx(ShimmerBlock, { width: "68%", height: 18 }), _jsx(ShimmerBlock, { width: "62%", height: 12 }), _jsx(ShimmerBlock, { width: "82%", height: 12 }), _jsx(ShimmerBlock, { width: "70%", height: 12 }), _jsx(ShimmerBlock, { width: "56%", height: 12 })] }, index))) }), _jsx("div", { className: "router-session-cards", "aria-hidden": "true", children: Array.from({ length: 3 }).map((_, index) => (_jsxs("div", { className: "router-session-card", children: [_jsx(ShimmerBlock, { width: "64%", height: 15 }), _jsx(ShimmerBlock, { width: "42%", height: 10 }), _jsx(ShimmerBlock, { width: "76%", height: 10 }), _jsxs("div", { className: "router-session-card__stats", children: [_jsx(ShimmerBlock, { height: 28 }), _jsx(ShimmerBlock, { height: 28 }), _jsx(ShimmerBlock, { height: 28 })] })] }, index))) })] }));
 }
 function SelectedSession({ row, showHeader = true, }) {
     const live = row.live_usage;

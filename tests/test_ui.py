@@ -40,7 +40,9 @@ def test_ui_source_is_canvas_router_app():
     assert 'view === "portability"' in app
     assert 'label="CURRENT WORK"' in product_views
     assert 'label="LATEST SAVED HANDOFF"' in product_views
-    assert "Loading active Claude Code and Codex sessions..." in router_view
+    assert "ProductLoadingSkeleton" in product_views
+    assert "ActiveSessionsSkeleton" in router_view
+    assert 'label="Loading active sessions"' in router_view
 
 
 def test_ui_serves_built_spa_and_core_api(tmp_path, monkeypatch):

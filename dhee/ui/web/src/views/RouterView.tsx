@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { FirstRunPanel } from "../components/FirstRunPanel";
@@ -429,38 +429,42 @@ function RouterSavingsDashboard({
           })}
         </div>
 
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(118px, 1fr))",
-            gap: 10,
-          }}
-        >
-          <MetricCard
-            label={`${selectedRange.label} API value`}
-            value={formatMoney(rangeTotals.apiValue)}
-            sub="official input-rate estimate"
-            accent="var(--green)"
-          />
-          <MetricCard
-            label="Budget-capped savings"
-            value={formatMoney(rangeTotals.cost)}
-            sub={cappedByBudget ? `capped at ${formatMoney(budgetCap)}` : "same as API value for this range"}
-            accent="var(--green)"
-          />
-          <MetricCard
-            label={`${selectedRange.label} raw tokens avoided`}
-            value={formatCompactNumber(rangeTotals.tokens)}
-            sub={`${formatInteger(rangeTotals.tokens)} avoided input tokens`}
-            accent="var(--green)"
-          />
-          <MetricCard
-            label="Live governed sessions"
-            value={formatInteger(activeTotals.sessions)}
-            sub={`${formatCompactNumber(activeTotals.tokens)} active-session savings`}
-            accent="var(--accent)"
-          />
-        </div>
+        {loading && !hasAnySessions ? (
+          <RouterMetricSkeleton />
+        ) : (
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(118px, 1fr))",
+              gap: 10,
+            }}
+          >
+            <MetricCard
+              label={`${selectedRange.label} API value`}
+              value={formatMoney(rangeTotals.apiValue)}
+              sub="official input-rate estimate"
+              accent="var(--green)"
+            />
+            <MetricCard
+              label="Budget-capped savings"
+              value={formatMoney(rangeTotals.cost)}
+              sub={cappedByBudget ? `capped at ${formatMoney(budgetCap)}` : "same as API value for this range"}
+              accent="var(--green)"
+            />
+            <MetricCard
+              label={`${selectedRange.label} raw tokens avoided`}
+              value={formatCompactNumber(rangeTotals.tokens)}
+              sub={`${formatInteger(rangeTotals.tokens)} avoided input tokens`}
+              accent="var(--green)"
+            />
+            <MetricCard
+              label="Live governed sessions"
+              value={formatInteger(activeTotals.sessions)}
+              sub={`${formatCompactNumber(activeTotals.tokens)} active-session savings`}
+              accent="var(--accent)"
+            />
+          </div>
+        )}
       </section>
 
       {error ? (
@@ -546,9 +550,11 @@ function RouterSavingsDashboard({
             </button>
           }
         >
-          {activeRows.length === 0 ? (
+          {loading && activeRows.length === 0 ? (
+            <ActiveSessionsSkeleton />
+          ) : activeRows.length === 0 ? (
             <EmptyState>
-              {loading ? "Loading active Claude Code and Codex sessions..." : "No active Claude Code or Codex sessions detected."}
+              No active Claude Code or Codex sessions detected.
             </EmptyState>
           ) : (
             <div style={{ display: "grid", gap: 8 }}>
@@ -685,8 +691,11 @@ function SessionTable({
   onSelect: (id: string) => void;
   loading: boolean;
 }) {
+  if (loading && rows.length === 0) {
+    return <SessionTableSkeleton />;
+  }
   if (rows.length === 0) {
-    return <EmptyState>{loading ? "Loading sessions..." : "No sessions in this range."}</EmptyState>;
+    return <EmptyState>No sessions in this range.</EmptyState>;
   }
   return (
     <>
@@ -813,6 +822,178 @@ function SessionTable({
         })}
       </div>
     </>
+  );
+}
+
+function ShimmerBlock({
+  width = "100%",
+  height = 12,
+  radius = 4,
+  style,
+}: {
+  width?: string | number;
+  height?: number;
+  radius?: number;
+  style?: CSSProperties;
+}) {
+  return (
+    <div
+      aria-hidden="true"
+      style={{
+        width,
+        height,
+        borderRadius: radius,
+        background:
+          "linear-gradient(90deg, rgba(20,16,10,0.045) 0%, rgba(224,107,63,0.13) 48%, rgba(20,16,10,0.045) 100%)",
+        backgroundSize: "220% 100%",
+        animation: "dhee-shimmer 1.35s linear infinite",
+        border: "1px solid rgba(20,16,10,0.055)",
+        ...style,
+      }}
+    />
+  );
+}
+
+function SkeletonShell({
+  label,
+  children,
+}: {
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <div role="status" aria-live="polite" aria-busy="true" style={{ display: "grid", gap: 10 }}>
+      <div
+        style={{
+          fontFamily: "var(--mono)",
+          fontSize: 10,
+          color: "var(--ink3)",
+          textTransform: "uppercase",
+          letterSpacing: "0.08em",
+        }}
+      >
+        {label}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function RouterMetricSkeleton() {
+  return (
+    <SkeletonShell label="Loading router savings">
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(118px, 1fr))",
+          gap: 10,
+        }}
+      >
+        {Array.from({ length: 4 }).map((_, index) => (
+          <div
+            key={index}
+            style={{
+              border: "1px solid var(--border)",
+              background: "white",
+              borderRadius: 6,
+              padding: 11,
+            }}
+          >
+            <ShimmerBlock width="42%" height={10} />
+            <ShimmerBlock width="70%" height={28} style={{ marginTop: 12 }} />
+            <ShimmerBlock width="82%" height={11} style={{ marginTop: 11 }} />
+          </div>
+        ))}
+      </div>
+    </SkeletonShell>
+  );
+}
+
+function ActiveSessionsSkeleton() {
+  return (
+    <SkeletonShell label="Loading active sessions">
+      {Array.from({ length: 3 }).map((_, index) => (
+        <div
+          key={index}
+          className="router-active-card"
+          style={{
+            width: "100%",
+            border: "1px solid var(--border)",
+            background: "white",
+            borderRadius: 6,
+            padding: 12,
+            boxSizing: "border-box",
+          }}
+        >
+          <div className="router-active-card__grid">
+            <div className="router-active-card__main">
+              <ShimmerBlock width={index === 0 ? 76 : 92} height={18} radius={4} />
+              <ShimmerBlock width={`${72 - index * 8}%`} height={16} style={{ marginTop: 10 }} />
+              <ShimmerBlock width={`${48 + index * 12}%`} height={10} style={{ marginTop: 7 }} />
+            </div>
+            <div className="router-active-card__stats">
+              <ShimmerBlock height={30} />
+              <ShimmerBlock height={30} />
+              <ShimmerBlock height={30} />
+            </div>
+            <ShimmerBlock width={18} height={18} radius={9} />
+          </div>
+        </div>
+      ))}
+    </SkeletonShell>
+  );
+}
+
+function SessionTableSkeleton() {
+  return (
+    <SkeletonShell label="Loading session history">
+      <div
+        className="router-session-table"
+        style={{
+          border: "1px solid var(--border)",
+          borderRadius: 6,
+          overflow: "hidden",
+          background: "white",
+          padding: 12,
+        }}
+      >
+        {Array.from({ length: 6 }).map((_, index) => (
+          <div
+            key={index}
+            style={{
+              display: "grid",
+              gridTemplateColumns: "minmax(220px, 1fr) 90px 80px 80px 110px 90px 70px",
+              gap: 14,
+              padding: "9px 0",
+              borderTop: index === 0 ? 0 : "1px solid var(--border)",
+              alignItems: "center",
+            }}
+          >
+            <ShimmerBlock width={`${70 - index * 4}%`} height={12} />
+            <ShimmerBlock width="72%" height={18} />
+            <ShimmerBlock width="68%" height={18} />
+            <ShimmerBlock width="62%" height={12} />
+            <ShimmerBlock width="82%" height={12} />
+            <ShimmerBlock width="70%" height={12} />
+            <ShimmerBlock width="56%" height={12} />
+          </div>
+        ))}
+      </div>
+      <div className="router-session-cards" aria-hidden="true">
+        {Array.from({ length: 3 }).map((_, index) => (
+          <div key={index} className="router-session-card">
+            <ShimmerBlock width="64%" height={15} />
+            <ShimmerBlock width="42%" height={10} />
+            <ShimmerBlock width="76%" height={10} />
+            <div className="router-session-card__stats">
+              <ShimmerBlock height={28} />
+              <ShimmerBlock height={28} />
+              <ShimmerBlock height={28} />
+            </div>
+          </div>
+        ))}
+      </div>
+    </SkeletonShell>
   );
 }
 

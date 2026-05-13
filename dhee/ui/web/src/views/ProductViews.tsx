@@ -196,8 +196,64 @@ function RowList({
   return <div className="product-list">{rows.map(render)}</div>;
 }
 
+function ProductShimmer({
+  width = "100%",
+  height = 12,
+  style,
+}: {
+  width?: string | number;
+  height?: number;
+  style?: CSSProperties;
+}) {
+  return (
+    <div
+      aria-hidden="true"
+      style={{
+        width,
+        height,
+        borderRadius: 4,
+        background:
+          "linear-gradient(90deg, rgba(20,16,10,0.045) 0%, rgba(224,107,63,0.13) 48%, rgba(20,16,10,0.045) 100%)",
+        backgroundSize: "220% 100%",
+        animation: "dhee-shimmer 1.35s linear infinite",
+        border: "1px solid rgba(20,16,10,0.055)",
+        ...style,
+      }}
+    />
+  );
+}
+
+function ProductLoadingSkeleton() {
+  return (
+    <div role="status" aria-live="polite" aria-busy="true" className="product-grid">
+      <Panel>
+        <div className="product-panel-label">Loading Dhee state</div>
+        <div className="product-metric-grid">
+          {Array.from({ length: 4 }).map((_, index) => (
+            <div key={index}>
+              <ProductShimmer width="46%" height={10} />
+              <ProductShimmer width={`${76 - index * 7}%`} height={28} style={{ marginTop: 12 }} />
+              <ProductShimmer width="64%" height={10} style={{ marginTop: 10 }} />
+            </div>
+          ))}
+        </div>
+      </Panel>
+      <div className="product-grid product-grid--two">
+        {Array.from({ length: 2 }).map((_, index) => (
+          <Panel key={index}>
+            <ProductShimmer width="34%" height={10} />
+            <ProductShimmer width={`${78 - index * 10}%`} height={22} style={{ marginTop: 15 }} />
+            <ProductShimmer width="92%" height={12} style={{ marginTop: 12 }} />
+            <ProductShimmer width="68%" height={12} style={{ marginTop: 8 }} />
+          </Panel>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function LoadingState({ loading, error }: { loading: boolean; error: string }) {
-  if (loading) return <Panel>Loading Dhee state...</Panel>;
+  if (loading) return <ProductLoadingSkeleton />;
   if (error) return <Panel><span style={{ color: "var(--rose)" }}>{error}</span></Panel>;
   return null;
 }
@@ -391,30 +447,34 @@ export function ProofReplayView() {
       action={<button onClick={refresh} style={buttonStyle}>refresh</button>}
     >
       <LoadingState loading={loading} error={error} />
-      <div className="product-metric-grid">
-        <Metric label="events" value={compact(get(totals, "events", rows.length))} />
-        <Metric label="digests" value={compact(get(totals, "digests", 0))} tone="var(--green)" />
-        <Metric label="expansion trace" value={compact(get(totals, "expansions", 0))} tone="var(--accent)" />
-        <Metric label="evidence" value={compact(get(totals, "evidence", 0))} tone="var(--indigo)" />
-        <Metric label="derived rows" value={compact(get(totals, "derived", 0))} />
-      </div>
-      <Panel label="DECISION TIMELINE">
-        <RowList
-          rows={rows}
-          empty="No context decisions recorded yet."
-          render={(row, index) => (
-            <TimelineRow
-              key={String(row.id || index)}
-              index={index}
-              title={String(row.title || "Decision")}
-              meta={`${row.source || "dhee"} - ${timeLabel(row.time)}`}
-              detail={String(row.detail || "")}
-              kind={String(row.kind || "event")}
-              derived={Boolean(row.derived)}
+      {data ? (
+        <>
+          <div className="product-metric-grid">
+            <Metric label="events" value={compact(get(totals, "events", rows.length))} />
+            <Metric label="digests" value={compact(get(totals, "digests", 0))} tone="var(--green)" />
+            <Metric label="expansion trace" value={compact(get(totals, "expansions", 0))} tone="var(--accent)" />
+            <Metric label="evidence" value={compact(get(totals, "evidence", 0))} tone="var(--indigo)" />
+            <Metric label="derived rows" value={compact(get(totals, "derived", 0))} />
+          </div>
+          <Panel label="DECISION TIMELINE">
+            <RowList
+              rows={rows}
+              empty="No context decisions recorded yet."
+              render={(row, index) => (
+                <TimelineRow
+                  key={String(row.id || index)}
+                  index={index}
+                  title={String(row.title || "Decision")}
+                  meta={`${row.source || "dhee"} - ${timeLabel(row.time)}`}
+                  detail={String(row.detail || "")}
+                  kind={String(row.kind || "event")}
+                  derived={Boolean(row.derived)}
+                />
+              )}
             />
-          )}
-        />
-      </Panel>
+          </Panel>
+        </>
+      ) : null}
     </Screen>
   );
 }
@@ -442,49 +502,53 @@ export function LearningInboxView() {
       action={<button onClick={refresh} style={buttonStyle}>refresh</button>}
     >
       <LoadingState loading={loading} error={error} />
-      <div className="product-metric-grid">
-        <Metric label="candidates" value={compact(get(totals, "candidate", 0))} tone="var(--accent)" />
-        <Metric label="promoted" value={compact(get(totals, "promoted", 0))} tone="var(--green)" />
-        <Metric label="rejected" value={compact(get(totals, "rejected", 0))} tone="var(--rose)" />
-        <Metric label="all learnings" value={compact(get(totals, "all", rows.length))} />
-      </div>
-      <Panel label="LEARNING REVIEW">
-        <RowList
-          rows={rows}
-          empty="No learning candidates yet."
-          render={(row) => {
-            const id = String(row.id || "");
-            const status = String(row.status || "candidate");
-            const preview = learningPreview(row);
-            const source = String(row.source_harness || row.source_agent_id || "agent");
-            const sourceModel = String(row.source_model || "");
-            return (
-              <div key={id} className="product-learning-row">
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
-                    <Pill tone={toneFor(status)}>{status}</Pill>
-                    <Pill>{String(row.evidence_gate || "needs approval")}</Pill>
-                    {row.needs_distillation ? <Pill tone="var(--rose)">needs distillation</Pill> : null}
-                    <Pill>{source}</Pill>
-                    {sourceModel ? <Pill>{sourceModel}</Pill> : null}
+      {data ? (
+        <>
+          <div className="product-metric-grid">
+            <Metric label="candidates" value={compact(get(totals, "candidate", 0))} tone="var(--accent)" />
+            <Metric label="promoted" value={compact(get(totals, "promoted", 0))} tone="var(--green)" />
+            <Metric label="rejected" value={compact(get(totals, "rejected", 0))} tone="var(--rose)" />
+            <Metric label="all learnings" value={compact(get(totals, "all", rows.length))} />
+          </div>
+          <Panel label="LEARNING REVIEW">
+            <RowList
+              rows={rows}
+              empty="No learning candidates yet."
+              render={(row) => {
+                const id = String(row.id || "");
+                const status = String(row.status || "candidate");
+                const preview = learningPreview(row);
+                const source = String(row.source_harness || row.source_agent_id || "agent");
+                const sourceModel = String(row.source_model || "");
+                return (
+                  <div key={id} className="product-learning-row">
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+                        <Pill tone={toneFor(status)}>{status}</Pill>
+                        <Pill>{String(row.evidence_gate || "needs approval")}</Pill>
+                        {row.needs_distillation ? <Pill tone="var(--rose)">needs distillation</Pill> : null}
+                        <Pill>{source}</Pill>
+                        {sourceModel ? <Pill>{sourceModel}</Pill> : null}
+                      </div>
+                      <div className="product-learning-title">{String(row.title || id)}</div>
+                      <div className="product-learning-meta">{learningMeta(row)}</div>
+                      <div className="product-learning-body" title={preview}>{preview}</div>
+                    </div>
+                    <div className="product-learning-actions">
+                      <button aria-label={`Promote ${id || "learning"}`} disabled={!id || busy === id || status === "promoted"} onClick={() => act(id, "promote")} style={buttonStyle}>
+                        promote
+                      </button>
+                      <button aria-label={`Reject ${id || "learning"}`} disabled={!id || busy === id || status === "rejected"} onClick={() => act(id, "reject")} style={ghostButtonStyle}>
+                        reject
+                      </button>
+                    </div>
                   </div>
-                  <div className="product-learning-title">{String(row.title || id)}</div>
-                  <div className="product-learning-meta">{learningMeta(row)}</div>
-                  <div className="product-learning-body" title={preview}>{preview}</div>
-                </div>
-                <div className="product-learning-actions">
-                  <button aria-label={`Promote ${id || "learning"}`} disabled={!id || busy === id || status === "promoted"} onClick={() => act(id, "promote")} style={buttonStyle}>
-                    promote
-                  </button>
-                  <button aria-label={`Reject ${id || "learning"}`} disabled={!id || busy === id || status === "rejected"} onClick={() => act(id, "reject")} style={ghostButtonStyle}>
-                    reject
-                  </button>
-                </div>
-              </div>
-            );
-          }}
-        />
-      </Panel>
+                );
+              }}
+            />
+          </Panel>
+        </>
+      ) : null}
     </Screen>
   );
 }
@@ -527,49 +591,53 @@ export function PortabilityTrustView() {
       action={<button onClick={refresh} style={buttonStyle}>refresh</button>}
     >
       <LoadingState loading={loading} error={error} />
-      <div className="product-metric-grid">
-        <Metric label="memories" value={compact(get(counts, "memories", 0))} />
-        <Metric label="artifacts" value={compact(get(counts, "artifacts", 0))} tone="var(--indigo)" />
-        <Metric label="repo context" value={compact(get(counts, "repo_context_entries", 0))} tone="var(--green)" />
-        <Metric label="packs found" value={compact(packs.length)} tone="var(--accent)" />
-      </div>
-      {actionError ? <Panel><span style={{ color: "var(--rose)" }}>{actionError}</span></Panel> : null}
-      <div className="product-grid product-grid--split">
-        <Panel label="PORTABLE SUBSTRATE">
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            {contract.map((item) => <Pill key={item} tone="var(--green)">{item}</Pill>)}
+      {data ? (
+        <>
+          <div className="product-metric-grid">
+            <Metric label="memories" value={compact(get(counts, "memories", 0))} />
+            <Metric label="artifacts" value={compact(get(counts, "artifacts", 0))} tone="var(--indigo)" />
+            <Metric label="repo context" value={compact(get(counts, "repo_context_entries", 0))} tone="var(--green)" />
+            <Metric label="packs found" value={compact(packs.length)} tone="var(--accent)" />
           </div>
-          <button disabled={exporting} onClick={doExport} style={{ ...buttonStyle, marginTop: 16 }}>
-            {exporting ? "exporting..." : "export .dheemem"}
-          </button>
-        </Panel>
-        <Panel label="IMPORT DRY RUN">
-          <div style={{ display: "flex", gap: 10 }}>
-            <input
-              value={packPath}
-              onChange={(e) => setPackPath(e.target.value)}
-              placeholder="/path/to/backup.dheemem"
-              style={inputStyle}
-            />
-            <button disabled={!packPath.trim()} onClick={doDryRun} style={buttonStyle}>dry run</button>
+          {actionError ? <Panel><span style={{ color: "var(--rose)" }}>{actionError}</span></Panel> : null}
+          <div className="product-grid product-grid--split">
+            <Panel label="PORTABLE SUBSTRATE">
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {contract.map((item) => <Pill key={item} tone="var(--green)">{item}</Pill>)}
+              </div>
+              <button disabled={exporting} onClick={doExport} style={{ ...buttonStyle, marginTop: 16 }}>
+                {exporting ? "exporting..." : "export .dheemem"}
+              </button>
+            </Panel>
+            <Panel label="IMPORT DRY RUN">
+              <div style={{ display: "flex", gap: 10 }}>
+                <input
+                  value={packPath}
+                  onChange={(e) => setPackPath(e.target.value)}
+                  placeholder="/path/to/backup.dheemem"
+                  style={inputStyle}
+                />
+                <button disabled={!packPath.trim()} onClick={doDryRun} style={buttonStyle}>dry run</button>
+              </div>
+              {dryRun ? <pre style={preStyle}>{JSON.stringify(get(dryRun, "result", dryRun), null, 2)}</pre> : null}
+            </Panel>
           </div>
-          {dryRun ? <pre style={preStyle}>{JSON.stringify(get(dryRun, "result", dryRun), null, 2)}</pre> : null}
-        </Panel>
-      </div>
-      <Panel label="RECENT PACKS">
-        <RowList
-          rows={packs}
-          empty="No .dheemem packs found yet."
-          render={(row) => (
-            <SmallRow
-              key={String(row.path)}
-              title={String(row.name || row.path)}
-              meta={`${row.verified ? "verified" : "unverified"} - ${compact(Number(row.size_bytes || 0))} bytes - ${timeLabel(row.updated_at)}`}
-              tone={row.verified ? "var(--green)" : "var(--accent)"}
+          <Panel label="RECENT PACKS">
+            <RowList
+              rows={packs}
+              empty="No .dheemem packs found yet."
+              render={(row) => (
+                <SmallRow
+                  key={String(row.path)}
+                  title={String(row.name || row.path)}
+                  meta={`${row.verified ? "verified" : "unverified"} - ${compact(Number(row.size_bytes || 0))} bytes - ${timeLabel(row.updated_at)}`}
+                  tone={row.verified ? "var(--green)" : "var(--accent)"}
+                />
+              )}
             />
-          )}
-        />
-      </Panel>
+          </Panel>
+        </>
+      ) : null}
     </Screen>
   );
 }
