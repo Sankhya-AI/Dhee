@@ -409,6 +409,28 @@ input {
   gap: 14px;
 }
 
+/* ── Repo Brain canvas chrome ─────────────────────────────────────────── */
+.repo-brain-header {
+  position: absolute;
+  left: 16px;
+  top: 14px;
+  z-index: 8;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  max-width: calc(100% - 32px);
+  pointer-events: auto;
+}
+.repo-brain-header .product-pill,
+.repo-brain-header button {
+  flex: 0 0 auto;
+}
+.repo-brain-local-controls {
+  left: 16px !important;
+  top: 56px !important;
+  max-width: calc(100% - 24px);
+}
+
 /* ── Router: live/history cards ───────────────────────────────────────── */
 .router-active-card__grid {
   display: grid;
@@ -766,6 +788,26 @@ input {
     border-top: 1px solid var(--border);
     overflow: visible;
     padding: 14px;
+  }
+  .repo-brain-header {
+    left: 12px;
+    right: 12px;
+    top: 12px;
+    max-width: none;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .repo-brain-header .product-pill,
+  .repo-brain-header button {
+    min-height: 24px;
+    max-width: 100%;
+  }
+  .repo-brain-local-controls {
+    left: 12px !important;
+    top: 92px !important;
+    right: 12px;
+    align-items: flex-start !important;
+    flex-wrap: wrap;
   }
   .router-active-card__button {
     padding: 12px !important;

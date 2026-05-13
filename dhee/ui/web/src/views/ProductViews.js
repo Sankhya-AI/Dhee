@@ -207,16 +207,7 @@ export function PortabilityTrustView() {
     return (_jsxs(Screen, { eyebrow: "PORTABILITY & TRUST", title: "Local memory should be inspectable, signed, and movable.", subtitle: "Dhee keeps export/import as a product surface, not an afterthought. No lock-in tricks, no hidden hosted dependency.", action: _jsx("button", { onClick: refresh, style: buttonStyle, children: "refresh" }), children: [_jsx(LoadingState, { loading: loading, error: error }), _jsxs("div", { className: "product-metric-grid", children: [_jsx(Metric, { label: "memories", value: compact(get(counts, "memories", 0)) }), _jsx(Metric, { label: "artifacts", value: compact(get(counts, "artifacts", 0)), tone: "var(--indigo)" }), _jsx(Metric, { label: "repo context", value: compact(get(counts, "repo_context_entries", 0)), tone: "var(--green)" }), _jsx(Metric, { label: "packs found", value: compact(packs.length), tone: "var(--accent)" })] }), actionError ? _jsx(Panel, { children: _jsx("span", { style: { color: "var(--rose)" }, children: actionError }) }) : null, _jsxs("div", { className: "product-grid product-grid--split", children: [_jsxs(Panel, { label: "PORTABLE SUBSTRATE", children: [_jsx("div", { style: { display: "flex", gap: 8, flexWrap: "wrap" }, children: contract.map((item) => _jsx(Pill, { tone: "var(--green)", children: item }, item)) }), _jsx("button", { disabled: exporting, onClick: doExport, style: { ...buttonStyle, marginTop: 16 }, children: exporting ? "exporting..." : "export .dheemem" })] }), _jsxs(Panel, { label: "IMPORT DRY RUN", children: [_jsxs("div", { style: { display: "flex", gap: 10 }, children: [_jsx("input", { value: packPath, onChange: (e) => setPackPath(e.target.value), placeholder: "/path/to/backup.dheemem", style: inputStyle }), _jsx("button", { disabled: !packPath.trim(), onClick: doDryRun, style: buttonStyle, children: "dry run" })] }), dryRun ? _jsx("pre", { style: preStyle, children: JSON.stringify(get(dryRun, "result", dryRun), null, 2) }) : null] })] }), _jsx(Panel, { label: "RECENT PACKS", children: _jsx(RowList, { rows: packs, empty: "No .dheemem packs found yet.", render: (row) => (_jsx(SmallRow, { title: String(row.name || row.path), meta: `${row.verified ? "verified" : "unverified"} - ${compact(Number(row.size_bytes || 0))} bytes - ${timeLabel(row.updated_at)}`, tone: row.verified ? "var(--green)" : "var(--accent)" }, String(row.path))) }) })] }));
 }
 export function RepoBrainHeader({ onOpenContext }) {
-    return (_jsxs("div", { style: {
-            position: "absolute",
-            left: 68,
-            top: 14,
-            zIndex: 8,
-            display: "flex",
-            gap: 10,
-            alignItems: "center",
-            pointerEvents: "auto",
-        }, children: [_jsx(Pill, { tone: "var(--green)", children: "REPO BRAIN" }), _jsx(Pill, { children: "dhee://state/current" }), _jsx(Pill, { children: "dhee://handoff/latest" }), onOpenContext ? _jsx("button", { onClick: onOpenContext, style: ghostButtonStyle, children: "context vault" }) : null] }));
+    return (_jsxs("div", { className: "repo-brain-header", children: [_jsx(Pill, { tone: "var(--green)", children: "REPO BRAIN" }), _jsx(Pill, { children: "dhee://state/current" }), _jsx(Pill, { children: "dhee://handoff/latest" }), onOpenContext ? _jsx("button", { onClick: onOpenContext, style: ghostButtonStyle, children: "context vault" }) : null] }));
 }
 function TextList({ rows, empty }) {
     if (!rows.length)

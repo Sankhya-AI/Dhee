@@ -516,18 +516,7 @@ export function PortabilityTrustView() {
 
 export function RepoBrainHeader({ onOpenContext }: { onOpenContext?: () => void }) {
   return (
-    <div
-      style={{
-        position: "absolute",
-        left: 68,
-        top: 14,
-        zIndex: 8,
-        display: "flex",
-        gap: 10,
-        alignItems: "center",
-        pointerEvents: "auto",
-      }}
-    >
+    <div className="repo-brain-header">
       <Pill tone="var(--green)">REPO BRAIN</Pill>
       <Pill>dhee://state/current</Pill>
       <Pill>dhee://handoff/latest</Pill>

@@ -355,7 +355,7 @@ export function OrgCanvas({ graph, viewer, onOpenVault, onOpenSession, onChanged
                                 }, style: { cursor: "pointer" }, children: [_jsx("rect", { x: p.x - p.w / 2, y: p.y, width: p.w, height: p.h, rx: 8, ry: 8, fill: fill, stroke: stroke, strokeWidth: isSelected ? 2.4 : n.type === "workspace" ? 1.6 : 1.2 }), n.type === "workspace" ? (_jsx("text", { x: p.x, y: p.y + 24, textAnchor: "middle", fontFamily: "var(--mono)", fontSize: 9, letterSpacing: "0.12em", fill: "var(--ink3)", pointerEvents: "none", children: "WORKSPACE" })) : null, _jsx("text", { x: p.x, y: n.type === "workspace"
                                             ? p.y + 50
                                             : p.y + p.h / 2 + 4, textAnchor: "middle", fontFamily: "var(--font)", fontSize: n.type === "workspace" ? 16 : 12, fontWeight: n.type === "workspace" ? 500 : 400, fill: "var(--ink)", pointerEvents: "none", children: truncate(n.label, n.type === "workspace" ? 30 : 22) }), n.type !== "workspace" ? (_jsx("text", { x: p.x, y: p.y + 16, textAnchor: "middle", fontFamily: "var(--mono)", fontSize: 8, letterSpacing: "0.1em", fill: "var(--ink3)", pointerEvents: "none", children: nodeTypeLabel(n) })) : null] }, n.id));
-                        })] }) }), isLocalContext ? (_jsxs("div", { style: {
+                        })] }) }), isLocalContext ? (_jsxs("div", { className: "repo-brain-local-controls", style: {
                     position: "absolute",
                     left: 12,
                     top: 12,
