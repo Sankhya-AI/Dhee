@@ -117,8 +117,9 @@ export function ConflictView({ viewer, onChanged }: ConflictViewProps) {
   };
 
   return (
-    <div style={{ display: "flex", height: "100%", minHeight: 0 }}>
+    <div className="inbox-shell" style={{ display: "flex", height: "100%", minHeight: 0 }}>
       <aside
+        className="inbox-sidebar"
         style={{
           width: 300,
           borderRight: "1px solid var(--border)",
@@ -188,6 +189,7 @@ export function ConflictView({ viewer, onChanged }: ConflictViewProps) {
       </aside>
 
       <main
+        className="inbox-main"
         style={{
           flex: 1,
           minWidth: 0,
@@ -220,7 +222,10 @@ export function ConflictView({ viewer, onChanged }: ConflictViewProps) {
                 <Badge color="var(--accent)">pending</Badge>
               </div>
               <p style={snippetStyle}>{proposalSnippet(proposal) || "No preview available."}</p>
-              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <div
+                className="inbox-actions"
+                style={{ display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap" }}
+              >
                 <QueueButton
                   label="Open in Context"
                   onClick={(e) => {
@@ -276,7 +281,10 @@ export function ConflictView({ viewer, onChanged }: ConflictViewProps) {
                 </Badge>
               </div>
               <p style={snippetStyle}>{finding.detail}</p>
-              <div style={{ display: "flex", justifyContent: "flex-end" }}>
+              <div
+                className="inbox-actions"
+                style={{ display: "flex", justifyContent: "flex-end", flexWrap: "wrap" }}
+              >
                 <QueueButton
                   label="Resolve"
                   color="var(--green)"
@@ -322,7 +330,10 @@ export function ConflictView({ viewer, onChanged }: ConflictViewProps) {
                   <ConflictQuote label="A" text={c.belief_a?.content} />
                   <ConflictQuote label="B" text={c.belief_b?.content} />
                 </div>
-                <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 10 }}>
+                <div
+                  className="inbox-actions"
+                  style={{ display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap", marginTop: 10 }}
+                >
                   {["KEEP A", "KEEP B", "MERGE"].map((action) => (
                     <QueueButton
                       key={action}

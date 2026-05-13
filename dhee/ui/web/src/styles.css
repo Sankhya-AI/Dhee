@@ -431,6 +431,23 @@ input {
   max-width: calc(100% - 24px);
 }
 
+/* ── Inbox queue ──────────────────────────────────────────────────────── */
+.inbox-shell,
+.inbox-sidebar,
+.inbox-main {
+  min-width: 0;
+}
+.inbox-sidebar {
+  box-shadow: 1px 0 0 rgba(255, 255, 255, 0.55) inset;
+}
+.inbox-main section,
+.inbox-main article {
+  min-width: 0;
+}
+.inbox-actions {
+  min-width: 0;
+}
+
 /* ── Router: live/history cards ───────────────────────────────────────── */
 .router-active-card__grid {
   display: grid;
@@ -808,6 +825,24 @@ input {
     right: 12px;
     align-items: flex-start !important;
     flex-wrap: wrap;
+  }
+  .inbox-shell {
+    display: block !important;
+    overflow-y: auto;
+    background: var(--bg);
+  }
+  .inbox-sidebar {
+    width: 100% !important;
+    border-right: 0 !important;
+    border-bottom: 1px solid var(--border);
+    overflow: visible !important;
+  }
+  .inbox-main {
+    overflow: visible !important;
+    padding: 14px !important;
+  }
+  .inbox-actions {
+    justify-content: flex-start !important;
   }
   .router-active-card__button {
     padding: 12px !important;
