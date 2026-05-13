@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/dhee-logo.png" alt="Dhee" width="80">
+  <img src="docs/dhee-hero.png" alt="Dhee - the context firewall for AI coding agents" width="100%">
 </p>
 
 <h1 align="center">Dhee</h1>
@@ -65,6 +65,14 @@ Run the local Dhee workspace UI. It needs no API key and no connected agent:
 ```bash
 dhee ui
 ```
+
+<p align="center">
+  <video src="docs/dhee-ui-demo.mp4" controls muted loop poster="docs/dhee-ui-demo-poster.png" width="100%"></video>
+</p>
+
+<p align="center">
+  <a href="docs/dhee-ui-demo.mp4">Watch the 13-second UI demo</a>
+</p>
 
 The UI opens on a command center, then lets you inspect:
 
