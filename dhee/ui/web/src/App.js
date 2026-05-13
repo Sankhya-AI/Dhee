@@ -51,6 +51,8 @@ function normalizeView(view) {
         return "learnings";
     if (raw === "packs" || raw === "portable" || raw === "trust")
         return "portability";
+    if (raw === "inbox" || raw === "review" || raw === "queue")
+        return "conflicts";
     if (raw === "router/sessionshistory" ||
         raw === "router/session-history" ||
         raw === "router/history")

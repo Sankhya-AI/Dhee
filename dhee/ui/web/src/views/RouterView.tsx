@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { FirstRunPanel } from "../components/FirstRunPanel";
@@ -221,15 +221,25 @@ function RouterSavingsDashboard({
   const load = async (silent = false) => {
     if (!silent) setLoading(true);
     setError(null);
+    const activeRequest = api.routerSessions({ active: true, limit: 50 }).then(
+      (page) => ({ ok: true as const, page }),
+      (error) => ({ ok: false as const, error })
+    );
+    const historyRequest = api.routerSessions({ active: false, limit: 100 }).then(
+      (page) => ({ ok: true as const, page }),
+      (error) => ({ ok: false as const, error })
+    );
+    const errors: string[] = [];
     try {
-      const [history, active] = await Promise.all([
-        api.routerSessions({ active: false, limit: 100 }),
-        api.routerSessions({ active: true, limit: 50 }),
-      ]);
-      setHistoryPage(history);
-      setActivePage(active);
-    } catch (e) {
-      setError(String(e));
+      const active = await activeRequest;
+      if (active.ok) setActivePage(active.page);
+      else errors.push(String(active.error));
+
+      const history = await historyRequest;
+      if (history.ok) setHistoryPage(history.page);
+      else errors.push(String(history.error));
+
+      if (errors.length) setError(errors.join("; "));
     } finally {
       if (!silent) setLoading(false);
     }
@@ -419,38 +429,42 @@ function RouterSavingsDashboard({
           })}
         </div>
 
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(118px, 1fr))",
-            gap: 10,
-          }}
-        >
-          <MetricCard
-            label={`${selectedRange.label} API value`}
-            value={formatMoney(rangeTotals.apiValue)}
-            sub="official input-rate estimate"
-            accent="var(--green)"
-          />
-          <MetricCard
-            label="Budget-capped savings"
-            value={formatMoney(rangeTotals.cost)}
-            sub={cappedByBudget ? `capped at ${formatMoney(budgetCap)}` : "same as API value for this range"}
-            accent="var(--green)"
-          />
-          <MetricCard
-            label={`${selectedRange.label} raw tokens avoided`}
-            value={formatCompactNumber(rangeTotals.tokens)}
-            sub={`${formatInteger(rangeTotals.tokens)} avoided input tokens`}
-            accent="var(--green)"
-          />
-          <MetricCard
-            label="Live governed sessions"
-            value={formatInteger(activeTotals.sessions)}
-            sub={`${formatCompactNumber(activeTotals.tokens)} active-session savings`}
-            accent="var(--accent)"
-          />
-        </div>
+        {loading && !hasAnySessions ? (
+          <RouterMetricSkeleton />
+        ) : (
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(118px, 1fr))",
+              gap: 10,
+            }}
+          >
+            <MetricCard
+              label={`${selectedRange.label} API value`}
+              value={formatMoney(rangeTotals.apiValue)}
+              sub="official input-rate estimate"
+              accent="var(--green)"
+            />
+            <MetricCard
+              label="Budget-capped savings"
+              value={formatMoney(rangeTotals.cost)}
+              sub={cappedByBudget ? `capped at ${formatMoney(budgetCap)}` : "same as API value for this range"}
+              accent="var(--green)"
+            />
+            <MetricCard
+              label={`${selectedRange.label} raw tokens avoided`}
+              value={formatCompactNumber(rangeTotals.tokens)}
+              sub={`${formatInteger(rangeTotals.tokens)} avoided input tokens`}
+              accent="var(--green)"
+            />
+            <MetricCard
+              label="Live governed sessions"
+              value={formatInteger(activeTotals.sessions)}
+              sub={`${formatCompactNumber(activeTotals.tokens)} active-session savings`}
+              accent="var(--accent)"
+            />
+          </div>
+        )}
       </section>
 
       {error ? (
@@ -536,8 +550,12 @@ function RouterSavingsDashboard({
             </button>
           }
         >
-          {activeRows.length === 0 ? (
-            <EmptyState>No active Claude Code or Codex sessions detected.</EmptyState>
+          {loading && activeRows.length === 0 ? (
+            <ActiveSessionsSkeleton />
+          ) : activeRows.length === 0 ? (
+            <EmptyState>
+              No active Claude Code or Codex sessions detected.
+            </EmptyState>
           ) : (
             <div style={{ display: "grid", gap: 8 }}>
               {activeRows.map((row) => (
@@ -573,6 +591,7 @@ function ActiveSessionCard({
   const live = row.live_usage;
   return (
     <div
+      className="router-active-card"
       style={{
         width: "100%",
         border: `1px solid ${selected ? color : "var(--border)"}`,
@@ -583,6 +602,7 @@ function ActiveSessionCard({
     >
       <button
         type="button"
+        className="router-active-card__button"
         aria-expanded={selected}
         onClick={onSelect}
         style={{
@@ -594,24 +614,15 @@ function ActiveSessionCard({
           cursor: "pointer",
         }}
       >
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "minmax(0, 1fr) repeat(3, minmax(86px, max-content)) 22px",
-            gap: 16,
-            alignItems: "center",
-          }}
-        >
-          <div style={{ minWidth: 0 }}>
+        <div className="router-active-card__grid">
+          <div className="router-active-card__main">
             <AgentBadge agent={row.agent || row.runtime || "unknown"} />
             <div
+              className="router-active-card__title"
               style={{
                 fontSize: 15,
                 fontWeight: 600,
                 color: "var(--ink)",
-                whiteSpace: "nowrap",
-                textOverflow: "ellipsis",
-                overflow: "hidden",
                 marginTop: 4,
               }}
               title={row.title}
@@ -619,6 +630,7 @@ function ActiveSessionCard({
               {row.title || row.session_id}
             </div>
             <div
+              className="router-active-card__meta"
               style={{
                 fontFamily: "var(--mono)",
                 fontSize: 10,
@@ -630,13 +642,16 @@ function ActiveSessionCard({
               {shortPath(row.repo_root || row.cwd)} - updated {relTime(row.updated_at)}
             </div>
           </div>
-          <MiniStat label="saved" value={formatCompactNumber(row.tokens_saved)} />
-          <MiniStat label="API value" value={sessionCostLabel(row)} />
-          <MiniStat
-            label="live tokens"
-            value={live?.available ? formatCompactNumber(live.total_tokens) : "n/a"}
-          />
+          <div className="router-active-card__stats">
+            <MiniStat label="saved" value={formatCompactNumber(row.tokens_saved)} />
+            <MiniStat label="API value" value={sessionCostLabel(row)} />
+            <MiniStat
+              label="live tokens"
+              value={live?.available ? formatCompactNumber(live.total_tokens) : "n/a"}
+            />
+          </div>
           <div
+            className="router-active-card__toggle"
             style={{
               fontFamily: "var(--mono)",
               fontSize: 18,
@@ -676,95 +691,309 @@ function SessionTable({
   onSelect: (id: string) => void;
   loading: boolean;
 }) {
+  if (loading && rows.length === 0) {
+    return <SessionTableSkeleton />;
+  }
   if (rows.length === 0) {
-    return <EmptyState>{loading ? "Loading sessions..." : "No sessions in this range."}</EmptyState>;
+    return <EmptyState>No sessions in this range.</EmptyState>;
   }
   return (
-    <div
-      style={{
-        border: "1px solid var(--border)",
-        borderRadius: 6,
-        overflowX: "auto",
-        background: "white",
-      }}
-    >
-      <table
+    <>
+      <div
+        className="router-session-table"
         style={{
-          width: "100%",
-          borderCollapse: "collapse",
-          fontFamily: "var(--mono)",
-          fontSize: 11,
+          border: "1px solid var(--border)",
+          borderRadius: 6,
+          overflowX: "auto",
+          background: "white",
         }}
       >
-        <thead>
-          <tr style={{ background: "var(--surface)" }}>
-            <Th>Session</Th>
-            <Th>Agent</Th>
-            <Th>State</Th>
-            <Th>Updated</Th>
-            <Th align="right">Tokens saved</Th>
-            <Th align="right">API value</Th>
-            <Th align="right">Calls</Th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => {
-            const selected = selectedId === row.session_id;
-            return (
-              <tr
-                key={row.session_id}
-                onClick={() => onSelect(row.session_id)}
-                style={{
-                  borderTop: "1px solid var(--border)",
-                  background: selected ? "oklch(0.98 0.02 262)" : "white",
-                  cursor: "pointer",
-                }}
+        <table
+          style={{
+            width: "100%",
+            borderCollapse: "collapse",
+            fontFamily: "var(--mono)",
+            fontSize: 11,
+          }}
+        >
+          <thead>
+            <tr style={{ background: "var(--surface)" }}>
+              <Th>Session</Th>
+              <Th>Agent</Th>
+              <Th>State</Th>
+              <Th>Updated</Th>
+              <Th align="right">Tokens saved</Th>
+              <Th align="right">API value</Th>
+              <Th align="right">Calls</Th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => {
+              const selected = selectedId === row.session_id;
+              return (
+                <tr
+                  key={row.session_id}
+                  onClick={() => onSelect(row.session_id)}
+                  style={{
+                    borderTop: "1px solid var(--border)",
+                    background: selected ? "oklch(0.98 0.02 262)" : "white",
+                    cursor: "pointer",
+                  }}
+                >
+                  <Td title={row.title || row.session_id}>
+                    <div
+                      style={{
+                        color: "var(--ink)",
+                        fontWeight: selected ? 700 : 500,
+                        maxWidth: 420,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {row.title || row.session_id}
+                    </div>
+                    <div
+                      style={{
+                        color: "var(--ink3)",
+                        marginTop: 2,
+                        maxWidth: 420,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                      title={row.cwd || row.repo_root}
+                    >
+                      {shortPath(row.repo_root || row.cwd)}
+                    </div>
+                  </Td>
+                  <Td>
+                    <AgentBadge agent={row.agent || row.runtime || "unknown"} />
+                  </Td>
+                  <Td>
+                    <StateBadge state={row.state} active={row.active} />
+                  </Td>
+                  <Td>{relTime(row.updated_at)}</Td>
+                  <Td align="right">{formatInteger(row.tokens_saved)}</Td>
+                  <Td align="right" title={pricingLabel(row)}>
+                    {sessionCostLabel(row)}
+                  </Td>
+                  <Td align="right">{formatInteger(row.router_calls)}</Td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div className="router-session-cards" aria-label="Session history cards">
+        {rows.map((row) => {
+          const selected = selectedId === row.session_id;
+          return (
+            <button
+              key={row.session_id}
+              type="button"
+              className={`router-session-card${selected ? " router-session-card--active" : ""}`}
+              onClick={() => onSelect(row.session_id)}
+              aria-pressed={selected}
+            >
+              <div className="router-session-card__head">
+                <div className="router-session-card__title" title={row.title || row.session_id}>
+                  {row.title || row.session_id}
+                </div>
+                <StateBadge state={row.state} active={row.active} />
+              </div>
+              <div className="router-session-card__meta">
+                <AgentBadge agent={row.agent || row.runtime || "unknown"} />
+                <span>{relTime(row.updated_at)}</span>
+              </div>
+              <div
+                className="router-session-card__path"
+                title={row.cwd || row.repo_root || undefined}
               >
-                <Td title={row.title || row.session_id}>
-                  <div
-                    style={{
-                      color: "var(--ink)",
-                      fontWeight: selected ? 700 : 500,
-                      maxWidth: 420,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    {row.title || row.session_id}
-                  </div>
-                  <div
-                    style={{
-                      color: "var(--ink3)",
-                      marginTop: 2,
-                      maxWidth: 420,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
-                    title={row.cwd || row.repo_root}
-                  >
-                    {shortPath(row.repo_root || row.cwd)}
-                  </div>
-                </Td>
-                <Td>
-                  <AgentBadge agent={row.agent || row.runtime || "unknown"} />
-                </Td>
-                <Td>
-                  <StateBadge state={row.state} active={row.active} />
-                </Td>
-                <Td>{relTime(row.updated_at)}</Td>
-                <Td align="right">{formatInteger(row.tokens_saved)}</Td>
-                <Td align="right" title={pricingLabel(row)}>
-                  {sessionCostLabel(row)}
-                </Td>
-                <Td align="right">{formatInteger(row.router_calls)}</Td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+                {shortPath(row.repo_root || row.cwd)}
+              </div>
+              <div className="router-session-card__stats">
+                <MiniStat label="saved" value={formatCompactNumber(row.tokens_saved)} />
+                <MiniStat label="API value" value={sessionCostLabel(row)} />
+                <MiniStat label="calls" value={formatInteger(row.router_calls)} />
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </>
+  );
+}
+
+function ShimmerBlock({
+  width = "100%",
+  height = 12,
+  radius = 4,
+  style,
+}: {
+  width?: string | number;
+  height?: number;
+  radius?: number;
+  style?: CSSProperties;
+}) {
+  return (
+    <div
+      aria-hidden="true"
+      style={{
+        width,
+        height,
+        borderRadius: radius,
+        background:
+          "linear-gradient(90deg, rgba(20,16,10,0.045) 0%, rgba(224,107,63,0.13) 48%, rgba(20,16,10,0.045) 100%)",
+        backgroundSize: "220% 100%",
+        animation: "dhee-shimmer 1.35s linear infinite",
+        border: "1px solid rgba(20,16,10,0.055)",
+        ...style,
+      }}
+    />
+  );
+}
+
+function SkeletonShell({
+  label,
+  children,
+}: {
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <div role="status" aria-live="polite" aria-busy="true" style={{ display: "grid", gap: 10 }}>
+      <div
+        style={{
+          fontFamily: "var(--mono)",
+          fontSize: 10,
+          color: "var(--ink3)",
+          textTransform: "uppercase",
+          letterSpacing: "0.08em",
+        }}
+      >
+        {label}
+      </div>
+      {children}
     </div>
+  );
+}
+
+function RouterMetricSkeleton() {
+  return (
+    <SkeletonShell label="Loading router savings">
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(118px, 1fr))",
+          gap: 10,
+        }}
+      >
+        {Array.from({ length: 4 }).map((_, index) => (
+          <div
+            key={index}
+            style={{
+              border: "1px solid var(--border)",
+              background: "white",
+              borderRadius: 6,
+              padding: 11,
+            }}
+          >
+            <ShimmerBlock width="42%" height={10} />
+            <ShimmerBlock width="70%" height={28} style={{ marginTop: 12 }} />
+            <ShimmerBlock width="82%" height={11} style={{ marginTop: 11 }} />
+          </div>
+        ))}
+      </div>
+    </SkeletonShell>
+  );
+}
+
+function ActiveSessionsSkeleton() {
+  return (
+    <SkeletonShell label="Loading active sessions">
+      {Array.from({ length: 3 }).map((_, index) => (
+        <div
+          key={index}
+          className="router-active-card"
+          style={{
+            width: "100%",
+            border: "1px solid var(--border)",
+            background: "white",
+            borderRadius: 6,
+            padding: 12,
+            boxSizing: "border-box",
+          }}
+        >
+          <div className="router-active-card__grid">
+            <div className="router-active-card__main">
+              <ShimmerBlock width={index === 0 ? 76 : 92} height={18} radius={4} />
+              <ShimmerBlock width={`${72 - index * 8}%`} height={16} style={{ marginTop: 10 }} />
+              <ShimmerBlock width={`${48 + index * 12}%`} height={10} style={{ marginTop: 7 }} />
+            </div>
+            <div className="router-active-card__stats">
+              <ShimmerBlock height={30} />
+              <ShimmerBlock height={30} />
+              <ShimmerBlock height={30} />
+            </div>
+            <ShimmerBlock width={18} height={18} radius={9} />
+          </div>
+        </div>
+      ))}
+    </SkeletonShell>
+  );
+}
+
+function SessionTableSkeleton() {
+  return (
+    <SkeletonShell label="Loading session history">
+      <div
+        className="router-session-table"
+        style={{
+          border: "1px solid var(--border)",
+          borderRadius: 6,
+          overflow: "hidden",
+          background: "white",
+          padding: 12,
+        }}
+      >
+        {Array.from({ length: 6 }).map((_, index) => (
+          <div
+            key={index}
+            style={{
+              display: "grid",
+              gridTemplateColumns: "minmax(220px, 1fr) 90px 80px 80px 110px 90px 70px",
+              gap: 14,
+              padding: "9px 0",
+              borderTop: index === 0 ? 0 : "1px solid var(--border)",
+              alignItems: "center",
+            }}
+          >
+            <ShimmerBlock width={`${70 - index * 4}%`} height={12} />
+            <ShimmerBlock width="72%" height={18} />
+            <ShimmerBlock width="68%" height={18} />
+            <ShimmerBlock width="62%" height={12} />
+            <ShimmerBlock width="82%" height={12} />
+            <ShimmerBlock width="70%" height={12} />
+            <ShimmerBlock width="56%" height={12} />
+          </div>
+        ))}
+      </div>
+      <div className="router-session-cards" aria-hidden="true">
+        {Array.from({ length: 3 }).map((_, index) => (
+          <div key={index} className="router-session-card">
+            <ShimmerBlock width="64%" height={15} />
+            <ShimmerBlock width="42%" height={10} />
+            <ShimmerBlock width="76%" height={10} />
+            <div className="router-session-card__stats">
+              <ShimmerBlock height={28} />
+              <ShimmerBlock height={28} />
+              <ShimmerBlock height={28} />
+            </div>
+          </div>
+        ))}
+      </div>
+    </SkeletonShell>
   );
 }
 
@@ -1094,7 +1323,7 @@ function MetricCard({
 
 function MiniStat({ label, value }: { label: string; value: string }) {
   return (
-    <div style={{ minWidth: 80 }}>
+    <div className="router-mini-stat" style={{ minWidth: 0 }}>
       <div
         style={{
           fontFamily: "var(--mono)",
@@ -1114,7 +1343,10 @@ function MiniStat({ label, value }: { label: string; value: string }) {
           fontWeight: 700,
           color: "var(--ink)",
           whiteSpace: "nowrap",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
         }}
+        title={value}
       >
         {value}
       </div>

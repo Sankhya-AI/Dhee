@@ -747,18 +747,11 @@ export function MemoryView({
   );
 
   return (
-    <div style={{ display: "flex", height: "100%", minHeight: 0 }}>
+    <div className="vault-shell">
       <aside
-        style={{
-          width: 282,
-          borderRight: "1px solid var(--border)",
-          background: "white",
-          display: "flex",
-          flexDirection: "column",
-          flexShrink: 0,
-        }}
+        className="vault-nav"
       >
-        <div style={{ padding: 14, borderBottom: "1px solid var(--border)" }}>
+        <div className="vault-nav-head">
           <div
             style={{
               display: "flex",
@@ -845,7 +838,7 @@ export function MemoryView({
           </div>
         </div>
         <div
-          style={{ flex: 1, overflowY: "auto", padding: 10 }}
+          className="vault-tree"
           role="tree"
           aria-label="Context categories"
         >
@@ -939,26 +932,11 @@ export function MemoryView({
       </aside>
 
       <main
-        style={{
-          flex: 1,
-          minWidth: 0,
-          display: "grid",
-          gridTemplateColumns: "minmax(0, 1fr) 320px",
-          background: "var(--bg)",
-        }}
+        className="vault-main"
       >
-        <section style={{ minWidth: 0, display: "flex", flexDirection: "column" }}>
+        <section className="vault-editor">
           <header
-            style={{
-              height: 52,
-              borderBottom: "1px solid var(--border)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              padding: "0 18px",
-              background: "white",
-              gap: 12,
-            }}
+            className="vault-editor-header"
           >
             <div style={{ minWidth: 0 }}>
               <div
@@ -986,7 +964,7 @@ export function MemoryView({
                 {draft.title || "New context item"}
               </div>
             </div>
-            <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+            <div className="vault-editor-actions">
               {selectedItem?.proposal_status === "pending_review" &&
               (viewer?.role === "manager" || viewer?.role === "admin") ? (
                 <>
@@ -1022,16 +1000,7 @@ export function MemoryView({
           </header>
 
           <div
-            style={{
-              flex: 1,
-              minHeight: 0,
-              overflow: "auto",
-              padding: 18,
-              display: "grid",
-              gridTemplateColumns: editing ? "minmax(0, 1fr) minmax(0, 1fr)" : "minmax(0, 760px)",
-              gap: 16,
-              alignContent: "start",
-            }}
+            className={`vault-body${editing && !selectedReadOnly ? " vault-body--editing" : ""}`}
           >
             {editing && !selectedReadOnly ? (
               <div style={{ display: "grid", gap: 10, alignContent: "start" }}>
@@ -1041,7 +1010,7 @@ export function MemoryView({
                   placeholder="Context title"
                   style={inputStyle}
                 />
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                <div className="vault-form-grid">
                   <select
                     value={draft.scope}
                     onChange={(e) => setDraft((d) => ({ ...d, scope: e.target.value }))}
@@ -1061,7 +1030,7 @@ export function MemoryView({
                     style={inputStyle}
                   />
                 </div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                <div className="vault-form-grid">
                   <input
                     value={draft.project_id}
                     onChange={(e) => setDraft((d) => ({ ...d, project_id: e.target.value }))}
@@ -1097,13 +1066,7 @@ export function MemoryView({
               </div>
             ) : null}
             <article
-              style={{
-                border: "1px solid var(--border)",
-                background: "white",
-                padding: 18,
-                minHeight: 420,
-                boxShadow: "0 10px 28px rgba(20,16,10,0.04)",
-              }}
+              className="vault-preview"
             >
               <Markdown
                 source={draft.content || "_No context selected._"}
@@ -1114,15 +1077,7 @@ export function MemoryView({
         </section>
 
         <aside
-          style={{
-            borderLeft: "1px solid var(--border)",
-            background: "white",
-            padding: 16,
-            overflowY: "auto",
-            display: "flex",
-            flexDirection: "column",
-            gap: 14,
-          }}
+          className="vault-meta"
         >
           <MetaBlock label="Scope">
             <Pill>{draft.scope}</Pill>

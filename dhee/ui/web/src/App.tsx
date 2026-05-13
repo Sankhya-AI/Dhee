@@ -68,6 +68,7 @@ function normalizeView(view: View | string | null): View {
   if (raw === "repo" || raw === "brain" || raw === "repo-brain" || raw === "folders") return "canvas";
   if (raw === "learn" || raw === "learning") return "learnings";
   if (raw === "packs" || raw === "portable" || raw === "trust") return "portability";
+  if (raw === "inbox" || raw === "review" || raw === "queue") return "conflicts";
   if (
     raw === "router/sessionshistory" ||
     raw === "router/session-history" ||

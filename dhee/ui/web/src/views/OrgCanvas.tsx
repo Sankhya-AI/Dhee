@@ -468,6 +468,7 @@ export function OrgCanvas({
       </svg>
       {isLocalContext ? (
         <div
+          className="repo-brain-local-controls"
           style={{
             position: "absolute",
             left: 12,
