@@ -1,4 +1,4 @@
-import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
+import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-runtime";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { FirstRunPanel } from "../components/FirstRunPanel";
@@ -348,38 +348,30 @@ function RouterSavingsDashboard({ onOpenFolders, onOpenSetup, }) {
 function ActiveSessionCard({ row, selected, onSelect, }) {
     const color = agentColor(row.agent || row.runtime);
     const live = row.live_usage;
-    return (_jsxs("div", { style: {
+    return (_jsxs("div", { className: "router-active-card", style: {
             width: "100%",
             border: `1px solid ${selected ? color : "var(--border)"}`,
             background: selected ? "var(--surface)" : "white",
             borderRadius: 6,
             overflow: "hidden",
-        }, children: [_jsx("button", { type: "button", "aria-expanded": selected, onClick: onSelect, style: {
+        }, children: [_jsx("button", { type: "button", className: "router-active-card__button", "aria-expanded": selected, onClick: onSelect, style: {
                     width: "100%",
                     textAlign: "left",
                     background: "transparent",
                     border: 0,
                     padding: 12,
                     cursor: "pointer",
-                }, children: _jsxs("div", { style: {
-                        display: "grid",
-                        gridTemplateColumns: "minmax(0, 1fr) repeat(3, minmax(86px, max-content)) 22px",
-                        gap: 16,
-                        alignItems: "center",
-                    }, children: [_jsxs("div", { style: { minWidth: 0 }, children: [_jsx(AgentBadge, { agent: row.agent || row.runtime || "unknown" }), _jsx("div", { style: {
+                }, children: _jsxs("div", { className: "router-active-card__grid", children: [_jsxs("div", { className: "router-active-card__main", children: [_jsx(AgentBadge, { agent: row.agent || row.runtime || "unknown" }), _jsx("div", { className: "router-active-card__title", style: {
                                         fontSize: 15,
                                         fontWeight: 600,
                                         color: "var(--ink)",
-                                        whiteSpace: "nowrap",
-                                        textOverflow: "ellipsis",
-                                        overflow: "hidden",
                                         marginTop: 4,
-                                    }, title: row.title, children: row.title || row.session_id }), _jsxs("div", { style: {
+                                    }, title: row.title, children: row.title || row.session_id }), _jsxs("div", { className: "router-active-card__meta", style: {
                                         fontFamily: "var(--mono)",
                                         fontSize: 10,
                                         color: "var(--ink3)",
                                         marginTop: 3,
-                                    }, title: row.cwd || row.repo_root, children: [shortPath(row.repo_root || row.cwd), " - updated ", relTime(row.updated_at)] })] }), _jsx(MiniStat, { label: "saved", value: formatCompactNumber(row.tokens_saved) }), _jsx(MiniStat, { label: "API value", value: sessionCostLabel(row) }), _jsx(MiniStat, { label: "live tokens", value: live?.available ? formatCompactNumber(live.total_tokens) : "n/a" }), _jsx("div", { style: {
+                                    }, title: row.cwd || row.repo_root, children: [shortPath(row.repo_root || row.cwd), " - updated ", relTime(row.updated_at)] })] }), _jsxs("div", { className: "router-active-card__stats", children: [_jsx(MiniStat, { label: "saved", value: formatCompactNumber(row.tokens_saved) }), _jsx(MiniStat, { label: "API value", value: sessionCostLabel(row) }), _jsx(MiniStat, { label: "live tokens", value: live?.available ? formatCompactNumber(live.total_tokens) : "n/a" })] }), _jsx("div", { className: "router-active-card__toggle", style: {
                                 fontFamily: "var(--mono)",
                                 fontSize: 18,
                                 lineHeight: 1,
@@ -395,38 +387,41 @@ function SessionTable({ rows, selectedId, onSelect, loading, }) {
     if (rows.length === 0) {
         return _jsx(EmptyState, { children: loading ? "Loading sessions..." : "No sessions in this range." });
     }
-    return (_jsx("div", { style: {
-            border: "1px solid var(--border)",
-            borderRadius: 6,
-            overflowX: "auto",
-            background: "white",
-        }, children: _jsxs("table", { style: {
-                width: "100%",
-                borderCollapse: "collapse",
-                fontFamily: "var(--mono)",
-                fontSize: 11,
-            }, children: [_jsx("thead", { children: _jsxs("tr", { style: { background: "var(--surface)" }, children: [_jsx(Th, { children: "Session" }), _jsx(Th, { children: "Agent" }), _jsx(Th, { children: "State" }), _jsx(Th, { children: "Updated" }), _jsx(Th, { align: "right", children: "Tokens saved" }), _jsx(Th, { align: "right", children: "API value" }), _jsx(Th, { align: "right", children: "Calls" })] }) }), _jsx("tbody", { children: rows.map((row) => {
-                        const selected = selectedId === row.session_id;
-                        return (_jsxs("tr", { onClick: () => onSelect(row.session_id), style: {
-                                borderTop: "1px solid var(--border)",
-                                background: selected ? "oklch(0.98 0.02 262)" : "white",
-                                cursor: "pointer",
-                            }, children: [_jsxs(Td, { title: row.title || row.session_id, children: [_jsx("div", { style: {
-                                                color: "var(--ink)",
-                                                fontWeight: selected ? 700 : 500,
-                                                maxWidth: 420,
-                                                overflow: "hidden",
-                                                textOverflow: "ellipsis",
-                                                whiteSpace: "nowrap",
-                                            }, children: row.title || row.session_id }), _jsx("div", { style: {
-                                                color: "var(--ink3)",
-                                                marginTop: 2,
-                                                maxWidth: 420,
-                                                overflow: "hidden",
-                                                textOverflow: "ellipsis",
-                                                whiteSpace: "nowrap",
-                                            }, title: row.cwd || row.repo_root, children: shortPath(row.repo_root || row.cwd) })] }), _jsx(Td, { children: _jsx(AgentBadge, { agent: row.agent || row.runtime || "unknown" }) }), _jsx(Td, { children: _jsx(StateBadge, { state: row.state, active: row.active }) }), _jsx(Td, { children: relTime(row.updated_at) }), _jsx(Td, { align: "right", children: formatInteger(row.tokens_saved) }), _jsx(Td, { align: "right", title: pricingLabel(row), children: sessionCostLabel(row) }), _jsx(Td, { align: "right", children: formatInteger(row.router_calls) })] }, row.session_id));
-                    }) })] }) }));
+    return (_jsxs(_Fragment, { children: [_jsx("div", { className: "router-session-table", style: {
+                    border: "1px solid var(--border)",
+                    borderRadius: 6,
+                    overflowX: "auto",
+                    background: "white",
+                }, children: _jsxs("table", { style: {
+                        width: "100%",
+                        borderCollapse: "collapse",
+                        fontFamily: "var(--mono)",
+                        fontSize: 11,
+                    }, children: [_jsx("thead", { children: _jsxs("tr", { style: { background: "var(--surface)" }, children: [_jsx(Th, { children: "Session" }), _jsx(Th, { children: "Agent" }), _jsx(Th, { children: "State" }), _jsx(Th, { children: "Updated" }), _jsx(Th, { align: "right", children: "Tokens saved" }), _jsx(Th, { align: "right", children: "API value" }), _jsx(Th, { align: "right", children: "Calls" })] }) }), _jsx("tbody", { children: rows.map((row) => {
+                                const selected = selectedId === row.session_id;
+                                return (_jsxs("tr", { onClick: () => onSelect(row.session_id), style: {
+                                        borderTop: "1px solid var(--border)",
+                                        background: selected ? "oklch(0.98 0.02 262)" : "white",
+                                        cursor: "pointer",
+                                    }, children: [_jsxs(Td, { title: row.title || row.session_id, children: [_jsx("div", { style: {
+                                                        color: "var(--ink)",
+                                                        fontWeight: selected ? 700 : 500,
+                                                        maxWidth: 420,
+                                                        overflow: "hidden",
+                                                        textOverflow: "ellipsis",
+                                                        whiteSpace: "nowrap",
+                                                    }, children: row.title || row.session_id }), _jsx("div", { style: {
+                                                        color: "var(--ink3)",
+                                                        marginTop: 2,
+                                                        maxWidth: 420,
+                                                        overflow: "hidden",
+                                                        textOverflow: "ellipsis",
+                                                        whiteSpace: "nowrap",
+                                                    }, title: row.cwd || row.repo_root, children: shortPath(row.repo_root || row.cwd) })] }), _jsx(Td, { children: _jsx(AgentBadge, { agent: row.agent || row.runtime || "unknown" }) }), _jsx(Td, { children: _jsx(StateBadge, { state: row.state, active: row.active }) }), _jsx(Td, { children: relTime(row.updated_at) }), _jsx(Td, { align: "right", children: formatInteger(row.tokens_saved) }), _jsx(Td, { align: "right", title: pricingLabel(row), children: sessionCostLabel(row) }), _jsx(Td, { align: "right", children: formatInteger(row.router_calls) })] }, row.session_id));
+                            }) })] }) }), _jsx("div", { className: "router-session-cards", "aria-label": "Session history cards", children: rows.map((row) => {
+                    const selected = selectedId === row.session_id;
+                    return (_jsxs("button", { type: "button", className: `router-session-card${selected ? " router-session-card--active" : ""}`, onClick: () => onSelect(row.session_id), "aria-pressed": selected, children: [_jsxs("div", { className: "router-session-card__head", children: [_jsx("div", { className: "router-session-card__title", title: row.title || row.session_id, children: row.title || row.session_id }), _jsx(StateBadge, { state: row.state, active: row.active })] }), _jsxs("div", { className: "router-session-card__meta", children: [_jsx(AgentBadge, { agent: row.agent || row.runtime || "unknown" }), _jsx("span", { children: relTime(row.updated_at) })] }), _jsx("div", { className: "router-session-card__path", title: row.cwd || row.repo_root || undefined, children: shortPath(row.repo_root || row.cwd) }), _jsxs("div", { className: "router-session-card__stats", children: [_jsx(MiniStat, { label: "saved", value: formatCompactNumber(row.tokens_saved) }), _jsx(MiniStat, { label: "API value", value: sessionCostLabel(row) }), _jsx(MiniStat, { label: "calls", value: formatInteger(row.router_calls) })] })] }, row.session_id));
+                }) })] }));
 }
 function SelectedSession({ row, showHeader = true, }) {
     const live = row.live_usage;
@@ -558,7 +553,7 @@ function MetricCard({ label, value, sub, accent, }) {
                 }, children: value }), sub ? (_jsx("div", { style: { color: "var(--ink3)", fontSize: 11, marginTop: 4 }, children: sub })) : null] }));
 }
 function MiniStat({ label, value }) {
-    return (_jsxs("div", { style: { minWidth: 80 }, children: [_jsx("div", { style: {
+    return (_jsxs("div", { className: "router-mini-stat", style: { minWidth: 0 }, children: [_jsx("div", { style: {
                     fontFamily: "var(--mono)",
                     fontSize: 9,
                     color: "var(--ink3)",
@@ -571,7 +566,9 @@ function MiniStat({ label, value }) {
                     fontWeight: 700,
                     color: "var(--ink)",
                     whiteSpace: "nowrap",
-                }, children: value })] }));
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                }, title: value, children: value })] }));
 }
 function AgentBadge({ agent }) {
     const color = agentColor(agent);

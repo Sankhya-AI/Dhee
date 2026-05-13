@@ -573,6 +573,7 @@ function ActiveSessionCard({
   const live = row.live_usage;
   return (
     <div
+      className="router-active-card"
       style={{
         width: "100%",
         border: `1px solid ${selected ? color : "var(--border)"}`,
@@ -583,6 +584,7 @@ function ActiveSessionCard({
     >
       <button
         type="button"
+        className="router-active-card__button"
         aria-expanded={selected}
         onClick={onSelect}
         style={{
@@ -594,24 +596,15 @@ function ActiveSessionCard({
           cursor: "pointer",
         }}
       >
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "minmax(0, 1fr) repeat(3, minmax(86px, max-content)) 22px",
-            gap: 16,
-            alignItems: "center",
-          }}
-        >
-          <div style={{ minWidth: 0 }}>
+        <div className="router-active-card__grid">
+          <div className="router-active-card__main">
             <AgentBadge agent={row.agent || row.runtime || "unknown"} />
             <div
+              className="router-active-card__title"
               style={{
                 fontSize: 15,
                 fontWeight: 600,
                 color: "var(--ink)",
-                whiteSpace: "nowrap",
-                textOverflow: "ellipsis",
-                overflow: "hidden",
                 marginTop: 4,
               }}
               title={row.title}
@@ -619,6 +612,7 @@ function ActiveSessionCard({
               {row.title || row.session_id}
             </div>
             <div
+              className="router-active-card__meta"
               style={{
                 fontFamily: "var(--mono)",
                 fontSize: 10,
@@ -630,13 +624,16 @@ function ActiveSessionCard({
               {shortPath(row.repo_root || row.cwd)} - updated {relTime(row.updated_at)}
             </div>
           </div>
-          <MiniStat label="saved" value={formatCompactNumber(row.tokens_saved)} />
-          <MiniStat label="API value" value={sessionCostLabel(row)} />
-          <MiniStat
-            label="live tokens"
-            value={live?.available ? formatCompactNumber(live.total_tokens) : "n/a"}
-          />
+          <div className="router-active-card__stats">
+            <MiniStat label="saved" value={formatCompactNumber(row.tokens_saved)} />
+            <MiniStat label="API value" value={sessionCostLabel(row)} />
+            <MiniStat
+              label="live tokens"
+              value={live?.available ? formatCompactNumber(live.total_tokens) : "n/a"}
+            />
+          </div>
           <div
+            className="router-active-card__toggle"
             style={{
               fontFamily: "var(--mono)",
               fontSize: 18,
@@ -680,91 +677,130 @@ function SessionTable({
     return <EmptyState>{loading ? "Loading sessions..." : "No sessions in this range."}</EmptyState>;
   }
   return (
-    <div
-      style={{
-        border: "1px solid var(--border)",
-        borderRadius: 6,
-        overflowX: "auto",
-        background: "white",
-      }}
-    >
-      <table
+    <>
+      <div
+        className="router-session-table"
         style={{
-          width: "100%",
-          borderCollapse: "collapse",
-          fontFamily: "var(--mono)",
-          fontSize: 11,
+          border: "1px solid var(--border)",
+          borderRadius: 6,
+          overflowX: "auto",
+          background: "white",
         }}
       >
-        <thead>
-          <tr style={{ background: "var(--surface)" }}>
-            <Th>Session</Th>
-            <Th>Agent</Th>
-            <Th>State</Th>
-            <Th>Updated</Th>
-            <Th align="right">Tokens saved</Th>
-            <Th align="right">API value</Th>
-            <Th align="right">Calls</Th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => {
-            const selected = selectedId === row.session_id;
-            return (
-              <tr
-                key={row.session_id}
-                onClick={() => onSelect(row.session_id)}
-                style={{
-                  borderTop: "1px solid var(--border)",
-                  background: selected ? "oklch(0.98 0.02 262)" : "white",
-                  cursor: "pointer",
-                }}
+        <table
+          style={{
+            width: "100%",
+            borderCollapse: "collapse",
+            fontFamily: "var(--mono)",
+            fontSize: 11,
+          }}
+        >
+          <thead>
+            <tr style={{ background: "var(--surface)" }}>
+              <Th>Session</Th>
+              <Th>Agent</Th>
+              <Th>State</Th>
+              <Th>Updated</Th>
+              <Th align="right">Tokens saved</Th>
+              <Th align="right">API value</Th>
+              <Th align="right">Calls</Th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => {
+              const selected = selectedId === row.session_id;
+              return (
+                <tr
+                  key={row.session_id}
+                  onClick={() => onSelect(row.session_id)}
+                  style={{
+                    borderTop: "1px solid var(--border)",
+                    background: selected ? "oklch(0.98 0.02 262)" : "white",
+                    cursor: "pointer",
+                  }}
+                >
+                  <Td title={row.title || row.session_id}>
+                    <div
+                      style={{
+                        color: "var(--ink)",
+                        fontWeight: selected ? 700 : 500,
+                        maxWidth: 420,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {row.title || row.session_id}
+                    </div>
+                    <div
+                      style={{
+                        color: "var(--ink3)",
+                        marginTop: 2,
+                        maxWidth: 420,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                      title={row.cwd || row.repo_root}
+                    >
+                      {shortPath(row.repo_root || row.cwd)}
+                    </div>
+                  </Td>
+                  <Td>
+                    <AgentBadge agent={row.agent || row.runtime || "unknown"} />
+                  </Td>
+                  <Td>
+                    <StateBadge state={row.state} active={row.active} />
+                  </Td>
+                  <Td>{relTime(row.updated_at)}</Td>
+                  <Td align="right">{formatInteger(row.tokens_saved)}</Td>
+                  <Td align="right" title={pricingLabel(row)}>
+                    {sessionCostLabel(row)}
+                  </Td>
+                  <Td align="right">{formatInteger(row.router_calls)}</Td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div className="router-session-cards" aria-label="Session history cards">
+        {rows.map((row) => {
+          const selected = selectedId === row.session_id;
+          return (
+            <button
+              key={row.session_id}
+              type="button"
+              className={`router-session-card${selected ? " router-session-card--active" : ""}`}
+              onClick={() => onSelect(row.session_id)}
+              aria-pressed={selected}
+            >
+              <div className="router-session-card__head">
+                <div className="router-session-card__title" title={row.title || row.session_id}>
+                  {row.title || row.session_id}
+                </div>
+                <StateBadge state={row.state} active={row.active} />
+              </div>
+              <div className="router-session-card__meta">
+                <AgentBadge agent={row.agent || row.runtime || "unknown"} />
+                <span>{relTime(row.updated_at)}</span>
+              </div>
+              <div
+                className="router-session-card__path"
+                title={row.cwd || row.repo_root || undefined}
               >
-                <Td title={row.title || row.session_id}>
-                  <div
-                    style={{
-                      color: "var(--ink)",
-                      fontWeight: selected ? 700 : 500,
-                      maxWidth: 420,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    {row.title || row.session_id}
-                  </div>
-                  <div
-                    style={{
-                      color: "var(--ink3)",
-                      marginTop: 2,
-                      maxWidth: 420,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
-                    title={row.cwd || row.repo_root}
-                  >
-                    {shortPath(row.repo_root || row.cwd)}
-                  </div>
-                </Td>
-                <Td>
-                  <AgentBadge agent={row.agent || row.runtime || "unknown"} />
-                </Td>
-                <Td>
-                  <StateBadge state={row.state} active={row.active} />
-                </Td>
-                <Td>{relTime(row.updated_at)}</Td>
-                <Td align="right">{formatInteger(row.tokens_saved)}</Td>
-                <Td align="right" title={pricingLabel(row)}>
-                  {sessionCostLabel(row)}
-                </Td>
-                <Td align="right">{formatInteger(row.router_calls)}</Td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
+                {shortPath(row.repo_root || row.cwd)}
+              </div>
+              <div className="router-session-card__stats">
+                <MiniStat label="saved" value={formatCompactNumber(row.tokens_saved)} />
+                <MiniStat label="API value" value={sessionCostLabel(row)} />
+                <MiniStat label="calls" value={formatInteger(row.router_calls)} />
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </>
   );
 }
 
@@ -1094,7 +1130,7 @@ function MetricCard({
 
 function MiniStat({ label, value }: { label: string; value: string }) {
   return (
-    <div style={{ minWidth: 80 }}>
+    <div className="router-mini-stat" style={{ minWidth: 0 }}>
       <div
         style={{
           fontFamily: "var(--mono)",
@@ -1114,7 +1150,10 @@ function MiniStat({ label, value }: { label: string; value: string }) {
           fontWeight: 700,
           color: "var(--ink)",
           whiteSpace: "nowrap",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
         }}
+        title={value}
       >
         {value}
       </div>
