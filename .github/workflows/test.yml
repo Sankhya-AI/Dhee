@@ -31,3 +31,20 @@ jobs:
 
       - name: Run tests
         run: pytest tests/ -v
+
+      - name: Run router replay gate
+        env:
+          DHEE_DATA_DIR: ${{ runner.temp }}/dhee-router-gate
+        run: |
+          dhee router gate \
+            --harness all \
+            --sessions-dir tests/fixtures/golden_replay/sessions \
+            --golden tests/fixtures/golden_replay/golden.jsonl \
+            --allow-insufficient
+
+      - name: Inspect redacted real replay corpus
+        run: |
+          dhee router corpus \
+            --harness all \
+            --sessions-dir tests/fixtures/golden_replay/redacted_real/sessions \
+            --golden tests/fixtures/golden_replay/redacted_real/golden_needs_review.jsonl

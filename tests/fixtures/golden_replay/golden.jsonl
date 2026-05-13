@@ -1,0 +1,2 @@
+{"session_id":"claude_code_debug","task_parity":"pass","task_parity_score":0.97,"stale_context_incidents":0,"note":"Claude Code debug replay preserved the failing target and avoided stale plan injection."}
+{"session_id":"codex_exec_debug","task_parity":"pass","task_parity_score":1.0,"stale_context_incidents":0,"note":"Codex exec replay preserved successful verification state."}

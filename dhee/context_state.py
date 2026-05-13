@@ -1944,7 +1944,10 @@ def task_aware_read_schema(path: str, *, query: str = "", task_intent: str = "")
     if intent == "debug_failure":
         return {
             "intent": intent,
-            "preferred_depth": "deep" if ext in {".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs"} else "normal",
+            "preferred_depth": "deep" if ext in {
+                ".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java",
+                ".kt", ".kts", ".sh", ".bash", ".zsh", ".sql", ".log",
+            } else "normal",
             "focus": ["failing assertion", "stack frame", "related symbol", "next verification command"],
             "note": "task_schema=debug_failure: preserve failure landmarks and likely next verification command",
         }

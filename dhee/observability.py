@@ -1,6 +1,6 @@
 """Engram Observability — compatibility-safe no-op implementation.
 
-Core Engram does not require metrics infrastructure at runtime, but enterprise
+Core Engram does not require metrics infrastructure at runtime, but managed team
 and API layers import symbols from this module. Keep this interface stable and
 side-effect free so those imports always succeed.
 """

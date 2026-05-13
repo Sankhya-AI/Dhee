@@ -13,6 +13,7 @@ Usage:
     dhee why <id>           Explain why a memory or artifact exists
     dhee handoff            Emit structured resume JSON for a new harness/agent
     dhee harness status     Show native Claude Code / Codex integration state
+    dhee demo token-router  Show how Dhee keeps raw tool output behind pointers
     dhee benchmark          Run performance benchmarks
     dhee status             Version, config, DB info
 """
@@ -86,8 +87,6 @@ def cmd_setup(args: argparse.Namespace) -> None:
 
 def cmd_shell(args: argparse.Namespace) -> None:
     """Run a DheeFS virtual shell command."""
-    from dhee.fs import ContextWorkspace
-
     shell_parts = list(getattr(args, "shell_command", []) or [])
     # ``argparse.REMAINDER`` intentionally lets users pass commands like
     # ``grep "two words" /state`` intact, but it also captures options
@@ -115,24 +114,42 @@ def cmd_shell(args: argparse.Namespace) -> None:
     repo = getattr(args, "repo", None)
     if repo is None:
         repo = os.getcwd()
-    workspace = ContextWorkspace(
+    workspace_id = getattr(args, "workspace_id", None) or os.path.abspath(os.path.expanduser(repo))
+    user_id = getattr(args, "user_id", "default")
+    agent_id = getattr(args, "agent_id", None) or "cli"
+    from dhee import runtime
+
+    result_dict = runtime.execute_shell(
+        command,
         repo=repo,
-        user_id=getattr(args, "user_id", "default"),
-        agent_id=getattr(args, "agent_id", None) or "cli",
-        db=_get_db(),
-        workspace_id=getattr(args, "workspace_id", None) or os.path.abspath(os.path.expanduser(repo)),
+        user_id=user_id,
+        agent_id=agent_id,
+        workspace_id=workspace_id,
     )
-    result = workspace.execute(command)
+    if result_dict is None:
+        from dhee.fs import ContextWorkspace
+
+        workspace = ContextWorkspace(
+            repo=repo,
+            user_id=user_id,
+            agent_id=agent_id,
+            db=_get_db(),
+            workspace_id=workspace_id,
+        )
+        result_dict = workspace.execute(command).to_dict()
     if getattr(args, "json", False):
-        _json_out(result.to_dict())
+        _json_out(result_dict)
     else:
-        stream = sys.stderr if result.exit_code else sys.stdout
-        if result.stdout:
-            print(result.stdout, file=stream)
-        elif result.stderr:
-            print(result.stderr, file=sys.stderr)
-    if result.exit_code:
-        sys.exit(result.exit_code)
+        exit_code = int(result_dict.get("exit_code", 0) or 0)
+        stdout = str(result_dict.get("stdout") or "")
+        stderr = str(result_dict.get("stderr") or "")
+        stream = sys.stderr if exit_code else sys.stdout
+        if stdout:
+            print(stdout, file=stream)
+        elif stderr:
+            print(stderr, file=sys.stderr)
+    if int(result_dict.get("exit_code", 0) or 0):
+        sys.exit(int(result_dict.get("exit_code", 1) or 1))
 
 
 # ---------------------------------------------------------------------------
@@ -387,17 +404,33 @@ def cmd_context(args: argparse.Namespace) -> None:
     compiled_actions = {"status", "state", "checkpoint", "rollover", "provision", "debt"}
     action = args.context_action or "list"
     if action in compiled_actions:
+        from dhee import runtime
         from dhee.context_state import ContextStateStore
 
         repo = args.repo or os.getcwd()
-        store = ContextStateStore(
-            repo=repo,
-            workspace_id=os.path.abspath(os.path.expanduser(repo)),
-            user_id=getattr(args, "user_id", "default"),
-            agent_id="cli",
-        )
+        workspace_id = os.path.abspath(os.path.expanduser(repo))
+        user_id = getattr(args, "user_id", "default")
+
+        def _runtime_context(extra: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+            return runtime.execute_context(
+                action,
+                repo=repo,
+                workspace_id=workspace_id,
+                user_id=user_id,
+                agent_id="cli",
+                args=extra or {},
+            )
+
+        def _store() -> ContextStateStore:
+            return ContextStateStore(
+                repo=repo,
+                workspace_id=workspace_id,
+                user_id=user_id,
+                agent_id="cli",
+            )
+
         if action == "status":
-            data = store.status()
+            data = _runtime_context() or _store().status()
             if args.json:
                 _json_out(data)
                 return
@@ -409,11 +442,17 @@ def cmd_context(args: argparse.Namespace) -> None:
             print(f"  rollover required     {'yes' if data['rollover_required'] else 'no'}")
             return
         if action == "state":
-            text = store.render_state_card() if getattr(args, "card", False) else store.render_markdown()
-            print(text)
+            fmt = "card" if getattr(args, "card", False) else "markdown"
+            data = _runtime_context({"format": fmt})
+            if data is not None:
+                print(data.get("text") or "")
+                return
+            store = _store()
+            print(store.render_state_card() if getattr(args, "card", False) else store.render_markdown())
             return
         if action == "debt":
-            data = store.debt_summary(top=bool(getattr(args, "top", False)))
+            show_top = bool(getattr(args, "top", False))
+            data = _runtime_context({"top": show_top}) or _store().debt_summary(top=show_top)
             if args.json:
                 _json_out(data)
                 return
@@ -426,7 +465,8 @@ def cmd_context(args: argparse.Namespace) -> None:
                     print(f"  {_compact_int(row.get('tokens') or 0)} {row.get('kind') or ''} {row.get('source') or ''} - {row.get('reason') or ''}")
             return
         if action == "checkpoint":
-            data = store.checkpoint(reason=getattr(args, "reason", None) or "manual")
+            reason = getattr(args, "reason", None) or "manual"
+            data = _runtime_context({"reason": reason}) or _store().checkpoint(reason=reason)
             if args.json:
                 _json_out(data)
                 return
@@ -434,7 +474,8 @@ def cmd_context(args: argparse.Namespace) -> None:
             print(data["state_card"])
             return
         if action == "rollover":
-            data = store.rollover(reason=getattr(args, "reason", None) or "manual rollover")
+            reason = getattr(args, "reason", None) or "manual rollover"
+            data = _runtime_context({"reason": reason}) or _store().rollover(reason=reason)
             if args.json:
                 _json_out(data)
                 return
@@ -444,7 +485,7 @@ def cmd_context(args: argparse.Namespace) -> None:
             return
         if action == "provision":
             task = args.entry_id or ""
-            data = store.provision(task)
+            data = _runtime_context({"task": task}) or _store().provision(task)
             if args.json:
                 _json_out(data)
                 return
@@ -745,6 +786,7 @@ def cmd_export(args: argparse.Namespace) -> None:
                 output_path=output,
                 user_id=getattr(args, "user_id", "default"),
                 key_dir=CONFIG_DIR,
+                repo=getattr(args, "repo", None) or os.getcwd(),
             )
         finally:
             vector_store.close()
@@ -755,7 +797,8 @@ def cmd_export(args: argparse.Namespace) -> None:
             print(
                 f"Exported {counts.get('memories', 0)} memories, "
                 f"{counts.get('vectors', 0)} vector nodes, "
-                f"and {counts.get('artifacts_manifest', 0)} artifacts to {output}"
+                f"{counts.get('artifacts_manifest', 0)} artifacts, "
+                f"and {counts.get('repo_context_entries', 0)} repo-context entries to {output}"
             )
         return
 
@@ -790,17 +833,20 @@ def cmd_import(args: argparse.Namespace) -> None:
                 input_path=args.file,
                 user_id=args.user_id,
                 strategy=args.strategy,
+                repo=getattr(args, "repo", None) or os.getcwd(),
             )
         finally:
             vector_store.close()
         if args.json:
             _json_out(result)
         else:
+            bootstrap = result.get("handoff_bootstrap") or {}
             if args.strategy == "dry-run":
                 print(
                     f"Pack preview: {result.get('memories', 0)} memories, "
                     f"{result.get('vectors', 0)} vectors, "
                     f"{result.get('artifacts', 0)} artifacts "
+                    f"and {(result.get('repo_context') or {}).get('records', 0)} repo-context entries "
                     f"({result.get('existing_ids', 0)} existing IDs, "
                     f"{result.get('existing_hashes', 0)} existing hashes)."
                 )
@@ -810,7 +856,14 @@ def cmd_import(args: argparse.Namespace) -> None:
                 print(
                     f"Imported {mem_stats.get('imported', 0)} memories, "
                     f"{result.get('vectors_imported', 0)} vector nodes, "
-                    f"and {art_stats.get('artifacts', 0)} artifacts."
+                    f"{art_stats.get('artifacts', 0)} artifacts, "
+                    f"and {(result.get('repo_context_import') or {}).get('imported', 0)} repo-context entries."
+                )
+            if bootstrap:
+                last = bootstrap.get("last_session_id") or "none"
+                print(
+                    f"Handoff bootstrap: {bootstrap.get('continuity_source') or 'unknown'} "
+                    f"(last session: {last}, artifacts: {bootstrap.get('recent_artifacts', 0)})."
                 )
         return
 
@@ -1173,6 +1226,20 @@ def cmd_checkpoint(args: argparse.Namespace) -> None:
             print(f"  Intention stored: {result['intention_stored'][:60]}")
 
 
+def cmd_demo(args: argparse.Namespace) -> None:
+    """Run built-in demos that explain Dhee's context-governance wedge."""
+    action = getattr(args, "demo_action", None) or "token-router"
+    if action != "token-router":
+        raise ValueError(f"Unknown demo action: {action}")
+    from dhee.demo import format_token_router_demo, token_router_demo
+
+    report = token_router_demo()
+    if getattr(args, "json", False):
+        _json_out(report)
+        return
+    print(format_token_router_demo(report, show_digests=not getattr(args, "no_digests", False)))
+
+
 def cmd_status(args: argparse.Namespace) -> None:
     """Show version, config, DB size, detected agents, and brain health.
 
@@ -1319,18 +1386,122 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     sys.stdout.write(run(as_json=bool(getattr(args, "json", False))))
 
 
-def cmd_uninstall(args: argparse.Namespace) -> None:
-    """Remove ~/.dhee data directory."""
-    from dhee.cli_config import CONFIG_DIR
-    if not os.path.exists(CONFIG_DIR):
-        print("Nothing to remove.")
-        return
-    confirm = input(f"Remove {CONFIG_DIR}? [y/N]: ").strip().lower()
-    if confirm in ("y", "yes"):
-        shutil.rmtree(CONFIG_DIR)
-        print(f"Removed {CONFIG_DIR}")
+def cmd_runtime(args: argparse.Namespace) -> None:
+    """Inspect or manage the local Dhee runtime daemon."""
+    from dhee import runtime
+
+    action = getattr(args, "runtime_action", None) or "status"
+    if action == "status":
+        result = runtime.status()
+    elif action == "restart":
+        result = runtime.restart_daemon()
+    elif action == "stop":
+        result = runtime.stop_daemon()
+    elif action == "doctor":
+        result = runtime.status(timeout=0.75)
+        result["doctor"] = {
+            "daemon_health": "ok" if result["daemon"].get("running") else "stopped",
+            "hot_path_note": (
+                "The local daemon is the stable process boundary for future MCP/CLI/router "
+                "hot-path reuse. Current clients still work without it."
+            ),
+        }
     else:
-        print("Cancelled.")
+        raise ValueError(f"Unknown runtime action: {action}")
+
+    if getattr(args, "json", False):
+        _json_out(result)
+        return
+    if action in {"restart", "stop"}:
+        status = result.get("status") or result.get("started", {}).get("status") or {}
+        print(runtime.format_status(status))
+        return
+    print(runtime.format_status(result))
+
+
+def cmd_uninstall(args: argparse.Namespace) -> None:
+    """Cleanly stop Dhee and remove managed install artifacts."""
+    from dhee.cli_config import CONFIG_DIR
+    from dhee.install_cleanup import cleanup_install_artifacts
+    from dhee import runtime
+
+    runtime_result = runtime.stop_daemon()
+    if not os.path.exists(CONFIG_DIR):
+        harness_result = _disable_harnesses_for_uninstall()
+        artifact_result = cleanup_install_artifacts(CONFIG_DIR)
+        if os.path.exists(CONFIG_DIR):
+            shutil.rmtree(CONFIG_DIR)
+        result = {
+            "removed": False,
+            "path": CONFIG_DIR,
+            "reason": "missing",
+            "runtime": runtime_result,
+            "harnesses": harness_result,
+            "install_artifacts": artifact_result,
+        }
+        if getattr(args, "json", False):
+            _json_out(result)
+        else:
+            cleaned = bool(
+                artifact_result["symlinks"]["removed"]
+                or artifact_result["shell_profiles"]["changed"]
+                or any((item or {}).get("changed") for item in harness_result.values())
+            )
+            print("Removed leftover installer artifacts." if cleaned else "Nothing to remove.")
+        return
+
+    confirm = "yes" if getattr(args, "yes", False) else input(f"Remove {CONFIG_DIR}? [y/N]: ").strip().lower()
+    if confirm in ("y", "yes"):
+        harness_result = _disable_harnesses_for_uninstall()
+        artifact_result = cleanup_install_artifacts(CONFIG_DIR)
+        if os.path.exists(CONFIG_DIR):
+            shutil.rmtree(CONFIG_DIR)
+        result = {
+            "removed": True,
+            "path": CONFIG_DIR,
+            "runtime": runtime_result,
+            "harnesses": harness_result,
+            "install_artifacts": artifact_result,
+        }
+        if getattr(args, "json", False):
+            _json_out(result)
+        else:
+            print(f"Stopped runtime: {runtime_result.get('stopped', False)}")
+            print(f"Disabled harnesses: {', '.join(sorted(harness_result))}")
+            removed_links = artifact_result["symlinks"]["removed"]
+            changed_profiles = artifact_result["shell_profiles"]["changed"]
+            if removed_links:
+                print(f"Removed managed symlinks: {len(removed_links)}")
+            if changed_profiles:
+                print(f"Cleaned shell profiles: {len(changed_profiles)}")
+            print(f"Removed {CONFIG_DIR}")
+    else:
+        if getattr(args, "json", False):
+            _json_out({"removed": False, "reason": "cancelled", "runtime": runtime_result})
+        else:
+            print("Cancelled.")
+
+
+def _disable_harnesses_for_uninstall() -> Dict[str, Any]:
+    """Best-effort removal of global/native harness wiring."""
+    from dataclasses import asdict
+
+    from dhee.harness.install import disable_harnesses
+
+    results: Dict[str, Any] = {}
+    for harness in ("claude_code", "codex", "hermes", "gstack", "cursor"):
+        try:
+            disabled = disable_harnesses(harness=harness)
+            for name, result in disabled.items():
+                results[name] = asdict(result)
+        except Exception as exc:
+            results[harness] = {
+                "harness": harness,
+                "action": "error",
+                "changed": False,
+                "details": {"error": str(exc)},
+            }
+    return results
 
 
 def cmd_task(args: argparse.Namespace) -> None:
@@ -2065,6 +2236,80 @@ def cmd_router(args: argparse.Namespace) -> None:
         print(router_stats.format_human(computed))
         return
 
+    if action == "harvest":
+        from pathlib import Path as _Path
+
+        from dhee.benchmarks.replay_corpus import format_harvest_human, harvest_corpus
+
+        output_dir = getattr(args, "output_dir", None)
+        if not output_dir:
+            output_dir = str(_Path.home() / ".dhee" / "replay_corpus" / "redacted")
+        result = harvest_corpus(
+            sessions_dir=_Path(getattr(args, "sessions_dir", "")) if getattr(args, "sessions_dir", None) else None,
+            output_dir=_Path(output_dir),
+            harness=getattr(args, "harness", "all") or "all",
+            limit=getattr(args, "limit", 0) or 0,
+            min_calls=getattr(args, "min_calls", 1) or 1,
+            max_output_chars=getattr(args, "max_output_chars", 50_000) or 50_000,
+            golden_output=_Path(getattr(args, "golden_output", "")) if getattr(args, "golden_output", None) else None,
+            manifest_output=_Path(getattr(args, "manifest_output", "")) if getattr(args, "manifest_output", None) else None,
+        )
+        if args.json:
+            _json_out(result)
+            return
+        print(format_harvest_human(result))
+        return
+
+    if action == "corpus":
+        from pathlib import Path as _Path
+
+        from dhee.benchmarks.replay_corpus import format_inspect_human, inspect_corpus
+
+        sessions_dir = getattr(args, "sessions_dir", None)
+        if not sessions_dir:
+            sessions_dir = str(_Path.home() / ".dhee" / "replay_corpus" / "redacted" / "sessions")
+        result = inspect_corpus(
+            sessions_dir=_Path(sessions_dir),
+            harness=getattr(args, "harness", "all") or "all",
+            golden_path=_Path(getattr(args, "golden", "")) if getattr(args, "golden", None) else None,
+            limit=getattr(args, "limit", 0) or 0,
+        )
+        if args.json:
+            _json_out(result)
+            return
+        print(format_inspect_human(result))
+        return
+
+    if action == "annotate":
+        from pathlib import Path as _Path
+
+        from dhee.benchmarks.replay_corpus import upsert_golden_annotation
+
+        if not getattr(args, "golden", None):
+            raise ValueError("dhee router annotate requires --golden")
+        if not getattr(args, "session_id", None):
+            raise ValueError("dhee router annotate requires --session-id")
+        if not getattr(args, "task_parity", None):
+            raise ValueError("dhee router annotate requires --task-parity")
+        result = upsert_golden_annotation(
+            golden_path=_Path(getattr(args, "golden")),
+            session_id=str(getattr(args, "session_id")),
+            task_parity=str(getattr(args, "task_parity")),
+            task_parity_score=getattr(args, "task_parity_score", None),
+            stale_context_incidents=getattr(args, "stale_context_incidents", None),
+            note=getattr(args, "note", None),
+        )
+        if args.json:
+            _json_out(result)
+            return
+        annotation = result["annotation"]
+        print(
+            f"  {result['action']} golden annotation for {result['session_id']} "
+            f"({annotation['task_parity']}, stale={annotation['stale_context_incidents']})"
+        )
+        print(f"  golden → {result['golden_path']}")
+        return
+
     if action == "tune":
         from dhee.router import policy as _policy
         from dhee.router import tune as _tune
@@ -2094,19 +2339,40 @@ def cmd_router(args: argparse.Namespace) -> None:
         print(_tune.format_human(report))
         return
 
-    if action == "report":
+    if action in {"report", "gate"}:
         from dhee.router import quality_report
+        from pathlib import Path as _Path
 
         report = quality_report.build_report(
             limit=getattr(args, "limit", 0) or 0,
+            sessions_dir=_Path(getattr(args, "sessions_dir", "")) if getattr(args, "sessions_dir", None) else None,
+            harness=getattr(args, "harness", "claude_code") or "claude_code",
+            golden_path=_Path(getattr(args, "golden", "")) if getattr(args, "golden", None) else None,
         )
         out_path = quality_report.save_report(report)
+        if action == "gate":
+            gate = quality_report.gate_summary(
+                report,
+                allow_insufficient=bool(getattr(args, "allow_insufficient", False)),
+            )
+            if args.json:
+                _json_out({"gate": gate, "quality_gates": report.quality_gates, "report_path": str(out_path)})
+            else:
+                print(quality_report.format_human(report))
+                print("")
+                print(f"  replay gate: {'PASS' if gate['ok'] else 'FAIL'}")
+                if gate["failed_gates"]:
+                    print(f"  failed gates: {', '.join(gate['failed_gates'])}")
+                if gate["pending_gates"]:
+                    print(f"  pending gates: {', '.join(gate['pending_gates'])}")
+                print(f"  report saved → {out_path}")
+            if not gate["ok"]:
+                sys.exit(1)
+            return
         if args.json:
             _json_out(report.to_dict())
             return
         if getattr(args, "share", False):
-            from pathlib import Path as _Path
-
             share_md = quality_report.format_share(report)
             share_path = _Path.home() / ".dhee" / "session_quality_report.md"
             share_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2121,7 +2387,7 @@ def cmd_router(args: argparse.Namespace) -> None:
         return
 
     # default: print subcommand help
-    print("Usage: dhee router {enable|disable|status|stats|enforce|report}")
+    print("Usage: dhee router {enable|disable|status|stats|enforce|report|gate|harvest|corpus|annotate}")
 
 
 def cmd_benchmark(args: argparse.Namespace) -> None:
@@ -2253,6 +2519,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_cp.add_argument("--user-id", default="default", help="User ID")
     p_cp.add_argument("--json", action="store_true", help="JSON output")
 
+    # demo
+    p_demo = sub.add_parser("demo", help="Run product demos that prove Dhee's context firewall")
+    p_demo.add_argument(
+        "demo_action",
+        nargs="?",
+        choices=["token-router"],
+        default="token-router",
+        help="Demo to run",
+    )
+    p_demo.add_argument("--no-digests", action="store_true", help="Hide digest previews")
+    p_demo.add_argument("--json", action="store_true", help="JSON output")
+
     # list
     p_list = sub.add_parser("list", help="List all memories")
     p_list.add_argument("--user-id", default="default", help="User ID")
@@ -2278,6 +2556,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_export = sub.add_parser("export", help="Export memories to JSON or .dheemem")
     p_export.add_argument("--output", "-o", help="Output file path")
     p_export.add_argument("--user-id", default="default", help="User ID")
+    p_export.add_argument("--repo", help="Repo whose .dhee/context should be included (default: cwd)")
     p_export.add_argument(
         "--format",
         choices=["json", "dheemem"],
@@ -2290,6 +2569,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_import = sub.add_parser("import", help="Import memories from JSON or .dheemem")
     p_import.add_argument("file", help="JSON or .dheemem file to import")
     p_import.add_argument("--user-id", default="default", help="User ID")
+    p_import.add_argument("--repo", help="Repo where signed repo context should be restored (default: cwd)")
     p_import.add_argument(
         "--format",
         choices=["json", "dheemem"],
@@ -2486,6 +2766,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Composite health + honesty report (router, cognition, memory, movement plan)",
     )
     p_doctor.add_argument("--json", action="store_true", help="JSON output")
+
+    # runtime — managed venv + local daemon clarity
+    p_runtime = sub.add_parser(
+        "runtime",
+        help="Inspect or manage the local Dhee runtime daemon",
+    )
+    p_runtime.add_argument(
+        "runtime_action",
+        nargs="?",
+        choices=["status", "restart", "stop", "doctor"],
+        default="status",
+        help="Subcommand",
+    )
+    p_runtime.add_argument("--json", action="store_true", help="JSON output")
 
     # task
     p_task = sub.add_parser("task", help="Start Claude Code with Dhee cognition")
@@ -2715,7 +3009,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_router.add_argument(
         "router_action",
         nargs="?",
-        choices=["enable", "disable", "status", "stats", "enforce", "report", "tune"],
+        choices=["enable", "disable", "status", "stats", "enforce", "report", "gate", "tune", "harvest", "corpus", "annotate"],
         help="Subcommand",
     )
     p_router.add_argument(
@@ -2724,7 +3018,21 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["on", "off", "apply", "clear"],
         help="For `router enforce`: on|off  |  For `router tune`: apply|clear (omit to dry-run)",
     )
-    p_router.add_argument("--limit", type=int, default=0, help="For `router report`: replay only N most-recent sessions (0 = all)")
+    p_router.add_argument("--limit", type=int, default=0, help="For `router report|harvest|corpus`: replay only N most-recent sessions (0 = all)")
+    p_router.add_argument("--sessions-dir", help="For `router report|harvest|corpus`: transcript directory or JSONL file")
+    p_router.add_argument("--harness", choices=["claude_code", "codex", "all", "auto"], default=None, help="For `router report|harvest|corpus`: transcript harness")
+    p_router.add_argument("--golden", help="For `router report|corpus|annotate`: JSONL file or directory with golden replay annotations")
+    p_router.add_argument("--output-dir", help="For `router harvest`: redacted corpus destination directory")
+    p_router.add_argument("--golden-output", help="For `router harvest`: write pending-review golden annotations here")
+    p_router.add_argument("--manifest-output", help="For `router harvest`: write corpus manifest here")
+    p_router.add_argument("--min-calls", type=int, default=1, help="For `router harvest`: require at least N replayable calls per session")
+    p_router.add_argument("--max-output-chars", type=int, default=50_000, help="For `router harvest`: max redacted output chars per tool result")
+    p_router.add_argument("--session-id", help="For `router annotate`: session id to annotate")
+    p_router.add_argument("--task-parity", choices=["pass", "fail", "needs_review"], help="For `router annotate`: reviewed task parity")
+    p_router.add_argument("--task-parity-score", type=float, help="For `router annotate`: parity score, normally 0.0-1.0")
+    p_router.add_argument("--stale-context-incidents", type=int, help="For `router annotate`: count of stale-context incidents")
+    p_router.add_argument("--note", help="For `router annotate`: short review note")
+    p_router.add_argument("--allow-insufficient", action="store_true", help="For `router gate`: pass when only pending gates remain")
     p_router.add_argument("--share", action="store_true", help="For `router report`: emit customer-shareable redacted Markdown")
     p_router.add_argument("--json", action="store_true", help="JSON output")
 
@@ -2734,12 +3042,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Extended session-quality report: cache-read/turn, expansion rate, tool_result share, projected savings",
     )
     p_qr.add_argument("--limit", type=int, default=0, help="Replay only N most-recent sessions (0 = all)")
+    p_qr.add_argument("--sessions-dir", help="Transcript directory or JSONL file")
+    p_qr.add_argument("--harness", choices=["claude_code", "codex", "all", "auto"], default="claude_code", help="Transcript harness")
+    p_qr.add_argument("--golden", help="JSONL file or directory with golden replay annotations")
     p_qr.add_argument("--share", action="store_true", help="Emit customer-shareable redacted Markdown")
     p_qr.add_argument("--json", action="store_true", help="JSON output")
 
 
     # uninstall
-    sub.add_parser("uninstall", help="Remove ~/.dhee directory")
+    p_uninstall = sub.add_parser("uninstall", help="Stop Dhee and remove managed install artifacts")
+    p_uninstall.add_argument("--yes", "-y", action="store_true", help="Do not prompt")
+    p_uninstall.add_argument("--json", action="store_true", help="JSON output")
 
     # onboard — interactive provider + key wizard (called by install.sh)
     try:
@@ -2768,6 +3081,7 @@ COMMAND_MAP = {
     "recall": cmd_search,  # alias
     "search": cmd_search,
     "checkpoint": cmd_checkpoint,
+    "demo": cmd_demo,
     "list": cmd_list,
     "stats": cmd_stats,
     "decay": cmd_decay,
@@ -2788,6 +3102,7 @@ COMMAND_MAP = {
     "shared-task": cmd_shared_task,
     "status": cmd_status,
     "doctor": cmd_doctor,
+    "runtime": cmd_runtime,
     "task": cmd_task,
     "ingest": cmd_ingest,
     "docs": cmd_docs,
@@ -2808,6 +3123,9 @@ COMMAND_MAP = {
             router_action="report",
             enforce_action=None,
             limit=getattr(args, "limit", 0),
+            sessions_dir=getattr(args, "sessions_dir", None),
+            harness=getattr(args, "harness", "claude_code"),
+            golden=getattr(args, "golden", None),
             share=getattr(args, "share", False),
             json=getattr(args, "json", False),
         )

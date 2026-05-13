@@ -412,6 +412,53 @@ class TestHandlersRoundTrip:
         assert "cache_tier_breakdown" in report.context_governance
         assert report.tool_schema["original_tokens"] > 0
         assert report.tool_schema["tiers"]["strong"]["tokens"] < report.tool_schema["original_tokens"]
+        assert "quality_gates" in report.to_dict()
+        assert "router_token_savings" in report.quality_gates["gates"]
+
+    def test_quality_gate_verdict_passes_when_targets_are_met(self):
+        from dhee.router.quality_report import _quality_gates_section
+
+        gates = _quality_gates_section(
+            router={"total_calls": 20, "expansion_rate": 0.04},
+            replay={
+                "total_calls": 20,
+                "annotated_sessions": 2,
+                "saved_pct": 62.5,
+                "assistant_turns": 4,
+                "projected_cache_read_per_turn": 12_000,
+                "stale_context_incidents": 0,
+                "task_parity": {"pass": 2, "fail": 0, "unknown": 0, "avg_score": 0.98, "score_count": 2},
+            },
+            context_governance={"receipt_count": 5, "assertion_mismatch_count": 0},
+        )
+
+        assert gates["verdict"] == "pass"
+        assert gates["gates"]["router_token_savings"]["passed"] is True
+        assert gates["gates"]["expansion_rate"]["passed"] is True
+
+    def test_quality_gate_verdict_flags_attention(self):
+        from dhee.router.quality_report import _quality_gates_section
+
+        gates = _quality_gates_section(
+            router={"total_calls": 20, "expansion_rate": 0.28},
+            replay={
+                "total_calls": 20,
+                "annotated_sessions": 2,
+                "saved_pct": 22.0,
+                "assistant_turns": 4,
+                "projected_cache_read_per_turn": 42_000,
+                "stale_context_incidents": 1,
+                "task_parity": {"pass": 1, "fail": 1, "unknown": 0, "avg_score": 0.80, "score_count": 2},
+            },
+            context_governance={"receipt_count": 5, "assertion_mismatch_count": 1},
+        )
+
+        assert gates["verdict"] == "attention"
+        assert gates["gates"]["router_token_savings"]["passed"] is False
+        assert gates["gates"]["cache_read_per_turn"]["passed"] is False
+        assert gates["gates"]["stale_context_incidents"]["passed"] is False
+        assert gates["gates"]["task_parity_failures"]["passed"] is False
+        assert gates["gates"]["task_parity_score"]["passed"] is False
 
     def test_expand_records_attribution(self, router_tmp, tmp_path):
         from dhee.router import handlers
@@ -476,6 +523,104 @@ index 111..222 100644
         assert "files_changed=1" in digest.summary
         assert "additions=1" in digest.summary
         assert "deletions=1" in digest.summary
+
+
+class TestLanguageAwareReadDigest:
+    def test_tsx_digest_extracts_types_components_and_exports(self):
+        from dhee.router import digest
+
+        src = """
+import React from 'react';
+
+export interface Props {
+  name: string;
+}
+
+export type Mode = 'compact' | 'full';
+
+export const UserPanel: React.FC<Props> = ({ name }) => {
+  return <section>{name}</section>;
+};
+
+export { UserPanel as Panel };
+"""
+        d = digest.digest_read("UserPanel.tsx", src)
+
+        assert d.kind == "typescript"
+        assert "Props (interface)" in d.symbols["types"]
+        assert "Mode (type)" in d.symbols["types"]
+        assert "UserPanel" in d.symbols["components"]
+        assert "react" in d.symbols["imports"]
+        assert "UserPanel" in d.symbols["exports"]
+
+    def test_java_digest_extracts_contract_symbols(self):
+        from dhee.router import digest
+
+        src = """
+package app;
+
+import java.util.List;
+
+public final class RouterService {
+  public List<String> route(String query) {
+    return List.of(query);
+  }
+
+  private int score(String value) {
+    return value.length();
+  }
+}
+"""
+        d = digest.digest_read("RouterService.java", src)
+
+        assert d.kind == "java"
+        assert "RouterService (class)" in d.symbols["types"]
+        assert "route(String query)" in d.symbols["methods"]
+        assert "score(String value)" in d.symbols["methods"]
+        assert "java.util.List" in d.symbols["imports"]
+
+    def test_logs_digest_extracts_severity_counts_and_signals(self):
+        from dhee.router import digest
+
+        src = "\n".join(
+            [
+                "2026-05-13 INFO boot complete",
+                "2026-05-13 WARN retrying request",
+                "2026-05-13 ERROR failed to open pack",
+                "2026-05-13 ERROR failed to verify signature",
+            ]
+        )
+        d = digest.digest_read("runtime.log", src)
+
+        assert d.kind == "log"
+        assert "ERROR=2" in d.symbols["levels"]
+        assert "INFO=1" in d.symbols["levels"]
+        assert "WARN=1" in d.symbols["levels"]
+        assert any("failed to open pack" in item for item in d.symbols["signals"])
+
+    def test_shell_and_sql_digest_extracts_operational_contracts(self):
+        from dhee.router import digest
+
+        shell = """
+#!/usr/bin/env bash
+export DHEE_ENV=dev
+start_daemon() {
+  python -m dhee.runtime_daemon
+}
+"""
+        sh = digest.digest_read("bootstrap.sh", shell)
+        assert "start_daemon()" in sh.symbols["functions"]
+        assert "DHEE_ENV" in sh.symbols["variables"]
+
+        sql = """
+CREATE TABLE IF NOT EXISTS memories (id text primary key);
+CREATE VIEW recent_memories AS SELECT * FROM memories;
+CREATE INDEX idx_memories_id ON memories(id);
+"""
+        sq = digest.digest_read("schema.sql", sql)
+        assert "memories (table)" in sq.symbols["objects"]
+        assert "recent_memories (view)" in sq.symbols["objects"]
+        assert "idx_memories_id (index)" in sq.symbols["objects"]
 
 
 # ---------------------------------------------------------------------------

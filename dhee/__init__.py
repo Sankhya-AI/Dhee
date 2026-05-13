@@ -26,6 +26,7 @@ from dhee.memory.main import FullMemory
 from dhee.simple import Dhee, Engram
 from dhee.plugin import DheePlugin
 from dhee.fs import ContextWorkspace
+from dhee.context_kernel import DheeContextKernel, KernelScope
 from dhee.core.category import CategoryProcessor, Category, CategoryType, CategoryMatch
 from dhee.core.echo import EchoProcessor, EchoDepth, EchoResult
 from dhee.configs.base import MemoryConfig, FadeMemConfig, EchoMemConfig, CategoryMemConfig, ScopeConfig
@@ -47,6 +48,8 @@ __all__ = [
     "DheePlugin",
     # DheeFS
     "ContextWorkspace",
+    "DheeContextKernel",
+    "KernelScope",
     # CategoryMem
     "CategoryProcessor",
     "Category",

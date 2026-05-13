@@ -198,6 +198,13 @@ def test_task_aware_schema_selects_debug_failure():
     assert "failure landmarks" in schema["note"]
 
 
+def test_task_aware_schema_deepens_non_python_debug_sources():
+    for path in ("RouterService.java", "bootstrap.sh", "migration.sql", "runtime.log"):
+        schema = task_aware_read_schema(path, query="debug failing error")
+        assert schema["intent"] == "debug_failure"
+        assert schema["preferred_depth"] == "deep"
+
+
 def test_routing_query_compiles_task_signal_from_state(tmp_path):
     store = make_store(tmp_path)
     store.observe_prompt("Fix parser crash from pytest traceback")
