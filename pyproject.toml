@@ -82,6 +82,7 @@ dev = [
 
 [project.scripts]
 dhee = "dhee.cli:main"
+dhee-ui = "dhee.ui.server:main"
 dhee-mcp = "dhee.mcp_slim:run"
 dhee-mcp-full = "dhee.mcp_server:run"
 dhee-debugger-api = "dhee.debugger_api:run"
@@ -101,7 +102,6 @@ include-package-data = false
 where = [".", "engram-bus"]
 include = ["dhee*", "engram*", "engram_bus*"]
 exclude = [
-    "dhee.ui*",
     "engram-bus*",
     "engram-bridge*",
     "engram-enterprise*",
@@ -111,3 +111,6 @@ exclude = [
     "engram-metamemory*",
     "engram-policy*",
 ]
+
+[tool.setuptools.package-data]
+"dhee.ui" = ["static/*"]

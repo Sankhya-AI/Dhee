@@ -14,6 +14,7 @@ Usage:
     dhee handoff            Emit structured resume JSON for a new harness/agent
     dhee harness status     Show native Claude Code / Codex integration state
     dhee demo token-router  Show how Dhee keeps raw tool output behind pointers
+    dhee ui                 Open the local Dhee dashboard
     dhee benchmark          Run performance benchmarks
     dhee status             Version, config, DB info
 """
@@ -1238,6 +1239,18 @@ def cmd_demo(args: argparse.Namespace) -> None:
         _json_out(report)
         return
     print(format_token_router_demo(report, show_digests=not getattr(args, "no_digests", False)))
+
+
+def cmd_ui(args: argparse.Namespace) -> None:
+    """Run the local Dhee dashboard."""
+    from dhee.ui.server import serve
+
+    serve(
+        host=getattr(args, "host", "127.0.0.1"),
+        port=int(getattr(args, "port", 8765) or 8765),
+        repo=getattr(args, "repo", None),
+        open_browser=bool(getattr(args, "open", False)),
+    )
 
 
 def cmd_status(args: argparse.Namespace) -> None:
@@ -2531,6 +2544,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_demo.add_argument("--no-digests", action="store_true", help="Hide digest previews")
     p_demo.add_argument("--json", action="store_true", help="JSON output")
 
+    # ui
+    p_ui = sub.add_parser("ui", help="Run the local Dhee dashboard")
+    p_ui.add_argument("--host", default="127.0.0.1", help="Bind host (loopback by default)")
+    p_ui.add_argument("--port", type=int, default=8765, help="Bind port")
+    p_ui.add_argument("--repo", help="Repo/workspace to inspect (default: cwd)")
+    p_ui.add_argument("--open", action="store_true", help="Open in the default browser")
+
     # list
     p_list = sub.add_parser("list", help="List all memories")
     p_list.add_argument("--user-id", default="default", help="User ID")
@@ -3082,6 +3102,7 @@ COMMAND_MAP = {
     "search": cmd_search,
     "checkpoint": cmd_checkpoint,
     "demo": cmd_demo,
+    "ui": cmd_ui,
     "list": cmd_list,
     "stats": cmd_stats,
     "decay": cmd_decay,

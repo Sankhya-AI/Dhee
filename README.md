@@ -19,7 +19,7 @@
 
 <p align="center">
   <a href="#why-dhee">Why</a> |
-  <a href="#try-it">Try it</a> |
+  <a href="#ui-demo">UI demo</a> |
   <a href="#install">Install</a> |
   <a href="#how-it-works">How it works</a> |
   <a href="#integrations">Integrations</a> |
@@ -58,32 +58,25 @@ The promise is simple:
 
 ---
 
-## Try It
+## UI Demo
 
-Run the built-in context-router demo. It needs no API key and no connected agent:
+Run the local dashboard. It needs no API key and no connected agent:
 
 ```bash
-dhee demo token-router
+dhee ui --open
 ```
 
-Example result:
+The first screen shows:
 
-```text
-Dhee token-router demo
-  context firewall: agent sees the right thing, not everything
-  raw tokens:       25,208
-  digest tokens:    1,742
-  saved:            23,466 (93.1%)
-```
+- router savings from noisy pytest logs, git diffs, and long source reads
+- current state health and latest handoff
+- local runtime status
+- repo-shared context entries
+- integration surfaces for Claude Code, Codex, MCP clients, and Hermes
+- export/import/uninstall commands so the local data stays portable
 
-The demo shows how Dhee handles three common agent hazards:
-
-- a noisy pytest failure log
-- a large git diff
-- a long source file read
-
-In each case the agent receives a useful digest, while exact raw evidence stays
-behind `dhee_expand_result(ptr="...")` for explicit expansion.
+The UI is a view over the same public CLI/MCP primitives. The raw evidence still
+stays behind `dhee_expand_result(ptr="...")`; the dashboard makes that visible.
 
 ---
 
@@ -110,7 +103,7 @@ Useful first commands:
 ```bash
 dhee status
 dhee doctor
-dhee demo token-router
+dhee ui --open
 dhee handoff
 dhee context state --card
 dhee runtime status

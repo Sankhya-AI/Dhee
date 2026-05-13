@@ -9,8 +9,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Public Dhee is now positioned and packaged as **Dhee Developer Brain**:
   local memory, handoff, harness setup, and git-backed repo context.
 - Rewrote the README as a concise first-read product page focused on why Dhee
-  matters, the 30-second token-router proof, install, integrations, benchmarks,
-  and the public-core/paid-team-layer boundary.
+  matters, the UI demo, install, integrations, benchmarks, and the
+  public-core/paid-team-layer boundary.
+- Restored the public `dhee ui` dashboard and `dhee-ui` entrypoint. The OSS UI
+  uses the same dashboard design language while rendering local developer-brain
+  surfaces: context firewall, current state, runtime, integrations, repo
+  context, and portability.
 - Added `dhee demo token-router`, a deterministic context-firewall demo that
   shows raw tool-output tokens, digest tokens, savings, and expansion pointers
   without requiring a live agent session.
