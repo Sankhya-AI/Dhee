@@ -3561,6 +3561,7 @@ def create_app(*, serve_static: bool = True, dev_mode: bool = False) -> FastAPI:
         cursor: Optional[str] = None,
         limit: int = 25,
         agent: Optional[str] = None,
+        include_live_usage: bool = True,
     ) -> Dict[str, Any]:
         from dhee.router import ptr_store as _ptr
         from dhee.router import stats as _rstats
@@ -3633,18 +3634,19 @@ def create_app(*, serve_static: bool = True, dev_mode: bool = False) -> FastAPI:
         rows = db.list_agent_sessions(user_id=_ui_user_id(), limit=500) or []
         summaries = [_session_summary(db, row) for row in rows]
         codex_live_by_id: Dict[str, Dict[str, Any]] = {}
-        try:
-            for thread in _repo_codex_threads(_ui_repo(), limit=2):
-                usage = _router_codex_live_usage_from_thread(thread)
-                if not usage.get("available"):
-                    continue
-                thread_id = str(thread.get("id") or "")
-                if not thread_id:
-                    continue
-                codex_live_by_id[thread_id] = usage
-                codex_live_by_id[f"session:codex:{thread_id}"] = usage
-        except Exception:  # noqa: BLE001
-            codex_live_by_id = {}
+        if include_live_usage:
+            try:
+                for thread in _repo_codex_threads(_ui_repo(), limit=2):
+                    usage = _router_codex_live_usage_from_thread(thread)
+                    if not usage.get("available"):
+                        continue
+                    thread_id = str(thread.get("id") or "")
+                    if not thread_id:
+                        continue
+                    codex_live_by_id[thread_id] = usage
+                    codex_live_by_id[f"session:codex:{thread_id}"] = usage
+            except Exception:  # noqa: BLE001
+                codex_live_by_id = {}
 
         def router_bucket_for_cwd(cwd: Any) -> str:
             path = _abs_user_path(cwd)
@@ -3797,15 +3799,19 @@ def create_app(*, serve_static: bool = True, dev_mode: bool = False) -> FastAPI:
             )
             normalized_runtime = _rstats._normalize_agent_id(summary.get("runtime"))
             live_usage = None
-            if normalized_runtime == "codex" or any(
-                _rstats._normalize_agent_id(a) == "codex" for a in agent_ids
+            if include_live_usage and (
+                normalized_runtime == "codex" or any(
+                    _rstats._normalize_agent_id(a) == "codex" for a in agent_ids
+                )
             ):
                 live_usage = (
                     codex_live_by_id.get(str(session_id))
                     or codex_live_by_id.get(str(summary.get("nativeSessionId") or ""))
                 )
-            elif normalized_runtime == "claude-code" or any(
-                _rstats._normalize_agent_id(a) == "claude-code" for a in agent_ids
+            elif include_live_usage and (
+                normalized_runtime == "claude-code" or any(
+                    _rstats._normalize_agent_id(a) == "claude-code" for a in agent_ids
+                )
             ):
                 live_usage = _router_claude_live_usage_from_summary(summary)
             item = {
@@ -4490,58 +4496,11 @@ def create_app(*, serve_static: bool = True, dev_mode: bool = False) -> FastAPI:
 
     def _ui_light_router_sessions(active: bool = False, limit: int = 20) -> Dict[str, Any]:
         try:
-            db = _get_db()
-            rows = db.list_agent_sessions(user_id=_ui_user_id(), limit=max(1, min(int(limit), 50))) or []
-            items: List[Dict[str, Any]] = []
-            for row in rows:
-                summary = _session_summary(db, row)
-                item_active = _is_session_active(row)
-                if active and not item_active:
-                    continue
-                session_id = str(summary.get("id") or "")
-                item = {
-                    "session_id": session_id,
-                    "title": _session_title(
-                        summary.get("title"),
-                        preview=summary.get("preview"),
-                        runtime=summary.get("runtime"),
-                        cwd=summary.get("cwd"),
-                        session_id=summary.get("nativeSessionId") or session_id,
-                    ),
-                    "state": summary.get("state") or "",
-                    "agent": summary.get("runtime") or "unknown",
-                    "agents": [summary.get("runtime") or "unknown"],
-                    "cwd": summary.get("cwd") or "",
-                    "repo_root": _git_root_for_path(summary.get("cwd") or "") or summary.get("cwd") or "",
-                    "runtime": summary.get("runtime"),
-                    "model": summary.get("model"),
-                    "updated_at": summary.get("updatedAt") or "",
-                    "started_at": summary.get("startedAt"),
-                    "tokens_saved": 0,
-                    "estimated_cost_saved_usd": 0.0,
-                    "router_calls": 0,
-                    "tool_breakdown": {},
-                    "active": item_active,
-                    "task": {
-                        "id": summary.get("taskId"),
-                        "status": summary.get("taskStatus"),
-                    },
-                    "preview": summary.get("preview") or "",
-                }
-                items.append(item)
-            return {
-                "items": items,
-                "next_cursor": None,
-                "active_only": bool(active),
-                "totals": {
-                    "tokens_saved": 0,
-                    "estimated_cost_saved_usd": 0.0,
-                    "theoretical_api_value_usd": 0.0,
-                    "realized_cost_saved_usd": 0.0,
-                    "router_calls": 0,
-                    "sessions": len(items),
-                },
-            }
+            return api_router_sessions(
+                active=active,
+                limit=max(1, min(int(limit), 50)),
+                include_live_usage=False,
+            )
         except Exception as exc:  # noqa: BLE001
             return {"items": [], "totals": {"sessions": 0}, "live": False, "error": str(exc)}
 

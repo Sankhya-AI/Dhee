@@ -19,7 +19,7 @@
 
 <p align="center">
   <a href="#why-dhee">Why</a> |
-  <a href="#ui-demo">UI demo</a> |
+  <a href="#dhee-ui">Dhee UI</a> |
   <a href="#install">Install</a> |
   <a href="#how-it-works">How it works</a> |
   <a href="#integrations">Integrations</a> |

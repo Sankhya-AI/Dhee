@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from dhee.db.sqlite import SQLiteManager
+from dhee.router import ptr_store
 from dhee.ui.server import create_app
 
 
@@ -77,3 +80,61 @@ def test_ui_product_screen_apis(tmp_path, monkeypatch):
         payload = response.json()
         for key in keys:
             assert key in payload
+
+
+def test_ui_product_router_metrics_use_real_pointer_rollup(tmp_path, monkeypatch):
+    data_dir = tmp_path / "dhee-data"
+    history_db = tmp_path / "history.db"
+    router_ptrs = tmp_path / "router-ptrs"
+    session_id = "session-ui-router"
+    now = datetime.now(timezone.utc).isoformat()
+
+    monkeypatch.setenv("DHEE_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("DHEE_UI_HISTORY_DB", str(history_db))
+    monkeypatch.setenv("ENGRAM_HANDOFF_DB", str(tmp_path / "handoff.db"))
+    monkeypatch.setenv("DHEE_UI_REPO", str(tmp_path))
+    monkeypatch.setenv("DHEE_ROUTER_PTR_DIR", str(router_ptrs))
+    monkeypatch.setenv("DHEE_ROUTER_SESSION_ID", session_id)
+    monkeypatch.setenv("DHEE_SESSION_ID", session_id)
+    monkeypatch.setenv("DHEE_AGENT_ID", "codex")
+    monkeypatch.chdir(tmp_path)
+
+    db = SQLiteManager(str(history_db))
+    db.upsert_agent_session(
+        {
+            "id": session_id,
+            "user_id": "default",
+            "runtime_id": "codex",
+            "native_session_id": session_id,
+            "title": "Routed UI proof",
+            "state": "recent",
+            "cwd": str(tmp_path),
+            "started_at": now,
+            "updated_at": now,
+            "metadata": {"preview": "large read stayed behind a pointer"},
+        }
+    )
+    ptr_store.store(
+        "x" * 3500,
+        tool="Read",
+        meta={
+            "agent_id": "codex",
+            "harness": "codex",
+            "session_id": session_id,
+            "cwd": str(tmp_path),
+            "repo": str(tmp_path),
+        },
+    )
+
+    client = TestClient(create_app())
+    command = client.get("/api/ui/command-center")
+    assert command.status_code == 200
+    router = command.json()["router"]
+    assert router["totalCalls"] == 1
+    assert router["sessionTokensSaved"] >= 900
+
+    replay = client.get("/api/ui/proof-replay")
+    assert replay.status_code == 200
+    replay_data = replay.json()
+    assert replay_data["totals"]["digests"] >= 1
+    assert any(item["tokens_saved"] >= 900 for item in replay_data["items"])
