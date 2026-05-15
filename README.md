@@ -5,9 +5,6 @@
 <h2 align="center">
   Dhee decides what your agent should see, remember, forget, compress, and expand each turn.
 </h2>
-<h2 align="center">
-  remember, forget, compress, and expand each turn.
-</h2>
 
 <p align="center">
   <a href="https://pypi.org/project/dhee"><img src="https://img.shields.io/pypi/v/dhee?style=flat-square&color=orange" alt="PyPI"></a>
