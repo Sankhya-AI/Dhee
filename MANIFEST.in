@@ -1,7 +1,5 @@
 prune dhee/ui/web/node_modules
-prune dhee/ui
 prune enterprise
-prune engram-bus
 prune engram-bridge
 prune engram-enterprise
 prune engram-failure

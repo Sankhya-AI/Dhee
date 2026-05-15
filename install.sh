@@ -10,9 +10,13 @@
 #   4. Wires Claude Code (hooks + MCP + router) if available
 #   5. Runs `dhee onboard` — provider picker, API key paste,
 #      and optional git repo linking
+#   6. Shows `dhee ui` so the developer can inspect the local brain
 #
 # Non-interactive: pass DHEE_PROVIDER=openai DHEE_API_KEY=sk-... to skip
-# the prompts entirely (CI-friendly).
+# the prompts entirely (CI-friendly). Set DHEE_INIT_REPO=/path/to/repo to
+# wire a git repo non-interactively after install. Set
+# DHEE_INIT_SKIP_INGEST=1 for CI smoke tests that should link the repo without
+# calling an embedding provider.
 #
 # Requires: Python 3.9+  (Claude Code CLI optional)
 set -e
@@ -21,7 +25,9 @@ DHEE_HOME="$HOME/.dhee"
 VENV_DIR="$DHEE_HOME/.venv"
 BIN_DIR="$HOME/.local/bin"
 MIN_PYTHON="3.9"
-PACKAGE="dhee>=6.1.0"
+DEFAULT_PACKAGE="dhee>=6.2.0"
+PACKAGE="${DHEE_INSTALL_PACKAGE:-$DEFAULT_PACKAGE}"
+FALLBACK_PACKAGE="${DHEE_FALLBACK_PACKAGE:-git+https://github.com/Sankhya-AI/Dhee.git@main}"
 
 # --- Colors ---
 if [ -t 1 ]; then
@@ -34,6 +40,19 @@ info()  { printf "${GREEN}>${RESET} %s\n" "$1"; }
 warn()  { printf "${YELLOW}!${RESET} %s\n" "$1"; }
 error() { printf "${RED}x${RESET} %s\n" "$1" >&2; exit 1; }
 done_() { printf "${GREEN}✓${RESET} %s\n" "$1"; }
+
+pip_install_package() {
+    "$VENV_DIR/bin/pip" install --upgrade --force-reinstall --no-cache-dir "$1" -q
+}
+
+verify_handoff_bus() {
+    "$VENV_DIR/bin/python" - <<'PY' >/dev/null 2>&1
+from dhee.core.kernel import _get_bus
+
+bus = _get_bus()
+bus.close()
+PY
+}
 
 # --- OS check ---
 OS="$(uname -s)"
@@ -73,20 +92,30 @@ fi
 
 # --- Install package ---
 "$VENV_DIR/bin/pip" install --upgrade pip -q 2>/dev/null
-"$VENV_DIR/bin/pip" install --upgrade --no-cache-dir "$PACKAGE" -q
-done_ "Installed dhee"
+if pip_install_package "$PACKAGE"; then
+    done_ "Installed dhee"
+else
+    if [ -n "${DHEE_INSTALL_PACKAGE:-}" ]; then
+        error "Could not install Dhee from DHEE_INSTALL_PACKAGE=$DHEE_INSTALL_PACKAGE"
+    fi
+    warn "PyPI install failed — trying the current GitHub release path"
+    command -v git >/dev/null 2>&1 || error "Git is required for the fallback installer. Install git, then rerun the command."
+    pip_install_package "$FALLBACK_PACKAGE" || error "Could not install Dhee from PyPI or GitHub fallback"
+    done_ "Installed dhee from GitHub fallback"
+fi
 
 # --- Verify bundled handoff bus ---
-if "$VENV_DIR/bin/python" - <<'PY' >/dev/null 2>&1
-from dhee.core.kernel import _get_bus
-
-bus = _get_bus()
-bus.close()
-PY
-then
+if verify_handoff_bus; then
     done_ "Cross-agent handoff bus ready"
 else
-    error "Dhee installed, but the bundled handoff bus failed to import. Please rerun the installer or report this build."
+    if [ -n "${DHEE_INSTALL_PACKAGE:-}" ]; then
+        error "Dhee installed, but the bundled handoff bus failed to import from DHEE_INSTALL_PACKAGE=$DHEE_INSTALL_PACKAGE"
+    fi
+    warn "PyPI package failed handoff-bus verification — repairing from GitHub"
+    command -v git >/dev/null 2>&1 || error "Git is required for the repair installer. Install git, then rerun the command."
+    pip_install_package "$FALLBACK_PACKAGE" || error "Dhee installed, but GitHub repair failed. Please report this installer output."
+    verify_handoff_bus || error "Dhee installed, but the bundled handoff bus still failed to import after repair."
+    done_ "Cross-agent handoff bus ready"
 fi
 
 # --- Symlink binaries ---
@@ -170,9 +199,23 @@ else
     fi
 fi
 
+if [ -n "${DHEE_INIT_REPO:-}" ]; then
+    info "Wiring git repo: ${DHEE_INIT_REPO}"
+    INIT_FLAGS=""
+    [ "${DHEE_INIT_SKIP_INGEST:-}" = "1" ] && INIT_FLAGS="$INIT_FLAGS --skip-ingest"
+    [ "${DHEE_INIT_SKIP_FIRST_LIGHT:-}" = "1" ] && INIT_FLAGS="$INIT_FLAGS --skip-first-light"
+    # shellcheck disable=SC2086 # intentional flag splitting for the small managed flag set above.
+    if "$VENV_DIR/bin/dhee" init "$DHEE_INIT_REPO" $INIT_FLAGS >/dev/null 2>&1; then
+        done_ "Repo wired into Dhee"
+    else
+        warn "Repo wire-up failed — run 'cd ${DHEE_INIT_REPO} && dhee init' manually for details"
+    fi
+fi
+
 # --- Done ---
 printf "\n${BOLD}${GREEN}Dhee is ready.${RESET}\n"
 printf "  Wire up a repo:  ${BOLD}cd /path/to/repo && dhee init${RESET}\n"
+printf "  Open the UI:     ${BOLD}dhee ui${RESET}   ${DIM}(local command center, folders canvas, firewall)${RESET}\n"
 printf "  Update later:    ${BOLD}dhee update${RESET}\n\n"
 printf "${DIM}  Status:    dhee status            (savings + brain health)${RESET}\n"
 printf "${DIM}  Recall:    dhee recall \"<query>\"   (your personal cross-repo brain)${RESET}\n"

@@ -8,6 +8,7 @@
 
 <p align="center">
   <a href="https://pypi.org/project/dhee"><img src="https://img.shields.io/pypi/v/dhee?style=flat-square&color=orange" alt="PyPI"></a>
+  <a href="https://github.com/Sankhya-AI/Dhee/releases"><img src="https://img.shields.io/badge/status-production--ready-brightgreen?style=flat-square" alt="Production ready"></a>
   <a href="https://pypi.org/project/dhee"><img src="https://img.shields.io/badge/python-3.9%2B-blue.svg?style=flat-square" alt="Python 3.9+"></a>
   <a href="https://github.com/Sankhya-AI/Dhee/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square" alt="MIT License"></a>
   <a href="benchmarks/longmemeval/"><img src="https://img.shields.io/badge/LongMemEval-R%401%2094.8%25-brightgreen.svg?style=flat-square" alt="LongMemEval R@1 94.8%"></a>
@@ -91,6 +92,10 @@ One command:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Sankhya-AI/Dhee/main/install.sh | sh
 ```
+
+The installer creates the managed local runtime, verifies the handoff bus, wires
+detected harnesses, and ends with the two commands most people need first:
+`cd /path/to/repo && dhee init` and `dhee ui`.
 
 Or via pip:
 

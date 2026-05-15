@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [6.2.0] - 2026-05-15 — Production launch hardening
+
+- Marked the public package metadata as `Development Status :: 5 -
+  Production/Stable` for the Product Hunt launch.
+- Fixed the release wheel so the bundled `engram_bus` handoff package is
+  actually included instead of being pruned from the source distribution.
+- Hardened `install.sh` with a verified handoff-bus check, a GitHub repair
+  fallback if PyPI is stale or broken, `DHEE_INSTALL_PACKAGE` for reproducible
+  installer smoke tests, and `DHEE_INIT_REPO` for non-interactive repo wire-up.
+- The installer now explicitly points new users at `dhee ui` after install so
+  they can open the local command center, folders canvas, and firewall without
+  hunting through docs.
+
 ## Unreleased — Developer Brain split
 
 - Public Dhee is now positioned and packaged as **Dhee Developer Brain**:
