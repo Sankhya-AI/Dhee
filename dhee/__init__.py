@@ -30,6 +30,12 @@ from dhee.context_kernel import DheeContextKernel, KernelScope
 from dhee.core.category import CategoryProcessor, Category, CategoryType, CategoryMatch
 from dhee.core.echo import EchoProcessor, EchoDepth, EchoResult
 from dhee.configs.base import MemoryConfig, FadeMemConfig, EchoMemConfig, CategoryMemConfig, ScopeConfig
+from dhee.memory.admission import (
+    MemoryAdmissionDecision,
+    evaluate_memory_candidate,
+    forget_reason_for_memory,
+    sanitize_admitted_content,
+)
 
 # Default: CoreMemory (lightest, zero-config)
 Memory = CoreMemory
@@ -65,4 +71,9 @@ __all__ = [
     "EchoMemConfig",
     "CategoryMemConfig",
     "ScopeConfig",
+    # Memory admission
+    "MemoryAdmissionDecision",
+    "evaluate_memory_candidate",
+    "forget_reason_for_memory",
+    "sanitize_admitted_content",
 ]

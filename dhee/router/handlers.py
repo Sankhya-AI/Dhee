@@ -320,6 +320,11 @@ def handle_dhee_read(arguments: Dict[str, Any]) -> Dict[str, Any]:
     file_path = str(arguments.get("file_path", "")).strip()
     if not file_path:
         return {"error": "file_path is required"}
+    from dhee.contract_runtime import guard_router_call, record_router_observation, router_refusal, router_result_runtime
+
+    contract_guard = guard_router_call("dhee_read", arguments)
+    if not contract_guard.get("allowed", True):
+        return router_refusal(contract_guard)
 
     offset_raw = arguments.get("offset")
     limit_raw = arguments.get("limit")
@@ -502,7 +507,7 @@ def handle_dhee_read(arguments: Dict[str, Any]) -> Dict[str, Any]:
         },
         content_hash=_stable_context_hash("routed_read", file_path, offset, limit, content),
     )
-    return {
+    result = {
         "ptr": stored.ptr,
         "digest": rendered,
         "line_count": d.line_count,
@@ -514,6 +519,11 @@ def handle_dhee_read(arguments: Dict[str, Any]) -> Dict[str, Any]:
         "task_source": state_route.get("source") if state_route else ("explicit" if (task_query or task_intent) else ""),
         "focus_count": len(d.focus),
     }
+    observation = record_router_observation(contract_guard, result)
+    runtime_info = router_result_runtime(contract_guard, observation)
+    if runtime_info:
+        result["contract_runtime"] = runtime_info
+    return result
 
 
 def handle_dhee_bash(arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -529,6 +539,13 @@ def handle_dhee_bash(arguments: Dict[str, Any]) -> Dict[str, Any]:
     cmd = str(arguments.get("command", "")).strip()
     if not cmd:
         return {"error": "command is required"}
+    from dhee.contract_runtime import command_preview, guard_router_call, record_router_observation, router_refusal, router_result_runtime
+
+    contract_guard = guard_router_call("dhee_bash", arguments)
+    if not contract_guard.get("allowed", True):
+        denial = router_refusal(contract_guard)
+        denial["command_preview"] = command_preview(cmd)
+        return denial
 
     try:
         timeout = float(arguments.get("timeout", BASH_DEFAULT_TIMEOUT))
@@ -680,7 +697,7 @@ def handle_dhee_bash(arguments: Dict[str, Any]) -> Dict[str, Any]:
         },
         content_hash=_stable_context_hash("routed_bash", cwd or os.getcwd(), cmd, exit_code, raw_blob),
     )
-    return {
+    result = {
         "ptr": stored.ptr,
         "digest": rendered,
         "exit_code": exit_code,
@@ -692,6 +709,11 @@ def handle_dhee_bash(arguments: Dict[str, Any]) -> Dict[str, Any]:
         "inlined": inlined,
         "preflight": preflight,
     }
+    observation = record_router_observation(contract_guard, result)
+    runtime_info = router_result_runtime(contract_guard, observation)
+    if runtime_info:
+        result["contract_runtime"] = runtime_info
+    return result
 
 
 def handle_dhee_agent(arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -770,6 +792,11 @@ def handle_dhee_grep(arguments: Dict[str, Any]) -> Dict[str, Any]:
     path = arguments.get("path")
     if not isinstance(path, str) or not path:
         path = "."
+    from dhee.contract_runtime import guard_router_call, record_router_observation, router_refusal, router_result_runtime
+
+    contract_guard = guard_router_call("dhee_grep", {**arguments, "path": path})
+    if not contract_guard.get("allowed", True):
+        return router_refusal(contract_guard)
 
     glob = arguments.get("glob")
     if glob is not None and not isinstance(glob, str):
@@ -899,7 +926,7 @@ def handle_dhee_grep(arguments: Dict[str, Any]) -> Dict[str, Any]:
         },
         content_hash=_stable_context_hash("routed_grep", path, pattern, glob, raw),
     )
-    return {
+    result = {
         "ptr": stored.ptr,
         "digest": rendered,
         "match_count": digest.match_count,
@@ -909,6 +936,11 @@ def handle_dhee_grep(arguments: Dict[str, Any]) -> Dict[str, Any]:
         "engine": digest.engine,
         "inlined": inlined,
     }
+    observation = record_router_observation(contract_guard, result)
+    runtime_info = router_result_runtime(contract_guard, observation)
+    if runtime_info:
+        result["contract_runtime"] = runtime_info
+    return result
 
 
 def _slice_by_range(content: str, range_spec: Any) -> tuple[str, dict[str, Any]]:

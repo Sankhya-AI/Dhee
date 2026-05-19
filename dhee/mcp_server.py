@@ -48,6 +48,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
+from dhee.mcp_registry import CONTEXT_COMPILER_TOOL_NAMES, make_tools
 from dhee.memory.main import FullMemory
 from dhee.configs.base import (
     MemoryConfig,
@@ -406,6 +407,89 @@ TOOLS = [
             },
         },
     ),
+    Tool(
+        name="dhee_scene_world_route",
+        description=(
+            "Predict likely outcomes for candidate next actions using the optional "
+            "SceneWorld world-model sidecar. Use before choosing a high-stakes "
+            "agent action when DHEE_SCENE_WORLD_ENABLED=1."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "task": {"type": "string", "description": "Current task or scene"},
+                "query": {"type": "string", "description": "Alias for task"},
+                "repo": {"type": "string", "description": "Repo/workspace path"},
+                "user_id": {"type": "string", "description": "User identifier"},
+                "harness": {"type": "string", "description": "Harness/runtime id"},
+                "top_k": {"type": "integer", "description": "Number of ranked actions to return"},
+                "record": {"type": "boolean", "description": "Record the route trace when route logging is configured"},
+            },
+        },
+    ),
+    Tool(
+        name="dhee_scene_compile",
+        description="Compile a private TemporalScene card from evidence pointers, memory rows, agent outputs, browser captures, or admitted derivatives.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "evidence": {"type": "array", "items": {"type": "object"}, "description": "Evidence rows or pointers to compile."},
+                "query": {"type": "string", "description": "Optional query/task used when include_recent_memories is true."},
+                "task": {"type": "string", "description": "Current user task or scene goal."},
+                "title": {"type": "string", "description": "Optional scene title."},
+                "repo": {"type": "string", "description": "Repo/workspace path to attach as a scene ref."},
+                "user_id": {"type": "string", "description": "User id (default: default)."},
+                "privacy_scope": {"type": "string", "description": "Scene privacy scope (default: personal)."},
+                "store_dir": {"type": "string", "description": "Optional scene store override."},
+                "save": {"type": "boolean", "description": "Persist scene to the private scene store (default: true)."},
+                "include_recent_memories": {"type": "boolean", "description": "If evidence is empty, search recent/relevant memory and compile from those results."},
+                "include_repo_context": {"type": "boolean", "description": "Collect repo-shared context entries as evidence."},
+                "include_session": {"type": "boolean", "description": "Fetch latest compact session digest as evidence when available."},
+                "include_shared_task_results": {"type": "boolean", "description": "Fetch active shared-task result packets as evidence when available."},
+                "include_artifacts": {"type": "boolean", "description": "Fetch recent artifact summaries as evidence when available."},
+                "include_live_sources": {"type": "boolean", "description": "Fetch session, shared-task results, and artifacts for requested sources."},
+                "sources": {"type": "array", "items": {"type": "string"}, "description": "Evidence sources: evidence, memory, repo_context, session, shared_task_results, artifacts."},
+                "session": {"type": "object", "description": "Optional session digest to compile as evidence."},
+                "shared_task_results": {"description": "Optional shared-task result rows or response object."},
+                "artifacts": {"description": "Optional artifact summaries or response object."},
+                "limit": {"type": "integer", "description": "Memory/evidence limit when include_recent_memories is true."},
+            },
+        },
+    ),
+    Tool(
+        name="dhee_scene_search",
+        description="Search private TemporalScene cards and return prompt-safe summaries with evidence refs only.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "user_id": {"type": "string"},
+                "repo": {"type": "string"},
+                "limit": {"type": "integer"},
+                "store_dir": {"type": "string"},
+                "include_personal": {"type": "boolean"},
+            },
+            "required": ["query"],
+        },
+    ),
+    Tool(
+        name="dhee_context_pack",
+        description="Build a hard-budget context pack from ranked scene cards. Raw evidence expands only by pointer.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "user_id": {"type": "string"},
+                "repo": {"type": "string"},
+                "token_budget": {"type": "integer"},
+                "limit": {"type": "integer"},
+                "store_dir": {"type": "string"},
+                "include_personal": {"type": "boolean"},
+            },
+            "required": ["query"],
+        },
+    ),
+    *make_tools(Tool, CONTEXT_COMPILER_TOOL_NAMES),
     Tool(
         name="get_last_session",
         description=(
@@ -1310,6 +1394,396 @@ def _handle_dhee_context(memory, args):
     return result
 
 
+def _handle_dhee_scene_world_route(_memory, args):
+    task = str(args.get("task") or args.get("query") or "")
+    if not task.strip():
+        return {"error": "task is required"}
+    try:
+        from dhee.hooks.scene_world import route_task
+
+        return route_task(
+            task,
+            repo=args.get("repo"),
+            user_id=_default_user_id(args),
+            harness=str(args.get("harness") or os.environ.get("DHEE_HARNESS") or _default_agent_id(args)),
+            top_k=_bounded_limit(args, "top_k", 4, 8),
+            record=args.get("record") if "record" in args else None,
+        )
+    except Exception as exc:
+        return {"enabled": False, "status": "error", "reason": f"{type(exc).__name__}: {exc}"}
+
+
+def _scene_evidence_from_args(memory, args: Dict[str, Any]) -> List[Dict[str, Any]]:
+    from dhee.temporal_scenes import collect_live_scene_sources, collect_scene_evidence
+
+    sources = set(str(source) for source in (args.get("sources") or ["evidence"]))
+    if args.get("include_recent_memories"):
+        sources.add("memory")
+    if args.get("include_repo_context"):
+        sources.add("repo_context")
+    if args.get("include_session"):
+        sources.add("session")
+    if args.get("include_shared_task_results"):
+        sources.add("shared_task_results")
+    if args.get("include_artifacts"):
+        sources.add("artifacts")
+    if args.get("include_live_sources"):
+        sources.update({"session", "shared_task_results", "artifacts"})
+    needs_live = bool(args.get("include_live_sources")) or any(
+        source in sources
+        for source in ("session", "session_digest", "shared_task_results", "shared_task", "artifacts", "artifact")
+    )
+    live: Dict[str, Any] = {}
+    if needs_live:
+        live_db = None
+        if any(source in sources for source in ("shared_task_results", "shared_task", "artifacts", "artifact")):
+            live_db = get_db()
+        live = collect_live_scene_sources(
+            db=live_db,
+            repo=args.get("repo"),
+            user_id=_default_user_id(args),
+            agent_id=_default_agent_id(args),
+            limit=_bounded_limit(args, "limit", 8, 50),
+            include_session=("session" in sources or "session_digest" in sources) and not args.get("session"),
+            include_shared_task_results=("shared_task_results" in sources or "shared_task" in sources) and not args.get("shared_task_results"),
+            include_artifacts=("artifacts" in sources or "artifact" in sources) and not args.get("artifacts"),
+        )
+    mem = memory or (get_memory() if "memory" in sources else None)
+    return collect_scene_evidence(
+        evidence=args.get("evidence") or [],
+        memory=mem,
+        query=str(args.get("query") or args.get("task") or ""),
+        user_id=_default_user_id(args),
+        repo=args.get("repo"),
+        session=args.get("session") or live.get("session"),
+        shared_task_results=args.get("shared_task_results") or live.get("shared_task_results"),
+        artifacts=args.get("artifacts") or live.get("artifacts"),
+        sources=sources,
+        limit=_bounded_limit(args, "limit", 8, 50),
+    )
+
+
+def _handle_dhee_scene_compile(memory, args):
+    from dhee.temporal_scenes import compile_scene
+
+    evidence = _scene_evidence_from_args(memory, args)
+    if not evidence:
+        return {"error": "evidence is required unless include_recent_memories returns results"}
+    scene = compile_scene(
+        evidence,
+        user_id=_default_user_id(args),
+        repo=args.get("repo"),
+        task=str(args.get("task") or args.get("query") or ""),
+        privacy_scope=str(args.get("privacy_scope") or "personal"),
+        title=args.get("title"),
+        store_dir=args.get("store_dir"),
+        save=args.get("save") is not False,
+    )
+    return {
+        "format": "dhee_scene_compile.v1",
+        "scene": scene.to_dict(),
+        "card": scene.to_card(),
+    }
+
+
+def _handle_dhee_scene_search(_memory, args):
+    from dhee.temporal_scenes import search_scenes
+
+    query = str(args.get("query") or "").strip()
+    if not query:
+        return {"error": "query is required"}
+    scenes = search_scenes(
+        query,
+        user_id=_default_user_id(args),
+        repo=args.get("repo"),
+        limit=_bounded_limit(args, "limit", 5, 30),
+        store_dir=args.get("store_dir"),
+        include_personal=args.get("include_personal") is not False,
+    )
+    return {
+        "format": "dhee_scene_search.v1",
+        "results": [scene.to_card() for scene in scenes],
+    }
+
+
+def _handle_dhee_context_pack(_memory, args):
+    from dhee.temporal_scenes import build_context_pack
+
+    query = str(args.get("query") or "").strip()
+    if not query:
+        return {"error": "query is required"}
+    try:
+        budget = int(args.get("token_budget") or 1200)
+    except (TypeError, ValueError):
+        budget = 1200
+    return build_context_pack(
+        query,
+        user_id=_default_user_id(args),
+        repo=args.get("repo"),
+        token_budget=max(128, min(20_000, budget)),
+        limit=_bounded_limit(args, "limit", 5, 30),
+        store_dir=args.get("store_dir"),
+        include_personal=args.get("include_personal") is not False,
+    )
+
+
+def _handle_dhee_task_contract_compile(_memory, args):
+    from dhee.task_contracts import compile_task_contract
+
+    goal = str(args.get("goal") or args.get("task") or args.get("query") or "").strip()
+    if not goal:
+        return {"error": "goal, task, or query is required"}
+    return compile_task_contract(
+        goal,
+        repo=args.get("repo"),
+        mode=str(args.get("mode") or "patch"),
+        risk=args.get("risk"),
+        allowed_write_paths=args.get("allowed_write_paths"),
+        forbidden_paths=args.get("forbidden_paths"),
+        must_run=args.get("must_run"),
+        success_criteria=args.get("success_criteria"),
+        context_budget=args.get("context_budget"),
+        memory_pointers=args.get("memory_pointers"),
+        recent_failures=args.get("recent_failures"),
+    )
+
+
+def _task_goal_from_args(args: Dict[str, Any]) -> str:
+    return str(args.get("goal") or args.get("task") or args.get("query") or "").strip()
+
+
+def _handle_dhee_task_contract_create(_memory, args):
+    from dhee.task_contracts import create_task_contract
+
+    goal = _task_goal_from_args(args)
+    if not goal:
+        return {"error": "goal, task, or query is required"}
+    return create_task_contract(
+        goal,
+        repo=args.get("repo"),
+        out=args.get("out"),
+        mode=str(args.get("mode") or "patch"),
+        risk=args.get("risk"),
+        allowed_write_paths=args.get("allowed_write_paths"),
+        forbidden_paths=args.get("forbidden_paths"),
+        must_run=args.get("must_run"),
+        success_criteria=args.get("success_criteria"),
+        context_budget=args.get("context_budget"),
+        memory_pointers=args.get("memory_pointers"),
+        recent_failures=args.get("recent_failures"),
+    )
+
+
+def _handle_dhee_task_contract_list(_memory, args):
+    from dhee.task_contracts import list_task_contracts
+
+    return {
+        "format": "dhee_task_contract_list.v1",
+        "results": list_task_contracts(repo=args.get("repo")),
+    }
+
+
+def _handle_dhee_task_contract_get(_memory, args):
+    from dhee.task_contracts import get_task_contract
+
+    task_id = str(args.get("task_id") or args.get("id") or "")
+    if not task_id:
+        return {"error": "task_id is required"}
+    return get_task_contract(task_id, repo=args.get("repo"))
+
+
+def _handle_dhee_task_contract_import(_memory, args):
+    from dhee.task_contracts import import_task_contract
+
+    path = str(args.get("path") or "")
+    if not path:
+        return {"error": "path is required"}
+    return import_task_contract(path, repo=args.get("repo"))
+
+
+def _handle_dhee_task_contract_interpret(_memory, args):
+    from dhee.task_contracts import interpret_task_contract
+
+    task_contract = args.get("contract") or args.get("path") or args.get("task_id") or args.get("id")
+    if not task_contract:
+        return {"error": "contract, path, or task_id is required"}
+    return interpret_task_contract(
+        task_contract,
+        repo=args.get("repo"),
+        strict=bool(args.get("strict") or False),
+    )
+
+
+def _contract_ref_from_args(args: Dict[str, Any]) -> Any:
+    return args.get("contract") or args.get("path") or args.get("task_id") or args.get("id")
+
+
+def _handle_dhee_contract_supervise_action(_memory, args):
+    from dhee.contract_supervisor import supervise_action
+
+    task_contract = _contract_ref_from_args(args)
+    action = args.get("action") or args.get("proposed_action")
+    if not task_contract:
+        return {"error": "contract, path, or task_id is required"}
+    if not isinstance(action, dict):
+        return {"error": "action or proposed_action object is required"}
+    return supervise_action(
+        task_contract,
+        action,
+        repo=args.get("repo"),
+        strict=bool(args.get("strict") or False),
+    )
+
+
+def _handle_dhee_contract_record_observation(_memory, args):
+    from dhee.contract_supervisor import record_observation_transition
+
+    task_contract = _contract_ref_from_args(args)
+    action = args.get("action")
+    if not task_contract:
+        return {"error": "contract, path, or task_id is required"}
+    if not isinstance(action, dict):
+        return {"error": "action object is required"}
+    return record_observation_transition(
+        task_contract,
+        action,
+        args.get("observation") or "",
+        repo=args.get("repo"),
+        outcome=str(args.get("outcome") or "observed"),
+        next_action=args.get("next_action") if isinstance(args.get("next_action"), dict) else None,
+        strict=bool(args.get("strict") or False),
+    )
+
+
+def _handle_dhee_contract_proof_bundle(_memory, args):
+    from dhee.contract_supervisor import build_proof_bundle
+
+    task_contract = _contract_ref_from_args(args)
+    if not task_contract:
+        return {"error": "contract, path, or task_id is required"}
+    persist = args.get("persist")
+    return build_proof_bundle(
+        task_contract,
+        repo=args.get("repo"),
+        strict=bool(args.get("strict") or False),
+        persist=True if persist is None else bool(persist),
+    )
+
+
+def _handle_dhee_contract_runtime_activate(_memory, args):
+    from dhee.contract_runtime import activate_contract_runtime
+
+    task_contract = _contract_ref_from_args(args)
+    if not task_contract:
+        return {"error": "contract, path, or task_id is required"}
+    return activate_contract_runtime(
+        task_contract,
+        repo=args.get("repo"),
+        strict=bool(args.get("strict") or False),
+        force=bool(args.get("force") or False),
+        agent_id=args.get("agent_id"),
+        harness=args.get("harness"),
+    )
+
+
+def _handle_dhee_contract_runtime_status(_memory, args):
+    from dhee.contract_runtime import contract_runtime_status
+
+    return contract_runtime_status(repo=args.get("repo"))
+
+
+def _handle_dhee_contract_runtime_deactivate(_memory, args):
+    from dhee.contract_runtime import deactivate_contract_runtime
+
+    return deactivate_contract_runtime(
+        repo=args.get("repo"),
+        agent_id=args.get("agent_id"),
+        reason=str(args.get("reason") or "manual"),
+    )
+
+
+def _handle_dhee_contract_enforcement_set(_memory, args):
+    from dhee.contract_runtime import set_contract_enforcement
+
+    return set_contract_enforcement(
+        str(args.get("mode") or ""),
+        repo=args.get("repo"),
+        agent_id=args.get("agent_id"),
+        reason=args.get("reason"),
+    )
+
+
+def _handle_dhee_contract_enforcement_status(_memory, args):
+    from dhee.contract_runtime import contract_enforcement_status
+
+    return contract_enforcement_status(repo=args.get("repo"))
+
+
+def _handle_dhee_contract_runtime_doctor(_memory, args):
+    from dhee.contract_runtime import contract_runtime_doctor
+
+    return contract_runtime_doctor(repo=args.get("repo"))
+
+
+def _handle_dhee_update_capsule_create(_memory, args):
+    from dhee.update_capsules import create_update_capsule
+
+    return create_update_capsule(
+        repo=args.get("repo"),
+        since=args.get("since"),
+        task_id=args.get("task_id"),
+        out=args.get("out"),
+        title=args.get("title"),
+        summary=args.get("summary"),
+        commands=args.get("commands"),
+        evidence=args.get("evidence"),
+    )
+
+
+def _handle_dhee_update_capsule_list(_memory, args):
+    from dhee.update_capsules import list_update_capsules
+
+    return {
+        "format": "dhee_update_capsule_list.v1",
+        "results": list_update_capsules(repo=args.get("repo")),
+    }
+
+
+def _handle_dhee_update_capsule_get(_memory, args):
+    from dhee.update_capsules import get_update_capsule
+
+    capsule_id = str(args.get("capsule_id") or args.get("id") or "")
+    if not capsule_id:
+        return {"error": "capsule_id is required"}
+    return get_update_capsule(capsule_id, repo=args.get("repo"))
+
+
+def _handle_dhee_update_capsule_import(_memory, args):
+    from dhee.update_capsules import import_update_capsule
+
+    path = str(args.get("path") or "")
+    if not path:
+        return {"error": "path is required"}
+    return import_update_capsule(
+        path,
+        repo=args.get("repo"),
+        allow_private=bool(args.get("allow_private") or False),
+    )
+
+
+def _handle_dhee_update_capsule_interpret(_memory, args):
+    from dhee.update_capsules import interpret_update_capsule
+
+    capsule = args.get("capsule") or args.get("path") or args.get("capsule_id") or args.get("id")
+    if not capsule:
+        return {"error": "capsule, path, or capsule_id is required"}
+    return interpret_update_capsule(
+        capsule,
+        repo=args.get("repo"),
+        strict=bool(args.get("strict") or False),
+    )
+
+
 def _handle_get_last_session(_memory, args):
     from dhee.core.kernel import get_last_session
     session = get_last_session(
@@ -1744,6 +2218,23 @@ def _handle_dhee_tools_list(_memory, _arguments: Dict[str, Any]) -> Dict[str, An
         "dhee_context_checkpoint",
         "dhee_context_rollover",
         "dhee_context_provision",
+        "dhee_scene_world_route",
+        "dhee_scene_compile",
+        "dhee_scene_search",
+        "dhee_context_pack",
+        "dhee_task_contract_compile",
+        "dhee_task_contract_create",
+        "dhee_task_contract_list",
+        "dhee_task_contract_get",
+        "dhee_task_contract_import",
+        "dhee_task_contract_interpret",
+        "dhee_contract_supervise_action",
+        "dhee_contract_record_observation",
+        "dhee_update_capsule_create",
+        "dhee_update_capsule_list",
+        "dhee_update_capsule_get",
+        "dhee_update_capsule_import",
+        "dhee_update_capsule_interpret",
         "dhee_shell",
         "dhee_read",
         "dhee_grep",
@@ -2247,6 +2738,30 @@ HANDLERS = {
     "get_memory": _handle_get_memory,
     "get_all_memories": _handle_get_all_memories,
     "dhee_context": _handle_dhee_context,
+    "dhee_scene_world_route": _handle_dhee_scene_world_route,
+    "dhee_scene_compile": _handle_dhee_scene_compile,
+    "dhee_scene_search": _handle_dhee_scene_search,
+    "dhee_context_pack": _handle_dhee_context_pack,
+    "dhee_task_contract_compile": _handle_dhee_task_contract_compile,
+    "dhee_task_contract_create": _handle_dhee_task_contract_create,
+    "dhee_task_contract_list": _handle_dhee_task_contract_list,
+    "dhee_task_contract_get": _handle_dhee_task_contract_get,
+    "dhee_task_contract_import": _handle_dhee_task_contract_import,
+    "dhee_task_contract_interpret": _handle_dhee_task_contract_interpret,
+    "dhee_contract_supervise_action": _handle_dhee_contract_supervise_action,
+    "dhee_contract_record_observation": _handle_dhee_contract_record_observation,
+    "dhee_contract_proof_bundle": _handle_dhee_contract_proof_bundle,
+    "dhee_contract_runtime_activate": _handle_dhee_contract_runtime_activate,
+    "dhee_contract_runtime_status": _handle_dhee_contract_runtime_status,
+    "dhee_contract_runtime_deactivate": _handle_dhee_contract_runtime_deactivate,
+    "dhee_contract_enforcement_set": _handle_dhee_contract_enforcement_set,
+    "dhee_contract_enforcement_status": _handle_dhee_contract_enforcement_status,
+    "dhee_contract_runtime_doctor": _handle_dhee_contract_runtime_doctor,
+    "dhee_update_capsule_create": _handle_dhee_update_capsule_create,
+    "dhee_update_capsule_list": _handle_dhee_update_capsule_list,
+    "dhee_update_capsule_get": _handle_dhee_update_capsule_get,
+    "dhee_update_capsule_import": _handle_dhee_update_capsule_import,
+    "dhee_update_capsule_interpret": _handle_dhee_update_capsule_interpret,
     "get_last_session": _handle_get_last_session,
     "save_session_digest": _handle_save_session_digest,
     "get_memory_stats": _handle_get_memory_stats,
@@ -2296,11 +2811,14 @@ HANDLERS = {
 _MEMORY_FREE_TOOLS = {
     "get_last_session", "save_session_digest",
     "record_outcome", "reflect", "store_intention",
+    "dhee_scene_world_route", "dhee_scene_compile", "dhee_scene_search", "dhee_context_pack",
+    *CONTEXT_COMPILER_TOOL_NAMES,
     "dhee_submit_learning", "dhee_search_learnings", "dhee_promote_learning",
     "dhee_context_status", "dhee_context_state", "dhee_context_checkpoint", "dhee_context_rollover", "dhee_context_provision", "dhee_tools_list", "dhee_shell",
     "dhee_list_assets", "dhee_get_asset", "dhee_sync_codex_artifacts", "dhee_why", "dhee_thread_state", "dhee_shared_task", "dhee_shared_task_results", "dhee_inbox", "dhee_broadcast", "dhee_handoff",
     "dhee_read", "dhee_bash", "dhee_agent", "dhee_grep", "dhee_expand_result",
 }
+
 
 
 @server.list_tools()

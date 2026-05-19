@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,7 +8,8 @@ version = "6.2.0"
 description = "Dhee Developer Brain — local memory, handoff, and git-backed context for AI coding agents"
 readme = "README.md"
 requires-python = ">=3.9"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     {name = "Sankhya AI Labs"}
 ]
@@ -16,7 +17,6 @@ keywords = ["context-firewall", "developer-brain", "coding-agents", "mcp", "clau
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
@@ -48,7 +48,8 @@ sqlite_vec = ["sqlite-vec>=0.1.1"]
 # Local Qwen stack (CPU-native, zero API cost)
 local = ["llama-cpp-python>=0.3", "sentence-transformers>=3.0"]
 # Integrations
-mcp = ["mcp>=1.0.0"]
+# `mcp>=1.0.0` requires Python 3.10+, while Dhee's core package supports 3.9.
+mcp = ["mcp>=1.0.0; python_version >= '3.10'"]
 api = ["fastapi>=0.100.0", "uvicorn>=0.20.0", "python-multipart>=0.0.9", "httpx>=0.25.0", "websockets>=12.0"]
 # Handoff bus ships inside Dhee's wheel. Keep the extra as a no-op
 # compatibility alias so `pip install dhee[bus]` remains valid.
@@ -67,7 +68,7 @@ all = [
     "google-genai>=1.0.0",
     "openai>=1.0.0",
     "ollama>=0.4.0",
-    "mcp>=1.0.0",
+    "mcp>=1.0.0; python_version >= '3.10'",
     "fastapi>=0.100.0",
     "uvicorn>=0.20.0",
     "python-multipart>=0.0.9",

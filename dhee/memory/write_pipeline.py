@@ -20,6 +20,11 @@ from dhee.core.echo import EchoDepth, EchoResult
 from dhee.core.traces import initialize_traces
 from dhee.memory.cost import estimate_token_count, estimate_output_tokens
 from dhee.memory.episodic import index_episodic_events_for_memory as _index_episodic
+from dhee.memory.admission import (
+    admission_expiration_date,
+    evaluate_memory_candidate,
+    sanitize_admitted_content,
+)
 from dhee.memory.retrieval_helpers import (
     attach_bitemporal_metadata,
     normalize_bitemporal_value,
@@ -466,6 +471,33 @@ class MemoryWritePipeline:
         if explicit_remember and explicit_intent and explicit_intent.content:
             content = explicit_intent.content
 
+        admission = evaluate_memory_candidate(
+            content,
+            mem_metadata,
+            explicit_remember=explicit_remember,
+        )
+        if admission.applies:
+            mem_metadata["dhee_admission"] = admission.to_metadata()
+            mem_metadata["dhee_passive_observation"] = True
+            if not explicit_remember:
+                mem_metadata["dhee_lite_path"] = True
+            mem_metadata["retention_policy"] = admission.retention_policy
+            mem_metadata["confidence"] = admission.confidence
+            mem_metadata["admission_score"] = admission.score
+            mem_metadata["admission_promotion_reason"] = admission.promotion_reason
+            if not admission.should_store:
+                return {
+                    "event": "SKIP",
+                    "reason": admission.skip_reason or "admission_rejected",
+                    "memory": content,
+                    "admission": admission.to_metadata(),
+                }
+            if expiration_date is None:
+                expiration_date = admission_expiration_date(admission.retention_policy)
+            if admission.retention_policy != "durable":
+                initial_strength = min(initial_strength, max(0.2, admission.confidence))
+            content = sanitize_admitted_content(content, admission)
+
         blocked = detect_sensitive_categories(content)
         # allow_sensitive: explicit caller opt-in, or caller explicitly provided
         # the content (infer=False / user_provided=True).  PII detection is a
@@ -494,7 +526,11 @@ class MemoryWritePipeline:
 
         # --- Deferred enrichment: lite path (0 LLM calls) ---
         enrichment_config = getattr(self._config, "enrichment", None)
-        if enrichment_config and enrichment_config.defer_enrichment:
+        use_lite_path = bool(
+            (enrichment_config and enrichment_config.defer_enrichment)
+            or mem_metadata.get("dhee_lite_path")
+        )
+        if use_lite_path:
             return self.process_single_memory_lite(
                 content=content,
                 mem_metadata=mem_metadata,
@@ -1032,6 +1068,7 @@ class MemoryWritePipeline:
             "namespace": namespace_value,
             "vector_nodes": len(vectors),
             "memory_type": memory_type,
+            "admission": mem_metadata.get("dhee_admission"),
         }
 
     def process_single_memory_lite(
@@ -1298,6 +1335,7 @@ class MemoryWritePipeline:
             "vector_nodes": 1,
             "memory_type": memory_type,
             "enrichment_status": "pending",
+            "admission": mem_metadata.get("dhee_admission"),
         }
 
     def process_memory_batch(

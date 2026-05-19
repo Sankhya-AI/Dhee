@@ -27,6 +27,7 @@ doesn't.
 from __future__ import annotations
 
 import os
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -89,14 +90,56 @@ def _deny(reason: str, steer: str) -> dict[str, Any]:
     }
 
 
+def _truthy(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _candidate_repo(inp: dict[str, Any]) -> Path:
+    raw = inp.get("cwd") or inp.get("file_path") or inp.get("path") or os.getcwd()
+    path = Path(str(raw or ".")).expanduser()
+    if not path.is_absolute():
+        path = Path(os.getcwd()) / path
+    if path.suffix or (path.exists() and path.is_file()):
+        path = path.parent
+    path = path.resolve()
+    for current in [path, *path.parents]:
+        if (current / ".git").exists() or (current / ".dhee").exists():
+            return current
+    return path
+
+
+def _fallback_enforcement_mode(inp: dict[str, Any]) -> str:
+    if _truthy(os.environ.get("DHEE_REQUIRE_ACTIVE_CONTRACT")):
+        return "deny"
+    repo = _candidate_repo(inp)
+    policy_path = repo / ".dhee" / "context" / "task_runs" / "enforcement.json"
+    if not policy_path.exists():
+        return "off"
+    try:
+        data = json.loads(policy_path.read_text(encoding="utf-8"))
+    except Exception:
+        return "deny"
+    mode = str((data if isinstance(data, dict) else {}).get("mode") or "").strip().lower()
+    return mode if mode in {"off", "warn", "deny"} else "deny"
+
+
+def _enforcement_mode_for_input(inp: dict[str, Any]) -> str:
+    if _truthy(os.environ.get("DHEE_REQUIRE_ACTIVE_CONTRACT")):
+        return "deny"
+    try:
+        from dhee.contract_runtime import contract_enforcement_status
+
+        return str(contract_enforcement_status(repo=str(_candidate_repo(inp))).get("mode") or "off")
+    except Exception:
+        return _fallback_enforcement_mode(inp)
+
+
 def evaluate(payload: dict[str, Any]) -> dict[str, Any]:
     """Decide whether to allow or deny a native tool call.
 
     Returns ``{}`` for allow (pass-through). Returns a deny block when
     enforcement is on and heuristics fire.
     """
-    if not _enforce_on():
-        return {}
     if not isinstance(payload, dict):
         return {}
 
@@ -105,6 +148,13 @@ def evaluate(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(tool_input, dict):
         tool_input = {}
 
+    contract_denial = _evaluate_contract_supervisor(str(tool), tool_input)
+    if contract_denial:
+        return contract_denial
+
+    if not _enforce_on():
+        return {}
+
     if tool == "Read":
         return _evaluate_read(tool_input)
     if tool == "Bash":
@@ -112,6 +162,37 @@ def evaluate(payload: dict[str, Any]) -> dict[str, Any]:
     if tool == "Grep":
         return _evaluate_grep(tool_input)
     return {}
+
+
+def _evaluate_contract_supervisor(tool: str, inp: dict[str, Any]) -> dict[str, Any]:
+    if tool not in {"Read", "Bash", "Grep", "Edit", "Write", "MultiEdit", "NotebookEdit"}:
+        return {}
+    try:
+        from dhee.contract_runtime import guard_router_call, router_refusal
+
+        guard = guard_router_call(tool, inp)
+        if guard.get("allowed", True):
+            return {}
+        refusal = router_refusal(guard)
+        codes = ", ".join(refusal.get("violation_codes") or [])
+        reason = f"Contract supervisor denied {tool}: {codes or refusal.get('message')}"
+        steer = (
+            "Activate a task contract with `dhee context task activate <task_id>` "
+            "or satisfy the compiled proof obligations before retrying. "
+            f"Violation codes: {codes or 'none'}. "
+            f"Decision: {json.dumps(refusal, sort_keys=True, default=str)[:1200]}"
+        )
+        return _deny(reason, steer)
+    except Exception as exc:
+        if _enforcement_mode_for_input(inp) == "deny":
+            reason = f"Contract supervisor unavailable for {tool}: {type(exc).__name__}"
+            steer = (
+                "Dhee contract enforcement is in deny mode, so native coding tools "
+                "cannot run while the supervisor is unavailable. "
+                f"Violation codes: CONTRACT_SUPERVISOR_UNAVAILABLE. Error: {exc}"
+            )
+            return _deny(reason, steer)
+        return {}
 
 
 def _evaluate_grep(inp: dict[str, Any]) -> dict[str, Any]:

@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import sqlite3
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -78,6 +80,35 @@ def _get_embedding_dims(provider: str) -> int:
     return 384
 
 
+def _existing_sqlite_vec_dims(db_path: Path, collection_name: str) -> Optional[int]:
+    """Return the stored sqlite-vec dimension for an existing collection.
+
+    Dhee is a long-lived memory layer. A user's memory database may outlive
+    provider/model changes, so we must not silently switch from a 384-dim local
+    store to a 2048-dim hosted embedder and make writes fail.
+    """
+    if not db_path.exists():
+        return None
+    vec_table = f"vec_{collection_name}"
+    try:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE name = ?",
+                (vec_table,),
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+    if not row or not row[0]:
+        return None
+    match = re.search(r"embedding\s+float\[(\d+)\]", str(row[0]), re.IGNORECASE)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
 def _has_api_key() -> bool:
     try:
         from dhee.cli_config import get_api_key
@@ -87,7 +118,10 @@ def _has_api_key() -> bool:
         os.environ.get("GEMINI_API_KEY")
         or os.environ.get("OPENAI_API_KEY")
         or (get_api_key and (get_api_key("gemini") or get_api_key("openai")))
-    )
+)
+
+DEFAULT_NVIDIA_LLM_MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
+DEFAULT_NVIDIA_EMBEDDER_MODEL = "nvidia/llama-nemotron-embed-vl-1b-v2"
 
 
 def _get_data_dir() -> Path:
@@ -139,8 +173,17 @@ class Engram:
         self._data_dir = Path(data_dir) if data_dir else _get_data_dir()
         self._data_dir.mkdir(parents=True, exist_ok=True)
 
-        # Build configuration
-        embedding_dims = _get_embedding_dims(self._provider)
+        # Build configuration. If a persistent sqlite-vec collection already
+        # exists, keep its dimension stable and use a compatible local embedder
+        # when the selected provider would produce a different vector size.
+        provider_embedding_dims = _get_embedding_dims(self._provider)
+        existing_embedding_dims = None
+        if not in_memory:
+            existing_embedding_dims = _existing_sqlite_vec_dims(
+                self._data_dir / "sqlite_vec.db",
+                collection_name,
+            )
+        embedding_dims = existing_embedding_dims or provider_embedding_dims
 
         if in_memory:
             vector_config = VectorStoreConfig(
@@ -162,12 +205,30 @@ class Engram:
 
         llm_provider = "mock" if self._provider == "mock" else self._provider
         embedder_provider = "simple" if self._provider == "mock" else self._provider
+        if existing_embedding_dims and existing_embedding_dims != provider_embedding_dims:
+            embedder_provider = "simple"
+            logger.info(
+                "Using simple embedder with existing sqlite-vec dimension %s "
+                "instead of %s provider dimension %s",
+                existing_embedding_dims,
+                self._provider,
+                provider_embedding_dims,
+            )
+        llm_kwargs: Dict[str, Any] = {}
         embedder_kwargs: Dict[str, Any] = {}
+        if llm_provider == "nvidia":
+            llm_kwargs["config"] = {
+                "model": DEFAULT_NVIDIA_LLM_MODEL,
+                "temperature": 0.2,
+                "max_tokens": 4096,
+            }
         if embedder_provider == "simple":
             embedder_kwargs["config"] = {"embedding_dims": embedding_dims}
+        elif embedder_provider == "nvidia":
+            embedder_kwargs["config"] = {"model": DEFAULT_NVIDIA_EMBEDDER_MODEL}
 
         config = MemoryConfig(
-            llm=LLMConfig(provider=llm_provider),
+            llm=LLMConfig(provider=llm_provider, **llm_kwargs),
             embedder=EmbedderConfig(provider=embedder_provider, **embedder_kwargs),
             vector_store=vector_config,
             fade=FadeMemConfig(
@@ -348,6 +409,46 @@ class Engram:
         """
         self._memory.delete(memory_id)
 
+    def sweep_admission(
+        self,
+        user_id: str = "default",
+        agent_id: Optional[str] = None,
+        limit: int = 10_000,
+        dry_run: bool = True,
+    ) -> Dict[str, Any]:
+        """Find or delete memories that current Dhee admission rules reject.
+
+        This is the retroactive half of Dhee's memory hygiene: agents can improve
+        admission policy over time, then use this sweep to remove legacy passive
+        observations that no longer meet the bar.
+        """
+        from dhee.memory.admission import forget_reason_for_memory
+
+        memories = self.get_all(user_id=user_id, agent_id=agent_id, limit=limit)
+        candidates: List[Dict[str, Any]] = []
+        deleted: List[Dict[str, Any]] = []
+        for memory in memories:
+            reason = forget_reason_for_memory(memory)
+            if not reason:
+                continue
+            item = {
+                "id": memory.get("id"),
+                "reason": reason,
+                "memory": str(memory.get("memory") or "")[:240],
+            }
+            candidates.append(item)
+            if not dry_run and memory.get("id"):
+                self.delete(str(memory["id"]))
+                deleted.append(item)
+        return {
+            "dry_run": dry_run,
+            "scanned_count": len(memories),
+            "candidate_count": len(candidates),
+            "deleted_count": len(deleted),
+            "candidates": candidates,
+            "deleted": deleted,
+        }
+
     def forget(
         self,
         user_id: Optional[str] = None,
@@ -524,8 +625,21 @@ class Dhee:
         if isinstance(result, dict):
             rs = result.get("results", [])
             if rs:
-                memory_id = rs[0].get("id")
+                first = rs[0]
+                event = first.get("event")
+                if event in {"SKIP", "BLOCKED"}:
+                    return {
+                        "stored": False,
+                        "event": event,
+                        "reason": first.get("reason"),
+                        "admission": first.get("admission"),
+                        "queued": False,
+                        "degraded": False,
+                    }
+                memory_id = first.get("id")
                 response["id"] = memory_id
+                if first.get("admission") is not None:
+                    response["admission"] = first.get("admission")
         if tier == "shruti":
             response["tier"] = "shruti"
 
@@ -538,6 +652,21 @@ class Dhee:
         if intention:
             response["detected_intention"] = intention.to_dict()
         return response
+
+    def sweep_admission(
+        self,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        limit: int = 10_000,
+        dry_run: bool = True,
+    ) -> Dict[str, Any]:
+        """Find or delete memories rejected by the current admission policy."""
+        return self._engram.sweep_admission(
+            user_id=user_id or self._user_id,
+            agent_id=agent_id,
+            limit=limit,
+            dry_run=dry_run,
+        )
 
     # ------------------------------------------------------------------
     # Tool 2: recall
