@@ -40,6 +40,7 @@ def render_context(
     shared_task_results: list[dict[str, Any]] | None = None,
     repo_entries: list[dict[str, Any]] | None = None,
     live_messages: list[dict[str, Any]] | None = None,
+    scene_world: dict[str, Any] | None = None,
     state_card: str | None = None,
 ) -> str:
     """Render Dhee context dict as flat XML for Claude Code injection.
@@ -51,6 +52,7 @@ def render_context(
         (118, _live_context_block(live_messages)),
         (115, _edits_section(edits_block)),
         (113, _repo_context_block(repo_entries)),
+        (112, _scene_world_block(scene_world)),
         (110, _docs_block(doc_matches)),
         (105, _shared_task_block(shared_task, shared_task_results)),
         (100, _session_block(ctx.get("last_session"))),
@@ -139,6 +141,69 @@ def _router_block() -> list[str]:
     if os.environ.get("DHEE_ROUTER") != "1":
         return []
     return [f"<router>{_xml_escape(_ROUTER_NUDGE)}</router>"]
+
+
+def _scene_world_block(scene_world: dict[str, Any] | None) -> list[str]:
+    """Predictive route hint from the optional SceneWorld sidecar."""
+
+    if not isinstance(scene_world, dict):
+        return []
+    best = scene_world.get("best_action")
+    if not isinstance(best, dict):
+        return []
+
+    route_id = str(scene_world.get("route_id") or "")
+    source = str(scene_world.get("source") or "")
+    era = str(scene_world.get("era") or "")
+    active_project = str(scene_world.get("active_project") or "")
+    meta = scene_world.get("_scene_world") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+
+    lines = [
+        "<scene_world "
+        + _attrs(
+            msg="predictive route hint; forecast not command",
+            route=route_id,
+            source=source,
+            era=era,
+            project=active_project,
+            harness=str(meta.get("harness") or ""),
+        )
+        + ">"
+    ]
+
+    action = str(best.get("action") or "")
+    predicted = str(best.get("predicted_next_scene") or "").strip()
+    reaction = str(best.get("likely_user_reaction") or "").strip()
+    risks = best.get("risks") if isinstance(best.get("risks"), list) else []
+    best_attrs = _attrs(
+        action=action,
+        reward=_fmt(best.get("expected_reward")),
+        confidence=_fmt(best.get("confidence")),
+        risks="; ".join(str(r) for r in risks[:3]),
+    )
+    lines.append(_tag("best", best_attrs, predicted[:520] or action))
+    if reaction:
+        lines.append(_tag("reaction", "", reaction[:280]))
+
+    ranked = scene_world.get("ranked_actions")
+    if isinstance(ranked, list) and ranked:
+        lines.append("<ranked>")
+        for row in ranked[:4]:
+            if not isinstance(row, dict):
+                continue
+            row_risks = row.get("risks") if isinstance(row.get("risks"), list) else []
+            row_attrs = _attrs(
+                action=str(row.get("action") or ""),
+                reward=_fmt(row.get("expected_reward")),
+                confidence=_fmt(row.get("confidence")),
+            )
+            lines.append(_tag("candidate", row_attrs, "; ".join(str(r) for r in row_risks[:2])[:220]))
+        lines.append("</ranked>")
+
+    lines.append("</scene_world>")
+    return lines if len(lines) > 2 else []
 
 
 def _state_card_block(state_card: str | None) -> list[str]:

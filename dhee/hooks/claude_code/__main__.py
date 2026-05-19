@@ -388,6 +388,25 @@ def _repo_context_for(cwd: str, *, query: str, limit: int = 5) -> list[dict[str,
         return []
 
 
+def _scene_world_route(prompt: str, *, repo: str, harness: str = "claude-code") -> dict[str, Any] | None:
+    """Best-effort optional predictive route hint."""
+
+    if not str(prompt or "").strip():
+        return None
+    try:
+        from dhee.hooks.scene_world import predict_scene_world_route
+
+        return predict_scene_world_route(
+            str(prompt),
+            repo=repo,
+            user_id=os.environ.get("DHEE_USER_ID", "default"),
+            harness=harness,
+            top_k=4,
+        )
+    except Exception:
+        return None
+
+
 def _discover_repo_config(start: str) -> dict[str, Any]:
     """Find public .dhee/config.json for repo-link context."""
     try:
@@ -650,6 +669,7 @@ def handle_session_start(payload: dict[str, Any]) -> dict[str, Any]:
 
     repo_entries = _repo_context_for(repo_root, query=task_desc, limit=5)
     state_card = state_store.render_state_card()
+    scene_world = _scene_world_route(task_desc, repo=repo_root)
 
     if (
         not doc_matches
@@ -659,6 +679,7 @@ def handle_session_start(payload: dict[str, Any]) -> dict[str, Any]:
         and not typed.get("last_session")
         and not assembled.has_cognition
         and not repo_entries
+        and not scene_world
         and not state_card
     ):
         return {}
@@ -671,6 +692,7 @@ def handle_session_start(payload: dict[str, Any]) -> dict[str, Any]:
         shared_task_results=shared.get("results") or [],
         repo_entries=repo_entries,
         live_messages=live.get("messages") or [],
+        scene_world=scene_world,
         state_card=state_card,
     )
     if not xml:
@@ -768,6 +790,7 @@ def handle_user_prompt(payload: dict[str, Any]) -> dict[str, Any]:
 
     repo_entries = _repo_context_for(repo, query=prompt, limit=3)
     state_card = state_store.render_state_card()
+    scene_world = _scene_world_route(prompt, repo=repo)
 
     has_signal = (
         bool(doc_matches)
@@ -776,6 +799,7 @@ def handle_user_prompt(payload: dict[str, Any]) -> dict[str, Any]:
         or bool(shared.get("task"))
         or bool(live.get("messages"))
         or bool(repo_entries)
+        or bool(scene_world)
         or bool(state_card)
     )
     if not has_signal:
@@ -797,6 +821,7 @@ def handle_user_prompt(payload: dict[str, Any]) -> dict[str, Any]:
         shared_task_results=shared.get("results") or [],
         repo_entries=repo_entries,
         live_messages=live.get("messages") or [],
+        scene_world=scene_world,
         state_card=state_card,
     )
     if not xml:

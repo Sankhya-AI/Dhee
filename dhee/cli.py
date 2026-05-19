@@ -13,6 +13,7 @@ Usage:
     dhee why <id>           Explain why a memory or artifact exists
     dhee handoff            Emit structured resume JSON for a new harness/agent
     dhee harness status     Show native Claude Code / Codex integration state
+    dhee release check      Block release tagging unless repo state is clean
     dhee demo token-router  Show how Dhee keeps raw tool output behind pointers
     dhee ui                 Open the local Dhee dashboard
     dhee benchmark          Run performance benchmarks
@@ -496,6 +497,407 @@ def cmd_context(args: argparse.Namespace) -> None:
             print(f"Risk: {data['risk']}")
             print(f"Rollover required: {'yes' if data['rollover_required'] else 'no'}")
             return
+
+    if action == "task":
+        from dhee import task_contracts
+
+        subaction = args.entry_id or "list"
+        extra = list(getattr(args, "context_args", []) or [])
+        task_actions = {
+            "compile",
+            "create",
+            "list",
+            "show",
+            "import",
+            "interpret",
+            "supervise",
+            "observe",
+            "proof",
+            "proof-bundle",
+            "activate",
+            "deactivate",
+            "enforce",
+            "status",
+            "runtime",
+        }
+        if subaction not in task_actions:
+            extra = [subaction, *extra]
+            subaction = "compile"
+        if subaction == "compile":
+            goal = " ".join(str(item) for item in extra).strip()
+            if not goal:
+                print("Pass a task goal: dhee context task compile \"Fix failing context firewall tests\"")
+                sys.exit(1)
+            try:
+                result = task_contracts.compile_task_contract(
+                    goal,
+                    repo=args.repo or os.getcwd(),
+                    mode=getattr(args, "mode", None) or "patch",
+                    risk=getattr(args, "risk", None),
+                    allowed_write_paths=getattr(args, "allowed_write_paths", None),
+                    forbidden_paths=getattr(args, "forbidden_paths", None),
+                    must_run=getattr(args, "must_run", None),
+                )
+            except Exception as exc:
+                if args.json:
+                    _json_out({"error": str(exc)})
+                else:
+                    print(f"task contract compile failed: {exc}")
+                sys.exit(1)
+            if args.json:
+                _json_out(result)
+                return
+            print(task_contracts.render_task_contract(result))
+            return
+        if subaction == "create":
+            goal = " ".join(str(item) for item in extra).strip()
+            if not goal:
+                print("Pass a task goal: dhee context task create \"Fix failing context firewall tests\"")
+                sys.exit(1)
+            try:
+                result = task_contracts.create_task_contract(
+                    goal,
+                    repo=args.repo or os.getcwd(),
+                    out=getattr(args, "out", None),
+                    mode=getattr(args, "mode", None) or "patch",
+                    risk=getattr(args, "risk", None),
+                    allowed_write_paths=getattr(args, "allowed_write_paths", None),
+                    forbidden_paths=getattr(args, "forbidden_paths", None),
+                    must_run=getattr(args, "must_run", None),
+                )
+            except Exception as exc:
+                if args.json:
+                    _json_out({"error": str(exc)})
+                else:
+                    print(f"task contract create failed: {exc}")
+                sys.exit(1)
+            if args.json:
+                _json_out(result)
+                return
+            contract = result.get("contract") or {}
+            paths = result.get("paths") or {}
+            print(f"Created task contract {contract.get('task_id')}")
+            print(f"  markdown  {paths.get('markdown')}")
+            print(f"  json      {paths.get('json')}")
+            return
+        if subaction == "list":
+            contracts = task_contracts.list_task_contracts(repo=args.repo or os.getcwd())
+            if args.json:
+                _json_out(contracts)
+                return
+            if not contracts:
+                print("No task contracts found.")
+                return
+            for item in contracts:
+                print(f"  [{str(item.get('task_id') or '')[:22]}] {item.get('risk') or '?':>6}  {item.get('goal') or '(untitled)'}")
+            return
+        if subaction == "show":
+            if not extra:
+                print("Pass a task id: dhee context task show <task_id>")
+                sys.exit(1)
+            try:
+                result = task_contracts.get_task_contract(extra[0], repo=args.repo or os.getcwd())
+            except Exception as exc:
+                if args.json:
+                    _json_out({"error": str(exc)})
+                else:
+                    print(f"task contract show failed: {exc}")
+                sys.exit(1)
+            if args.json:
+                _json_out(result)
+                return
+            print(result.get("markdown") or json.dumps(result.get("compiled") or {}, indent=2, default=str))
+            return
+        if subaction == "import":
+            if not extra:
+                print("Pass a task contract path: dhee context task import <path>")
+                sys.exit(1)
+            try:
+                result = task_contracts.import_task_contract(extra[0], repo=args.repo or os.getcwd())
+            except Exception as exc:
+                if args.json:
+                    _json_out({"error": str(exc)})
+                else:
+                    print(f"task contract import failed: {exc}")
+                sys.exit(1)
+            if args.json:
+                _json_out(result)
+                return
+            contract = result.get("contract") or {}
+            paths = result.get("paths") or {}
+            print(f"Imported task contract {contract.get('task_id')}")
+            print(f"  dir       {paths.get('dir')}")
+            return
+        if subaction == "interpret":
+            if not extra:
+                print("Pass a task id or path: dhee context task interpret <task_id_or_path>")
+                sys.exit(1)
+            result = task_contracts.interpret_task_contract(
+                extra[0],
+                repo=args.repo or os.getcwd(),
+                strict=bool(getattr(args, "strict", False)),
+            )
+            if args.json:
+                _json_out(result)
+                return
+            print(f"Readiness: {result.get('readiness')}")
+            for step in result.get("execution_plan") or []:
+                print(f"  {step.get('step')}. {step.get('state')} {step.get('type')} {step.get('target') or ''}")
+            diagnostics = result.get("diagnostics") or []
+            if diagnostics:
+                print("\nDiagnostics:")
+                for diag in diagnostics:
+                    print(f"  [{diag.get('level')}] {diag.get('code')}: {diag.get('message')}")
+            return
+        if subaction == "supervise":
+            if not extra:
+                print("Pass a task id or path: dhee context task supervise <task_id_or_path> --action-json '{...}'")
+                sys.exit(1)
+            if not getattr(args, "action_json", None):
+                print("Pass --action-json for the proposed ChotuAction")
+                sys.exit(1)
+            from dhee.contract_supervisor import supervise_action
+
+            result = supervise_action(
+                extra[0],
+                json.loads(args.action_json),
+                repo=args.repo or os.getcwd(),
+                strict=bool(getattr(args, "strict", False)),
+            )
+            if args.json:
+                _json_out(result)
+                return
+            print(f"Decision: {result.get('decision')}")
+            for violation in result.get("violations") or []:
+                print(f"  {violation.get('code')}: {violation.get('message')}")
+            return
+        if subaction == "observe":
+            if not extra:
+                print("Pass a task id or path: dhee context task observe <task_id_or_path> --action-json '{...}' --observation '...'")
+                sys.exit(1)
+            if not getattr(args, "action_json", None):
+                print("Pass --action-json for the observed ChotuAction")
+                sys.exit(1)
+            from dhee.contract_supervisor import record_observation_transition
+
+            next_action = json.loads(args.next_action_json) if getattr(args, "next_action_json", None) else None
+            result = record_observation_transition(
+                extra[0],
+                json.loads(args.action_json),
+                getattr(args, "observation", None) or "",
+                repo=args.repo or os.getcwd(),
+                outcome=getattr(args, "outcome", None) or "observed",
+                next_action=next_action,
+                strict=bool(getattr(args, "strict", False)),
+            )
+            if args.json:
+                _json_out(result)
+                return
+            print(f"Recorded observation {result.get('event', {}).get('event_id')}")
+            print(f"  decision  {result.get('decision', {}).get('decision')}")
+            print(f"  events    {result.get('paths', {}).get('events')}")
+            return
+        if subaction in {"proof", "proof-bundle"}:
+            if not extra:
+                print("Pass a task id or path: dhee context task proof <task_id_or_path>")
+                sys.exit(1)
+            from dhee.contract_supervisor import build_proof_bundle
+
+            result = build_proof_bundle(
+                extra[0],
+                repo=args.repo or os.getcwd(),
+                strict=bool(getattr(args, "strict", False)),
+                persist=not bool(getattr(args, "dry_run", False)),
+            )
+            if args.json:
+                _json_out(result)
+                return
+            bundle = result.get("proof_bundle") or {}
+            verifier = bundle.get("verifier_result") or {}
+            print(f"Proof bundle {bundle.get('contract_id')}")
+            print(f"  verifier {verifier.get('status')}")
+            print(f"  tests    {len(verifier.get('passed_tests') or [])}/{len(verifier.get('required_tests') or [])} passed")
+            if result.get("paths", {}).get("proof_bundle"):
+                print(f"  path     {result['paths']['proof_bundle']}")
+            for path in verifier.get("out_of_contract_changed_paths") or []:
+                print(f"  out-of-contract change: {path}")
+            for path in verifier.get("forbidden_changed_paths") or []:
+                print(f"  forbidden change: {path}")
+            return
+        if subaction == "enforce":
+            from dhee.contract_runtime import set_contract_enforcement
+
+            selected_mode = (extra[0] if extra else getattr(args, "mode", None) or "").strip().lower()
+            if selected_mode not in {"off", "warn", "deny"}:
+                print("Pass an enforcement mode: dhee context task enforce off|warn|deny")
+                sys.exit(1)
+            result = set_contract_enforcement(
+                selected_mode,
+                repo=args.repo or os.getcwd(),
+                agent_id="cli",
+                reason=getattr(args, "reason", None) or "manual",
+            )
+            if args.json:
+                _json_out(result)
+                return
+            effective = result.get("effective") or {}
+            print(f"Contract enforcement set to {selected_mode}")
+            print(f"  effective {effective.get('mode')}")
+            print(f"  policy    {(result.get('paths') or {}).get('policy')}")
+            return
+        if subaction == "activate":
+            if not extra:
+                print("Pass a task id or path: dhee context task activate <task_id_or_path>")
+                sys.exit(1)
+            from dhee.contract_runtime import activate_contract_runtime
+
+            result = activate_contract_runtime(
+                extra[0],
+                repo=args.repo or os.getcwd(),
+                strict=bool(getattr(args, "strict", False)),
+                force=bool(getattr(args, "force", False)),
+                agent_id="cli",
+                harness="cli",
+            )
+            if args.json:
+                _json_out(result)
+                return
+            if not result.get("active"):
+                print(f"Task contract activation rejected: {result.get('reason') or result.get('status')}")
+                for diag in ((result.get("interpretation") or {}).get("diagnostics") or []):
+                    print(f"  [{diag.get('level')}] {diag.get('code')}: {diag.get('message')}")
+                sys.exit(1)
+            print(f"Activated task contract {result.get('task_id')}")
+            print(f"  active    {(result.get('paths') or {}).get('active')}")
+            print(f"  events    {(result.get('paths') or {}).get('events')}")
+            print("  router    enforcing dhee_read/dhee_grep/dhee_bash")
+            return
+        if subaction in {"status", "runtime"}:
+            from dhee.contract_runtime import contract_runtime_status
+
+            result = contract_runtime_status(repo=args.repo or os.getcwd())
+            if args.json:
+                _json_out(result)
+                return
+            if not result.get("active"):
+                print("No active task contract runtime.")
+                return
+            print(f"Active task contract {result.get('task_id')}")
+            print(f"  status    {result.get('status')}")
+            print(f"  strict    {result.get('strict')}")
+            print(f"  active    {(result.get('paths') or {}).get('active')}")
+            print(f"  events    {(result.get('paths') or {}).get('events')}")
+            print(f"  readiness {(result.get('interpretation') or {}).get('readiness')}")
+            return
+        if subaction == "deactivate":
+            from dhee.contract_runtime import deactivate_contract_runtime
+
+            result = deactivate_contract_runtime(
+                repo=args.repo or os.getcwd(),
+                agent_id="cli",
+                reason=getattr(args, "reason", None) or "manual",
+            )
+            if args.json:
+                _json_out(result)
+                return
+            if result.get("task_id"):
+                print(f"Deactivated task contract {result.get('task_id')}")
+            else:
+                print("No active task contract runtime.")
+            return
+        print("Use: dhee context task compile|create|list|show|import|interpret|supervise|observe|proof|enforce|activate|status|deactivate")
+        sys.exit(1)
+
+    if action == "capsule":
+        from dhee import update_capsules
+
+        subaction = args.entry_id or "list"
+        extra = list(getattr(args, "context_args", []) or [])
+        repo = args.repo or os.getcwd()
+        try:
+            if subaction == "create":
+                result = update_capsules.create_update_capsule(
+                    repo=repo,
+                    since=getattr(args, "since", None),
+                    task_id=getattr(args, "task_id", None),
+                    out=getattr(args, "out", None),
+                )
+                if args.json:
+                    _json_out(result)
+                    return
+                capsule = result.get("capsule") or {}
+                paths = result.get("paths") or {}
+                entry = result.get("entry") or {}
+                print(f"Created update capsule {capsule.get('id')}")
+                print(f"  markdown  {paths.get('markdown')}")
+                print(f"  json      {paths.get('json')}")
+                print(f"  entry     {entry.get('id')}")
+                return
+            if subaction == "list":
+                capsules = update_capsules.list_update_capsules(repo=repo)
+                if args.json:
+                    _json_out(capsules)
+                    return
+                if not capsules:
+                    print("No update capsules found.")
+                    return
+                for capsule in capsules:
+                    changed = len(capsule.get("changed_paths") or [])
+                    print(f"  [{str(capsule.get('id') or '')[:18]}] {changed:>2} paths  {capsule.get('title') or '(untitled)'}")
+                return
+            if subaction == "show":
+                if not extra:
+                    print("Pass a capsule id: dhee context capsule show <capsule_id>")
+                    sys.exit(1)
+                result = update_capsules.get_update_capsule(extra[0], repo=repo)
+                if args.json:
+                    _json_out(result)
+                    return
+                print(result.get("markdown") or json.dumps(result.get("capsule") or {}, indent=2, default=str))
+                return
+            if subaction == "import":
+                if not extra:
+                    print("Pass a capsule path: dhee context capsule import <path>")
+                    sys.exit(1)
+                result = update_capsules.import_update_capsule(extra[0], repo=repo)
+                if args.json:
+                    _json_out(result)
+                    return
+                capsule = result.get("capsule") or {}
+                paths = result.get("paths") or {}
+                print(f"Imported update capsule {capsule.get('id')}")
+                print(f"  dir       {paths.get('dir')}")
+                return
+            if subaction == "interpret":
+                if not extra:
+                    print("Pass a capsule id or path: dhee context capsule interpret <capsule_id_or_path>")
+                    sys.exit(1)
+                result = update_capsules.interpret_update_capsule(
+                    extra[0],
+                    repo=repo,
+                    strict=bool(getattr(args, "strict", False)),
+                )
+                if args.json:
+                    _json_out(result)
+                    return
+                print(f"Readiness: {result.get('readiness')}")
+                for step in result.get("execution_plan") or []:
+                    print(f"  {step.get('step')}. {step.get('state')} {step.get('action')} {step.get('path')}")
+                    print(f"     {step.get('instruction')}")
+                diagnostics = result.get("diagnostics") or []
+                if diagnostics:
+                    print("\nDiagnostics:")
+                    for diag in diagnostics:
+                        print(f"  [{diag.get('level')}] {diag.get('code')}: {diag.get('message')}")
+                return
+        except Exception as exc:
+            if args.json:
+                _json_out({"error": str(exc)})
+            else:
+                print(f"capsule {subaction} failed: {exc}")
+            sys.exit(1)
+        print("Use: dhee context capsule create|list|show|import|interpret")
+        sys.exit(1)
 
     from dhee import repo_link
 
@@ -1396,9 +1798,89 @@ def cmd_status(args: argparse.Namespace) -> None:
 
 def cmd_doctor(args: argparse.Namespace) -> None:
     """Composite observability report. No controls, just truth."""
+    topic = getattr(args, "doctor_topic", None)
+    if topic == "contract-runtime":
+        from dhee.contract_runtime import contract_runtime_doctor
+
+        result = contract_runtime_doctor(repo=getattr(args, "repo", None) or os.getcwd())
+        if getattr(args, "json", False):
+            _json_out(result)
+            return
+        print(f"Dhee contract runtime: {result.get('status')}")
+        active = result.get("active_contract") or {}
+        enforcement = result.get("enforcement") or {}
+        router = result.get("hook_router_health") or {}
+        print(f"  enforcement {enforcement.get('mode')} (configured={enforcement.get('configured_mode')})")
+        print(f"  active      {active.get('active')} {active.get('task_id') or ''}")
+        print(f"  router      {'enabled' if router.get('enabled') else 'not enabled'}")
+        risks = result.get("bypass_risks") or []
+        if risks:
+            print("  risks       " + ", ".join(str(item) for item in risks))
+        corrupt = result.get("corrupt_files") or []
+        if corrupt:
+            print("  corrupt     " + ", ".join(str(item.get("path") or item.get("code")) for item in corrupt))
+        return
     from dhee.doctor import run
 
     sys.stdout.write(run(as_json=bool(getattr(args, "json", False))))
+
+
+def cmd_release(args: argparse.Namespace) -> None:
+    """Release hygiene gates for premium builds."""
+    from dhee.release_hygiene import (
+        format_release_check,
+        release_check,
+        write_release_intent,
+    )
+
+    action = getattr(args, "release_action", None) or "check"
+    repo = getattr(args, "repo", None) or os.getcwd()
+    if action == "intent":
+        paths = list(getattr(args, "paths", None) or [])
+        if not paths:
+            print("Pass at least one --path for the intended release scope.", file=sys.stderr)
+            sys.exit(2)
+        result = write_release_intent(
+            repo,
+            paths,
+            reason=getattr(args, "reason", None) or "",
+            agent_id="cli",
+        )
+        if getattr(args, "json", False):
+            _json_out(result)
+            if not result.get("ok"):
+                sys.exit(1)
+            return
+        if not result.get("ok"):
+            diagnostics = result.get("diagnostics") or []
+            print("Release intent write failed.", file=sys.stderr)
+            for diag in diagnostics:
+                print(f"  {diag.get('code')}: {diag.get('message')}", file=sys.stderr)
+            sys.exit(1)
+        intent = result.get("intent") or {}
+        print(f"Release intent written: {result.get('path')}")
+        print(f"  paths     {', '.join(intent.get('intended_paths') or [])}")
+        if intent.get("reason"):
+            print(f"  reason    {intent.get('reason')}")
+        print("  note      intent documents scope; release still requires a clean git tree")
+        return
+
+    if action == "check":
+        report = release_check(
+            repo,
+            intended_paths=getattr(args, "intended_paths", None),
+            require_clean=True,
+        )
+        if getattr(args, "json", False):
+            _json_out(report)
+        else:
+            print(format_release_check(report))
+        if not report.get("release_allowed") and not getattr(args, "no_fail", False):
+            sys.exit(1)
+        return
+
+    print("Use: dhee release check|intent")
+    sys.exit(1)
 
 
 def cmd_runtime(args: argparse.Namespace) -> None:
@@ -2731,12 +3213,28 @@ def build_parser() -> argparse.ArgumentParser:
     p_context.add_argument(
         "context_action",
         nargs="?",
-        choices=["list", "show", "delete", "refresh", "check", "status", "state", "checkpoint", "rollover", "provision", "debt"],
+        choices=["list", "show", "delete", "refresh", "check", "status", "state", "checkpoint", "rollover", "provision", "debt", "capsule", "task"],
         default="list",
         help="Subcommand (default: list)",
     )
-    p_context.add_argument("entry_id", nargs="?", help="Entry id for show/delete, or task text for provision")
+    p_context.add_argument("entry_id", nargs="?", help="Entry id for show/delete, task text for provision, or capsule/task subcommand")
+    p_context.add_argument("context_args", nargs="*", help=argparse.SUPPRESS)
     p_context.add_argument("--repo", help="Repo path (default: linked repo containing cwd)")
+    p_context.add_argument("--since", help="For `context capsule create`, base git ref")
+    p_context.add_argument("--task-id", help="For `context capsule create`, attach a task id")
+    p_context.add_argument("--out", help="For `context capsule create`, write to a specific capsule directory")
+    p_context.add_argument("--strict", action="store_true", help="For `context capsule interpret`, treat precondition mismatch as blocking")
+    p_context.add_argument("--force", action="store_true", help="For `context task activate`, activate even when interpretation is blocked")
+    p_context.add_argument("--dry-run", action="store_true", help="For `context task proof`, build the proof bundle without writing it")
+    p_context.add_argument("--mode", default="patch", help="For `context task compile`, task mode; for `context task enforce`, off|warn|deny")
+    p_context.add_argument("--risk", help="For `context task compile`, override inferred risk")
+    p_context.add_argument("--allowed-write-path", action="append", dest="allowed_write_paths", help="For `context task compile`, allowed write path")
+    p_context.add_argument("--forbidden-path", action="append", dest="forbidden_paths", help="For `context task compile`, forbidden path")
+    p_context.add_argument("--must-run", action="append", dest="must_run", help="For `context task compile`, required test/check command")
+    p_context.add_argument("--action-json", help="For `context task supervise|observe`, proposed/observed ChotuAction JSON")
+    p_context.add_argument("--next-action-json", help="For `context task observe`, optional next ChotuAction JSON")
+    p_context.add_argument("--observation", help="For `context task observe`, compact observation text")
+    p_context.add_argument("--outcome", default="observed", help="For `context task observe`, outcome label")
     p_context.add_argument("--user-id", default="default", help="User ID for compiled-state commands")
     p_context.add_argument("--top", action="store_true", help="Show top context-debt sources")
     p_context.add_argument("--card", action="store_true", help="For `context state`, print state card XML")
@@ -2794,7 +3292,47 @@ def build_parser() -> argparse.ArgumentParser:
         "doctor",
         help="Composite health + honesty report (router, cognition, memory, movement plan)",
     )
+    p_doctor.add_argument(
+        "doctor_topic",
+        nargs="?",
+        choices=["contract-runtime"],
+        help="Optional focused doctor report",
+    )
+    p_doctor.add_argument("--repo", help="Repo path for focused doctor reports")
     p_doctor.add_argument("--json", action="store_true", help="JSON output")
+
+    # release — hard gate before tagging or customer release
+    p_release = sub.add_parser(
+        "release",
+        help="Release hygiene gate (clean tree, intended scope, honest blockers)",
+    )
+    p_release.add_argument(
+        "release_action",
+        nargs="?",
+        choices=["check", "intent"],
+        default="check",
+        help="Subcommand",
+    )
+    p_release.add_argument("--repo", help="Repo path (default: cwd)")
+    p_release.add_argument(
+        "--intended-path",
+        action="append",
+        dest="intended_paths",
+        help="For `release check`, expected dirty path scope for review reporting",
+    )
+    p_release.add_argument(
+        "--path",
+        action="append",
+        dest="paths",
+        help="For `release intent`, intended release path scope",
+    )
+    p_release.add_argument("--reason", help="For `release intent`, compact release-scope reason")
+    p_release.add_argument(
+        "--no-fail",
+        action="store_true",
+        help="For `release check`, print/report blockers but exit 0",
+    )
+    p_release.add_argument("--json", action="store_true", help="JSON output")
 
     # runtime — managed venv + local daemon clarity
     p_runtime = sub.add_parser(
@@ -3132,6 +3670,7 @@ COMMAND_MAP = {
     "shared-task": cmd_shared_task,
     "status": cmd_status,
     "doctor": cmd_doctor,
+    "release": cmd_release,
     "runtime": cmd_runtime,
     "task": cmd_task,
     "ingest": cmd_ingest,

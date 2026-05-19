@@ -27,6 +27,25 @@ def test_handoff_bus_is_bundled_not_external_dependency():
     assert (ROOT / "engram-bus" / "engram_bus" / "bus.py").exists()
 
 
+def test_project_metadata_is_release_clean():
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert 'requires = ["setuptools>=77.0", "wheel"]' in pyproject
+    assert 'license = "MIT"' in pyproject
+    assert 'license-files = ["LICENSE"]' in pyproject
+    assert "license = {text" not in pyproject
+    assert "License :: OSI Approved :: MIT License" not in pyproject
+
+
+def test_mcp_extra_is_python_version_honest():
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert 'mcp = ["mcp>=1.0.0; python_version >= \'3.10\'"]' in pyproject
+    assert '"mcp>=1.0.0; python_version >= \'3.10\'"' in pyproject
+    assert 'mcp = ["mcp>=1.0.0"]' not in pyproject
+    assert '"mcp>=1.0.0",' not in pyproject
+
+
 def test_curl_installer_verifies_handoff_bus():
     installer = (ROOT / "install.sh").read_text(encoding="utf-8")
 
