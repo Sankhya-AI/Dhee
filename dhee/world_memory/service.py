@@ -18,15 +18,22 @@ except Exception:  # pragma: no cover
     BeautifulSoup = None
 
 from .capture_store import CaptureStore
+from .causal_graph import CausalGraphProjection
 from .encoder import DeterministicFrameEncoder, create_default_encoder
 from .predictor import ActionConditionedPredictor, compute_surprise
 from .schema import (
+    CAUSAL_SCHEMA_VERSION,
+    CausalEdge,
     CaptureAction,
     CaptureEvent,
     CaptureLink,
     CapturedArtifact,
     CapturedObservation,
     CapturedSurface,
+    CheckpointReport,
+    EventFrame,
+    RawEvent,
+    RetrievalTrace,
 )
 from .session_graph import SessionGraphStore
 from .store import WorldMemoryStore, asdict_chunk
@@ -139,6 +146,7 @@ class MemoryOSService:
         world_store: WorldMemoryStore,
         graph_store: SessionGraphStore,
         memory_client: Any,
+        graph_projection: CausalGraphProjection | None = None,
         encoder: Any | None = None,
         predictor: Any | None = None,
     ):
@@ -146,6 +154,7 @@ class MemoryOSService:
         self.world_store = world_store
         self.graph_store = graph_store
         self.memory_client = memory_client
+        self.graph_projection = graph_projection
         self.encoder = encoder or create_default_encoder()
         self.predictor = predictor or ActionConditionedPredictor()
         self._ensure_default_policies()
@@ -161,6 +170,7 @@ class MemoryOSService:
             world_store=WorldMemoryStore(str(memory_os_dir / "world_memory.db")),
             graph_store=SessionGraphStore(str(runtime_root / "capture" / "sessions")),
             memory_client=DheeMemoryClient(memory),
+            graph_projection=CausalGraphProjection(str(memory_os_dir / "causal_scene.kuzu")),
         )
 
     def _ensure_default_policies(self) -> None:
@@ -357,6 +367,7 @@ class MemoryOSService:
                 metadata=metadata,
             )
         )
+        self._record_raw_from_capture_event(event)
         return {
             "action": asdict(action),
             "surface": asdict(surface),
@@ -439,6 +450,7 @@ class MemoryOSService:
                 },
             )
         )
+        self._record_raw_from_capture_event(event)
         return {
             "observation": asdict(observation),
             "surface": asdict(surface),
@@ -492,7 +504,7 @@ class MemoryOSService:
             active_surface_id=surface.id,
             artifact_bytes=self.graph_store.artifact_bytes(session.id),
         )
-        self.capture_store.record_event(
+        event = self.capture_store.record_event(
             CaptureEvent(
                 id=str(uuid.uuid4()),
                 session_id=session.id,
@@ -518,6 +530,7 @@ class MemoryOSService:
                 metadata=artifact.metadata,
             )
         )
+        self._record_raw_from_capture_event(event)
         if artifact.action_id:
             self.graph_store.append_link(
                 CaptureLink(
@@ -549,6 +562,309 @@ class MemoryOSService:
                     removed += 1
             self.graph_store.patch_manifest(session_id, artifact_bytes=self.graph_store.artifact_bytes(session_id))
         return {"checked": checked, "removed": removed}
+
+    def record_raw_event(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Write a RawEvent to SQLite truth first, then rebuild-backed Kuzu projection."""
+        metadata = dict(payload.get("metadata") or {})
+        text = str(payload.get("text") or payload.get("text_payload") or "")
+        content_hash = str(payload.get("content_hash") or "")
+        if not content_hash and text:
+            content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        event = RawEvent(
+            id=str(payload.get("id") or uuid.uuid4()),
+            schema_version=str(payload.get("schema_version") or CAUSAL_SCHEMA_VERSION),
+            user_id=str(payload.get("user_id") or "default"),
+            session_id=str(payload.get("session_id") or "") or None,
+            source_app=str(payload.get("source_app") or "unknown").strip().lower(),
+            namespace=str(payload.get("namespace") or ""),
+            event_type=str(payload.get("event_type") or "raw_event"),
+            timestamp=str(payload.get("timestamp") or payload.get("created_at") or _now_iso()),
+            content_ref=str(payload.get("content_ref") or "") or None,
+            content_hash=content_hash or None,
+            privacy_scope=str(payload.get("privacy_scope") or payload.get("scope") or "global"),
+            metadata=metadata,
+            deleted_at=str(payload.get("deleted_at") or "") or None,
+            redacted_at=str(payload.get("redacted_at") or "") or None,
+            redaction_reason=str(payload.get("redaction_reason") or "") or None,
+        )
+        self.capture_store.record_raw_event(event)
+        projection = self._sync_causal_projection(user_id=event.user_id)
+        return {"event": asdict(event), "projection": projection}
+
+    def compile_causal_checkpoint(
+        self,
+        *,
+        session_id: Optional[str] = None,
+        user_id: str = "default",
+        time_window_start: Optional[str] = None,
+        time_window_end: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        raw_events = self.capture_store.list_raw_events(
+            user_id=user_id,
+            session_id=session_id,
+            limit=1000,
+            include_deleted=False,
+            include_redacted=False,
+            order="asc",
+        )
+        if time_window_start:
+            raw_events = [event for event in raw_events if event.timestamp >= time_window_start]
+        if time_window_end:
+            raw_events = [event for event in raw_events if event.timestamp <= time_window_end]
+
+        frames: List[EventFrame] = []
+        for event in raw_events:
+            frame = EventFrame(
+                id=f"frame:{event.id}",
+                schema_version=CAUSAL_SCHEMA_VERSION,
+                user_id=event.user_id,
+                frame_type=event.event_type or "event",
+                summary=_raw_event_summary(event),
+                source_event_ids=[event.id],
+                confidence=0.8,
+                privacy_scope=event.privacy_scope,
+                created_at=_now_iso(),
+                metadata={
+                    "source_app": event.source_app,
+                    "session_id": event.session_id,
+                    "source_event_id": event.id,
+                },
+            )
+            self.capture_store.add_event_frame(frame)
+            frames.append(frame)
+
+        edges: List[CausalEdge] = []
+        for previous, current in zip(frames, frames[1:]):
+            prev_event_id = previous.source_event_ids[0]
+            current_event_id = current.source_event_ids[0]
+            edge = CausalEdge(
+                id=f"edge:supported:{previous.id}:{current.id}",
+                schema_version=CAUSAL_SCHEMA_VERSION,
+                user_id=user_id,
+                source_id=previous.id,
+                target_id=current.id,
+                edge_type="SUPPORTED",
+                confidence=0.55,
+                status="inferred",
+                evidence_event_ids=[prev_event_id, current_event_id],
+                inferred_by="rule",
+                explanation="Adjacent checkpoint frames support the local scene progression; no causal claim is made.",
+                privacy_scope=_strictest_privacy([previous.privacy_scope, current.privacy_scope]),
+                created_at=_now_iso(),
+                metadata={"checkpoint_v": "0"},
+            )
+            self.capture_store.add_causal_edge(edge)
+            edges.append(edge)
+
+        summary_text = _checkpoint_summary(raw_events)
+        summary_memory_id = None
+        if raw_events and summary_text:
+            remembered = self.memory_client.remember(
+                summary_text,
+                user_id=user_id,
+                namespace=(raw_events[0].namespace if raw_events else "default"),
+                source_app="causal-checkpoint",
+                scope=_strictest_privacy([event.privacy_scope for event in raw_events]),
+                categories=["causal_scene_memory", "checkpoint_summary"],
+                metadata={
+                    "memory_type": "causal_checkpoint_summary",
+                    "session_id": session_id,
+                    "source_event_ids": [event.id for event in raw_events],
+                    "schema_version": CAUSAL_SCHEMA_VERSION,
+                },
+            )
+            summary_memory_id = remembered.get("id") if isinstance(remembered, dict) else None
+
+        report = CheckpointReport(
+            id=str(uuid.uuid4()),
+            schema_version=CAUSAL_SCHEMA_VERSION,
+            user_id=user_id,
+            session_id=session_id,
+            time_window_start=time_window_start,
+            time_window_end=time_window_end,
+            status="completed",
+            event_frame_ids=[frame.id for frame in frames],
+            causal_edge_ids=[edge.id for edge in edges],
+            summary_memory_id=summary_memory_id,
+            report={
+                "raw_event_count": len(raw_events),
+                "event_frame_count": len(frames),
+                "causal_edge_count": len(edges),
+                "summary": summary_text,
+            },
+            created_at=_now_iso(),
+        )
+        self.capture_store.add_checkpoint_report(report)
+        projection = self._sync_causal_projection(user_id=user_id)
+        return {
+            "report": asdict(report),
+            "eventFrames": [asdict(frame) for frame in frames],
+            "causalEdges": [asdict(edge) for edge in edges],
+            "projection": projection,
+        }
+
+    def get_active_frontier(self, *, user_id: str = "default", scope: str = "global") -> Dict[str, Any]:
+        projection = self._require_causal_projection()
+        result = projection.get_active_frontier(user_id=user_id, scope=scope)
+        return self._record_retrieval_trace(result, mode="frontier", user_id=user_id, scope=scope)
+
+    def causal_why(
+        self,
+        *,
+        event_id: Optional[str] = None,
+        query: str = "",
+        user_id: str = "default",
+        scope: str = "global",
+    ) -> Dict[str, Any]:
+        projection = self._require_causal_projection()
+        result = projection.why(event_id=event_id, query=query, user_id=user_id, scope=scope)
+        return self._record_retrieval_trace(
+            result,
+            mode="why",
+            user_id=user_id,
+            scope=scope,
+            query=query,
+            target_id=event_id or result.get("target_event_id", ""),
+        )
+
+    def causal_what_happened(self, *, target_id: str, user_id: str = "default", scope: str = "global") -> Dict[str, Any]:
+        projection = self._require_causal_projection()
+        result = projection.what_happened(target_id=target_id, user_id=user_id, scope=scope)
+        return self._record_retrieval_trace(
+            result,
+            mode="what_happened",
+            user_id=user_id,
+            scope=scope,
+            target_id=target_id,
+        )
+
+    def causal_handoff(self, *, user_id: str = "default", scope: str = "global") -> Dict[str, Any]:
+        projection = self._require_causal_projection()
+        result = projection.handoff(user_id=user_id, scope=scope)
+        return self._record_retrieval_trace(result, mode="handoff", user_id=user_id, scope=scope)
+
+    def causal_preference(self, *, query: str = "", user_id: str = "default", scope: str = "global") -> Dict[str, Any]:
+        projection = self._require_causal_projection()
+        result = projection.preference(query=query, user_id=user_id, scope=scope)
+        return self._record_retrieval_trace(
+            result,
+            mode="preference",
+            user_id=user_id,
+            scope=scope,
+            query=query,
+            target_id=(result.get("preference_signal") or {}).get("event_id", ""),
+        )
+
+    def causal_gems(
+        self,
+        *,
+        user_id: str = "default",
+        scope: str = "global",
+        kind: Optional[str] = None,
+        limit: int = 50,
+    ) -> Dict[str, Any]:
+        projection = self._require_causal_projection()
+        result = projection.list_gems(user_id=user_id, scope=scope, kind=kind, limit=limit)
+        return self._record_retrieval_trace(
+            result,
+            mode="gems",
+            user_id=user_id,
+            scope=scope,
+            query=kind or "",
+            metadata={"kind": kind, "limit": limit},
+        )
+
+    def causal_show_gem(self, target: str, *, user_id: str = "default", scope: str = "global") -> Dict[str, Any]:
+        projection = self._require_causal_projection()
+        result = projection.show_gem(target, user_id=user_id, scope=scope)
+        return self._record_retrieval_trace(
+            result,
+            mode="show_gem",
+            user_id=user_id,
+            scope=scope,
+            target_id=(result.get("gem") or {}).get("event_id", target),
+        )
+
+    def explain_causal_retrieval(self, retrieval_id: str, *, user_id: str = "default") -> Dict[str, Any]:
+        trace = self.capture_store.get_retrieval_trace(retrieval_id)
+        if not trace or trace.user_id != user_id:
+            return {
+                "query_id": retrieval_id,
+                "status": "not_found",
+                "traversal": [],
+                "evidence": [],
+            }
+        return {
+            "query_id": trace.id,
+            "status": "ok",
+            "schema_version": trace.schema_version,
+            "mode": trace.mode,
+            "scope": trace.scope,
+            "query": trace.query,
+            "target_id": trace.target_id,
+            "privacy_scope": trace.privacy_scope,
+            "created_at": trace.created_at,
+            "traversal": trace.retrieval_path,
+            "evidence": trace.evidence,
+            "result": trace.result,
+            "metadata": trace.metadata,
+        }
+
+    def causal_submit_gem(
+        self,
+        target: str,
+        *,
+        learning_exchange: Any,
+        user_id: str = "default",
+        scope: str = "global",
+        repo: Optional[str] = None,
+        status: str = "candidate",
+    ) -> Dict[str, Any]:
+        from .gem_extractor import submit_projected_gem_learning_candidate
+
+        projected = self.causal_show_gem(target, user_id=user_id, scope=scope)
+        result = submit_projected_gem_learning_candidate(
+            learning_exchange,
+            projected,
+            repo=repo,
+            status=status,
+        )
+        result["gem"] = projected
+        return result
+
+    def _record_retrieval_trace(
+        self,
+        result: Dict[str, Any],
+        *,
+        mode: str,
+        user_id: str,
+        scope: str,
+        query: str = "",
+        target_id: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        if not isinstance(result, dict):
+            return result
+        clean_result = json.loads(json.dumps(result))
+        retrieval_id = "retr_" + uuid.uuid4().hex[:16]
+        trace = RetrievalTrace(
+            id=retrieval_id,
+            user_id=user_id,
+            mode=mode,
+            scope=scope,
+            query=str(query or ""),
+            target_id=str(target_id or ""),
+            retrieval_path=_as_dict_list(result.get("retrieval_path")),
+            evidence=_retrieval_evidence(result),
+            result=clean_result,
+            privacy_scope=scope,
+            metadata=dict(metadata or {}),
+            created_at=_now_iso(),
+        )
+        self.capture_store.add_retrieval_trace(trace)
+        out = dict(result)
+        out["retrieval_id"] = retrieval_id
+        return out
 
     def record_capture_event(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         session_id = str(payload.get("session_id") or "").strip()
@@ -637,6 +953,7 @@ class MemoryOSService:
                 metadata=metadata,
             )
         )
+        self._record_raw_from_capture_event(event)
         return {
             "event": asdict(event),
             "worldTransition": world_record,
@@ -945,6 +1262,50 @@ class MemoryOSService:
         items.sort(key=lambda item: item.get("timestamp") or "", reverse=True)
         return {"items": items[:limit]}
 
+    def _record_raw_from_capture_event(self, event: CaptureEvent) -> RawEvent:
+        metadata = {
+            **event.metadata,
+            "capture_event_id": event.id,
+            "memory_id": event.memory_id,
+            "world_ptr": event.world_ptr,
+            "window_title": event.window_title,
+            "url": event.url,
+            "structured_payload": event.structured_payload,
+            "action_type": event.action_type,
+        }
+        text = event.text_payload or _summarize_structured_payload(event.structured_payload)
+        raw = RawEvent(
+            id=event.id,
+            schema_version=CAUSAL_SCHEMA_VERSION,
+            user_id=event.user_id,
+            session_id=event.session_id,
+            source_app=event.source_app,
+            namespace=event.namespace,
+            event_type=event.event_type,
+            timestamp=event.created_at,
+            content_ref=event.world_ptr or (f"memory:{event.memory_id}" if event.memory_id else None),
+            content_hash=hashlib.sha256(text.encode("utf-8")).hexdigest() if text else None,
+            privacy_scope=str(event.metadata.get("privacy_scope") or event.metadata.get("scope") or "global"),
+            metadata=metadata,
+        )
+        try:
+            self.capture_store.record_raw_event(raw)
+        except Exception as exc:
+            if "UNIQUE constraint failed" not in str(exc):
+                raise
+        self._sync_causal_projection(user_id=raw.user_id)
+        return raw
+
+    def _sync_causal_projection(self, *, user_id: str = "default") -> Optional[Dict[str, Any]]:
+        if not self.graph_projection:
+            return None
+        return self.graph_projection.sync(self.capture_store, user_id=user_id)
+
+    def _require_causal_projection(self) -> CausalGraphProjection:
+        if not self.graph_projection:
+            raise RuntimeError("Causal graph projection is not configured")
+        return self.graph_projection
+
     def _require_session(self, session_id: str) -> Any:
         session = self.capture_store.get_session(session_id)
         if not session:
@@ -1180,6 +1541,42 @@ def _default_namespace_for_app(source_app: str) -> str:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _raw_event_summary(event: RawEvent) -> str:
+    metadata = event.metadata or {}
+    text = str(
+        metadata.get("text")
+        or metadata.get("text_payload")
+        or metadata.get("window_title")
+        or metadata.get("url")
+        or metadata.get("action_type")
+        or ""
+    ).strip()
+    if text:
+        return f"{event.source_app}:{event.event_type} - {text[:180]}"
+    return f"{event.source_app}:{event.event_type} at {event.timestamp}"
+
+
+def _checkpoint_summary(events: List[RawEvent]) -> str:
+    if not events:
+        return ""
+    first = events[0]
+    last = events[-1]
+    apps = sorted({event.source_app for event in events if event.source_app})
+    types = sorted({event.event_type for event in events if event.event_type})
+    return (
+        f"Causal checkpoint over {len(events)} raw event(s) from {first.timestamp} "
+        f"to {last.timestamp}. Apps: {', '.join(apps) or 'unknown'}. "
+        f"Event types: {', '.join(types) or 'unknown'}."
+    )
+
+
+def _strictest_privacy(scopes: Iterable[str]) -> str:
+    order = ["public", "project", "connector", "global", "private"]
+    ranked = {scope: idx for idx, scope in enumerate(order)}
+    values = [str(scope or "global") for scope in scopes]
+    return max(values or ["global"], key=lambda item: ranked.get(item, 3))
 
 
 def _coerce_iso(value: Any) -> Optional[datetime]:
@@ -1587,6 +1984,31 @@ def _collect_focus_targets(matches: List[Any], limit: int = 6) -> List[Dict[str,
             if len(targets) >= limit:
                 return targets
     return targets
+
+
+def _as_dict_list(value: Any) -> List[Dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _retrieval_evidence(result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    evidence: List[Dict[str, Any]] = []
+    for key in ("evidence", "supporting_events", "source_events"):
+        evidence.extend(_as_dict_list(result.get(key)))
+    for item in _as_dict_list(result.get("causal_path")):
+        event_id = item.get("from") or item.get("to") or item.get("event_id")
+        if event_id:
+            evidence.append({"event_id": event_id, "edge_id": item.get("edge_id"), "edge_type": item.get("edge_type")})
+    seen = set()
+    deduped: List[Dict[str, Any]] = []
+    for item in evidence:
+        key = json.dumps(item, sort_keys=True)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
 
 
 def _build_current_page_skim(chunks: List[Dict[str, Any]], limit: int = 6) -> List[Dict[str, Any]]:

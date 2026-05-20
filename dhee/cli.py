@@ -77,6 +77,39 @@ def _get_vector_store():
     )
 
 
+class _NoopMemoryOSClient:
+    def remember(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        return {"stored": False}
+
+    def recall(self, *args: Any, **kwargs: Any) -> list:
+        return []
+
+    def recent(self, *args: Any, **kwargs: Any) -> list:
+        return []
+
+
+def _get_memory_os_service(*, with_memory: bool = False):
+    from pathlib import Path
+
+    from dhee.world_memory.capture_store import CaptureStore
+    from dhee.world_memory.causal_graph import CausalGraphProjection
+    from dhee.world_memory.service import DheeMemoryClient, MemoryOSService
+    from dhee.world_memory.session_graph import SessionGraphStore
+    from dhee.world_memory.store import WorldMemoryStore
+
+    runtime_root = Path(os.environ.get("DHEE_DATA_DIR") or (Path.home() / ".dhee")).expanduser()
+    memory_os_dir = runtime_root / "memory_os"
+    memory_os_dir.mkdir(parents=True, exist_ok=True)
+    memory_client = DheeMemoryClient(_get_memory()) if with_memory else _NoopMemoryOSClient()
+    return MemoryOSService(
+        capture_store=CaptureStore(str(memory_os_dir / "capture.db")),
+        world_store=WorldMemoryStore(str(memory_os_dir / "world_memory.db")),
+        graph_store=SessionGraphStore(str(runtime_root / "capture" / "sessions")),
+        memory_client=memory_client,
+        graph_projection=CausalGraphProjection(str(memory_os_dir / "causal_scene.kuzu")),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Command handlers
 # ---------------------------------------------------------------------------
@@ -496,6 +529,89 @@ def cmd_context(args: argparse.Namespace) -> None:
             print(f"Projected cache-read: {data['projected_cache_read_tokens']}")
             print(f"Risk: {data['risk']}")
             print(f"Rollover required: {'yes' if data['rollover_required'] else 'no'}")
+            return
+
+    if action == "repo-brain":
+        from dhee import repo_intelligence
+
+        subaction = args.entry_id or "index"
+        extra = list(getattr(args, "context_args", []) or [])
+        brain_actions = {"index", "show", "get", "localize"}
+        if subaction not in brain_actions:
+            extra = [subaction, *extra]
+            subaction = "localize"
+        repo = args.repo or os.getcwd()
+        if subaction == "index":
+            goal = " ".join(str(item) for item in extra).strip()
+            brain = repo_intelligence.build_repo_brain(
+                repo,
+                goal=goal,
+                must_run=getattr(args, "must_run", None),
+                persist=True,
+            )
+            result = {
+                "format": "dhee_repo_brain_index.v1",
+                "repo_intelligence": repo_intelligence.repo_brain_summary(brain),
+                "localization": repo_intelligence.localize_issue(goal, brain) if goal else None,
+            }
+            if args.json:
+                _json_out(result)
+                return
+            summary = result["repo_intelligence"]
+            print(f"Repo brain indexed: {summary.get('ref')}")
+            print(f"  path       {summary.get('path')}")
+            print(f"  files      {summary.get('file_count')} ({summary.get('indexed_file_count')} indexed)")
+            print(f"  symbols    {summary.get('symbol_count')}")
+            print(f"  tests      {summary.get('test_count')}")
+            print(f"  calls      {summary.get('call_edge_count')}")
+            if result.get("localization"):
+                loc = result["localization"]
+                print(f"  localized  {loc.get('status')} confidence={loc.get('confidence')}")
+            return
+        if subaction in {"show", "get"}:
+            ref = extra[0] if extra else None
+            result = repo_intelligence.load_repo_brain(repo, ref=ref)
+            brain = result.get("brain") if isinstance(result.get("brain"), dict) else None
+            if brain:
+                result["repo_intelligence"] = repo_intelligence.repo_brain_summary(brain)
+                if not args.json:
+                    result["brain"] = None
+            if args.json:
+                _json_out(result)
+                return
+            if not brain:
+                print("Repo brain not found. Run `dhee context repo-brain index` first.")
+                return
+            summary = result["repo_intelligence"]
+            print(f"Repo brain: {summary.get('ref')}")
+            print(f"  path       {summary.get('path')}")
+            print(f"  head       {summary.get('head_commit')}")
+            print(f"  files      {summary.get('file_count')} ({summary.get('indexed_file_count')} indexed)")
+            print(f"  symbols    {summary.get('symbol_count')}")
+            print(f"  tests      {summary.get('test_count')}")
+            print(f"  failures   {summary.get('historical_failure_count')}")
+            return
+        if subaction == "localize":
+            goal = " ".join(str(item) for item in extra).strip()
+            if not goal:
+                print("Pass a goal: dhee context repo-brain localize \"Fix failing context firewall tests\"")
+                sys.exit(1)
+            loaded = repo_intelligence.load_repo_brain(repo)
+            brain = loaded.get("brain") if isinstance(loaded.get("brain"), dict) else None
+            if not brain:
+                brain = repo_intelligence.build_repo_brain(repo, goal=goal, persist=True)
+            localization = repo_intelligence.localize_issue(goal, brain)
+            result = {
+                "format": "dhee_repo_brain_localize.v1",
+                "repo_intelligence": repo_intelligence.repo_brain_summary(brain),
+                "localization": localization,
+            }
+            if args.json:
+                _json_out(result)
+                return
+            print(f"Localization: {localization.get('status')} confidence={localization.get('confidence')}")
+            for item in localization.get("candidate_files") or []:
+                print(f"  {item.get('confidence'):.2f} {item.get('path')}  {', '.join(item.get('reasons') or [])}")
             return
 
     if action == "task":
@@ -1395,6 +1511,176 @@ def cmd_handoff(args: argparse.Namespace) -> None:
             print(f"Wrote handoff snapshot to {args.output}")
             return
     _json_out(snapshot)
+
+
+def cmd_graph(args: argparse.Namespace) -> None:
+    """Manage the Kuzu causal-scene graph projection."""
+    service = _get_memory_os_service(with_memory=False)
+    projection = service.graph_projection
+    if projection is None:
+        raise RuntimeError("Causal graph projection is not configured")
+
+    action = args.graph_action
+    user_id = getattr(args, "user_id", "default")
+    if action == "sync":
+        result = projection.sync(service.capture_store, user_id=user_id)
+    elif action == "rebuild":
+        result = projection.rebuild(service.capture_store, user_id=user_id)
+    elif action == "verify":
+        result = projection.verify(service.capture_store, user_id=user_id)
+    elif action == "show-event":
+        if not args.target:
+            raise ValueError("show-event requires an event_id")
+        result = projection.show_event(args.target)
+    elif action == "show-cone":
+        if not args.target:
+            raise ValueError("show-cone requires an event_id")
+        result = projection.show_cone(
+            args.target,
+            direction=getattr(args, "direction", "backward"),
+            depth=int(getattr(args, "depth", 3) or 3),
+        )
+    elif action == "show-scene":
+        if not args.target:
+            raise ValueError("show-scene requires a scene_id")
+        result = projection.show_scene(args.target)
+    elif action == "show-thread":
+        if not args.target:
+            raise ValueError("show-thread requires a thread_id")
+        result = projection.show_thread(args.target)
+    elif action == "explain-retrieval":
+        if not args.target:
+            raise ValueError("explain-retrieval requires a query_id")
+        result = service.explain_causal_retrieval(args.target, user_id=user_id)
+    elif action == "prune-traces":
+        result = service.capture_store.prune_retrieval_traces(
+            user_id=user_id,
+            older_than_days=getattr(args, "older_than_days", None),
+            keep_latest=int(getattr(args, "keep_latest", 1000) or 0),
+            dry_run=bool(getattr(args, "dry_run", False)),
+        )
+    else:
+        raise ValueError(f"Unknown graph action: {action}")
+
+    if args.json:
+        _json_out(result)
+        return
+    if isinstance(result, dict) and "ok" in result:
+        print(f"graph {action}: {'ok' if result.get('ok') else 'failed'}")
+        for error in result.get("errors") or []:
+            print(f"  - {error}")
+        return
+    if isinstance(result, dict) and "counts" in result:
+        print(f"graph {action}: {result.get('status', 'ok')} ({result.get('backend')})")
+        for key, value in sorted((result.get("counts") or {}).items()):
+            print(f"  {key}: {value}")
+        return
+    _json_out(result)
+
+
+def cmd_causal(args: argparse.Namespace) -> None:
+    """Run causal-scene checkpoint and retrieval commands."""
+    action = args.causal_action
+    service = _get_memory_os_service(with_memory=(action == "checkpoint"))
+    user_id = getattr(args, "user_id", "default")
+    scope = getattr(args, "scope", "global")
+
+    if action == "checkpoint":
+        result = service.compile_causal_checkpoint(
+            session_id=getattr(args, "session", None),
+            user_id=user_id,
+            time_window_start=getattr(args, "start", None),
+            time_window_end=getattr(args, "end", None),
+        )
+    elif action == "frontier":
+        result = service.get_active_frontier(user_id=user_id, scope=scope)
+    elif action == "why":
+        result = service.causal_why(
+            event_id=getattr(args, "event_id", None),
+            query=getattr(args, "query", "") or "",
+            user_id=user_id,
+            scope=scope,
+        )
+    elif action == "what-happened":
+        if not args.target:
+            raise ValueError("what-happened requires a scene, episode, or thread id")
+        result = service.causal_what_happened(target_id=args.target, user_id=user_id, scope=scope)
+    elif action == "handoff":
+        result = service.causal_handoff(user_id=user_id, scope=scope)
+    elif action == "preference":
+        result = service.causal_preference(query=getattr(args, "query", "") or "", user_id=user_id, scope=scope)
+    elif action == "gems":
+        result = service.causal_gems(
+            user_id=user_id,
+            scope=scope,
+            kind=getattr(args, "kind", None),
+            limit=int(getattr(args, "gem_limit", 50) or 50),
+        )
+    elif action == "show-gem":
+        if not args.target:
+            raise ValueError("show-gem requires a gem id or gem RawEvent id")
+        result = service.causal_show_gem(args.target, user_id=user_id, scope=scope)
+    elif action == "submit-gem":
+        if not args.target:
+            raise ValueError("submit-gem requires a gem id or gem RawEvent id")
+        from dhee.core.learnings import LearningExchange
+
+        result = service.causal_submit_gem(
+            args.target,
+            learning_exchange=LearningExchange(),
+            user_id=user_id,
+            scope=scope,
+            repo=getattr(args, "repo", None),
+            status=getattr(args, "learning_status", "candidate") or "candidate",
+        )
+    elif action == "extract-gems":
+        from dhee.core.learnings import LearningExchange
+        from dhee.world_memory.gem_extractor import (
+            extract_memory_gems,
+            submit_gem_learning_candidates,
+            summarize_gems,
+            write_gem_raw_events,
+        )
+
+        db = _get_db()
+        memories = db.get_all_memories(
+            user_id=user_id,
+            limit=int(getattr(args, "limit", 500) or 500),
+            include_tombstoned=False,
+        )
+        gems = extract_memory_gems(
+            memories,
+            user_id=user_id,
+            limit=int(getattr(args, "gem_limit", 50) or 50),
+            min_score=float(getattr(args, "min_score", 0.62) or 0.62),
+        )
+        write_report = {"written": [], "skipped_existing": []}
+        learning_report = {"submitted": [], "rejected": []}
+        if not getattr(args, "dry_run", False):
+            write_report = write_gem_raw_events(service.capture_store, gems)
+            if service.graph_projection:
+                service.graph_projection.sync(service.capture_store, user_id=user_id)
+            if getattr(args, "submit_learnings", False):
+                learning_report = submit_gem_learning_candidates(
+                    LearningExchange(),
+                    gems,
+                    repo=getattr(args, "repo", None),
+                )
+        result = {
+            "status": "dry_run" if getattr(args, "dry_run", False) else "extracted",
+            "scanned_memories": len(memories),
+            "min_score": float(getattr(args, "min_score", 0.62) or 0.62),
+            "summary": summarize_gems(gems),
+            "raw_events": write_report,
+            "learning_candidates": learning_report,
+        }
+    else:
+        raise ValueError(f"Unknown causal action: {action}")
+
+    if args.json:
+        _json_out(result)
+        return
+    _json_out(result)
 
 
 def cmd_thread_state(args: argparse.Namespace) -> None:
@@ -3213,7 +3499,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_context.add_argument(
         "context_action",
         nargs="?",
-        choices=["list", "show", "delete", "refresh", "check", "status", "state", "checkpoint", "rollover", "provision", "debt", "capsule", "task"],
+        choices=["list", "show", "delete", "refresh", "check", "status", "state", "checkpoint", "rollover", "provision", "debt", "capsule", "repo-brain", "task"],
         default="list",
         help="Subcommand (default: list)",
     )
@@ -3571,6 +3857,73 @@ def build_parser() -> argparse.ArgumentParser:
     p_assets.add_argument("--user-id", default="default", help="User ID")
     p_assets.add_argument("--json", action="store_true", help="JSON output")
 
+    # graph — Kuzu causal-scene projection lifecycle and inspection
+    p_graph = sub.add_parser("graph", help="Manage the Kuzu causal-scene graph projection")
+    p_graph.add_argument(
+        "graph_action",
+        choices=[
+            "sync",
+            "rebuild",
+            "verify",
+            "show-event",
+            "show-cone",
+            "show-scene",
+            "show-thread",
+            "explain-retrieval",
+            "prune-traces",
+        ],
+        help="Graph subcommand",
+    )
+    p_graph.add_argument("target", nargs="?", help="Event, scene, thread, or retrieval id")
+    p_graph.add_argument("--direction", choices=["backward", "forward"], default="backward", help="For show-cone")
+    p_graph.add_argument("--depth", type=int, default=3, help="For show-cone")
+    p_graph.add_argument("--older-than-days", type=int, help="For prune-traces: delete traces older than this many days")
+    p_graph.add_argument("--keep-latest", type=int, default=1000, help="For prune-traces: always preserve this many newest traces")
+    p_graph.add_argument("--dry-run", action="store_true", help="For prune-traces: report candidates without deleting")
+    p_graph.add_argument("--user-id", default="default", help="User ID")
+    p_graph.add_argument("--json", action="store_true", help="JSON output")
+
+    # causal — causal-scene checkpoint and retrieval modes
+    p_causal = sub.add_parser("causal", help="Run causal-scene checkpoint and retrieval modes")
+    p_causal.add_argument(
+        "causal_action",
+        choices=[
+            "checkpoint",
+            "frontier",
+            "why",
+            "what-happened",
+            "handoff",
+            "preference",
+            "gems",
+            "show-gem",
+            "submit-gem",
+            "extract-gems",
+        ],
+        help="Causal subcommand",
+    )
+    p_causal.add_argument("target", nargs="?", help="Target id for what-happened/show-gem/submit-gem")
+    p_causal.add_argument("--session", help="Session id for checkpoint")
+    p_causal.add_argument("--start", help="Start timestamp for checkpoint")
+    p_causal.add_argument("--end", help="End timestamp for checkpoint")
+    p_causal.add_argument("--event-id", help="Target event id for why")
+    p_causal.add_argument("--query", default="", help="Query for why/preference")
+    p_causal.add_argument("--user-id", default="default", help="User ID")
+    p_causal.add_argument("--scope", default="global", help="Privacy scope for retrieval")
+    p_causal.add_argument("--kind", help="For gems: filter by gem kind")
+    p_causal.add_argument("--limit", type=int, default=500, help="For extract-gems: memories to scan")
+    p_causal.add_argument("--gem-limit", type=int, default=50, help="For extract-gems: max gems to extract")
+    p_causal.add_argument("--min-score", type=float, default=0.62, help="For extract-gems: minimum gem score")
+    p_causal.add_argument("--dry-run", action="store_true", help="For extract-gems: score without writing RawEvents")
+    p_causal.add_argument("--submit-learnings", action="store_true", help="For extract-gems: also submit learning candidates")
+    p_causal.add_argument(
+        "--learning-status",
+        choices=["candidate", "promoted", "rejected", "archived"],
+        default="candidate",
+        help="For submit-gem: learning lifecycle status",
+    )
+    p_causal.add_argument("--repo", help="For gem learning candidates: repo path")
+    p_causal.add_argument("--json", action="store_true", help="JSON output")
+
     # router
     p_router = sub.add_parser("router", help="Context router (enable/disable/stats)")
     p_router.add_argument(
@@ -3676,6 +4029,8 @@ COMMAND_MAP = {
     "ingest": cmd_ingest,
     "docs": cmd_docs,
     "assets": cmd_assets,
+    "graph": cmd_graph,
+    "causal": cmd_causal,
     "replay-corpus": cmd_replay_corpus,
     "portability-eval": cmd_portability_eval,
     "decades-eval": cmd_decades_eval,

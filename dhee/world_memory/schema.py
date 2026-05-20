@@ -4,6 +4,135 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 
+CAUSAL_SCHEMA_VERSION = "csm.v1"
+CAUSAL_PROJECTION_VERSION = "csm.projection.v1"
+
+AUTOMATIC_CAUSAL_EDGE_TYPES = {
+    "TEMPORAL_NEXT",
+    "OBSERVED_ON",
+    "MENTIONS",
+    "CREATED",
+    "UPDATED",
+    "BELONGS_TO",
+    "PROJECTED_INTO",
+}
+
+CHECKPOINT_CAUSAL_EDGE_TYPES = {
+    "CAUSED",
+    "ENABLED",
+    "BLOCKED",
+    "RESOLVED",
+    "CONTRADICTED",
+    "REFINED",
+    "SUPPORTED",
+    "INVALIDATED",
+    "DERIVED_FACT",
+    "SKILL_EXTRACTED_FROM",
+}
+
+CAUSAL_EDGE_STATUSES = {
+    "inferred",
+    "verified",
+    "rejected",
+    "stale",
+    "superseded",
+    "archived",
+}
+
+
+@dataclass
+class RawEvent:
+    id: str
+    user_id: str
+    source_app: str
+    event_type: str
+    timestamp: str
+    schema_version: str = CAUSAL_SCHEMA_VERSION
+    session_id: Optional[str] = None
+    namespace: str = ""
+    content_ref: Optional[str] = None
+    content_hash: Optional[str] = None
+    privacy_scope: str = "global"
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    deleted_at: Optional[str] = None
+    redacted_at: Optional[str] = None
+    redaction_reason: Optional[str] = None
+
+
+@dataclass
+class EventFrame:
+    id: str
+    user_id: str
+    frame_type: str
+    summary: str
+    source_event_ids: List[str]
+    confidence: float
+    created_at: str
+    schema_version: str = CAUSAL_SCHEMA_VERSION
+    privacy_scope: str = "global"
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    deleted_at: Optional[str] = None
+    redacted_at: Optional[str] = None
+    redaction_reason: Optional[str] = None
+
+
+@dataclass
+class CausalEdge:
+    id: str
+    source_id: str
+    target_id: str
+    edge_type: str
+    confidence: float
+    status: str
+    evidence_event_ids: List[str]
+    inferred_by: str
+    explanation: str
+    created_at: str
+    schema_version: str = CAUSAL_SCHEMA_VERSION
+    user_id: str = "default"
+    privacy_scope: str = "global"
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    deleted_at: Optional[str] = None
+    redacted_at: Optional[str] = None
+    redaction_reason: Optional[str] = None
+
+
+@dataclass
+class CheckpointReport:
+    id: str
+    user_id: str
+    status: str
+    report: Dict[str, Any]
+    created_at: str
+    schema_version: str = CAUSAL_SCHEMA_VERSION
+    session_id: Optional[str] = None
+    time_window_start: Optional[str] = None
+    time_window_end: Optional[str] = None
+    event_frame_ids: List[str] = field(default_factory=list)
+    causal_edge_ids: List[str] = field(default_factory=list)
+    summary_memory_id: Optional[str] = None
+
+
+@dataclass
+class RetrievalTrace:
+    id: str
+    user_id: str
+    mode: str
+    scope: str
+    query: str
+    target_id: str
+    retrieval_path: List[Dict[str, Any]]
+    evidence: List[Dict[str, Any]]
+    result: Dict[str, Any]
+    created_at: str
+    schema_version: str = CAUSAL_SCHEMA_VERSION
+    privacy_scope: str = "global"
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    deleted_at: Optional[str] = None
+    redacted_at: Optional[str] = None
+    redaction_reason: Optional[str] = None
+
+
 @dataclass
 class WorldState:
     id: str
