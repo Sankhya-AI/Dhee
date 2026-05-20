@@ -469,6 +469,17 @@ class ProfileProcessor:
         all_profiles = self.db.get_all_profiles(user_id=user_id)
         if not all_profiles:
             return []
+        try:
+            from dhee.memory.quality import sanitize_profile_for_recall
+
+            cleaned_profiles: List[Dict[str, Any]] = []
+            for profile in all_profiles:
+                cleaned, _issue = sanitize_profile_for_recall(profile)
+                if cleaned is not None:
+                    cleaned_profiles.append(cleaned)
+            all_profiles = cleaned_profiles
+        except Exception as exc:
+            logger.debug("Profile recall sanitation skipped: %s", exc)
 
         query_lower = query.lower()
         query_words = query_lower.split()

@@ -171,6 +171,35 @@ def _history_embedding_dims(config_dir: str) -> Optional[int]:
     return max(counts.items(), key=lambda item: item[1])[0]
 
 
+def _existing_zvec_dims(zvec_path: str, collection_name: str) -> Optional[int]:
+    collection_path = os.path.join(zvec_path, collection_name)
+    if not os.path.exists(collection_path):
+        return None
+    try:
+        import zvec
+
+        collection = zvec.open(collection_path)
+        schema = getattr(collection, "schema", None)
+        vectors = getattr(schema, "vectors", []) if schema is not None else []
+        if isinstance(vectors, dict):
+            iterable = vectors.values()
+        else:
+            iterable = vectors
+        for vector_schema in iterable:
+            name = getattr(vector_schema, "name", None)
+            if name is None and isinstance(vector_schema, dict):
+                name = vector_schema.get("name")
+            if name != "embedding":
+                continue
+            dimension = getattr(vector_schema, "dimension", None)
+            if dimension is None and isinstance(vector_schema, dict):
+                dimension = vector_schema.get("dimension")
+            return int(dimension) if dimension else None
+    except Exception:
+        return None
+    return None
+
+
 def _resolve_vector_store_config(
     config: Dict[str, Any],
     config_dir: str,
@@ -208,6 +237,16 @@ def _resolve_vector_store_config(
 
     if provider == "zvec":
         vector_config["path"] = str(vector_config.get("path") or os.path.join(config_dir, "zvec"))
+        existing_zvec_dims = _existing_zvec_dims(vector_config["path"], collection_name)
+        collection_provider = str(config.get("provider") or DEFAULT_PROVIDER).strip().lower()
+        target_collection_name = f"{collection_name}_{collection_provider}_{embedding_dims}"
+        target_zvec_dims = _existing_zvec_dims(vector_config["path"], target_collection_name)
+        if existing_zvec_dims and existing_zvec_dims != embedding_dims:
+            vector_config["collection_name"] = target_collection_name
+            vector_config["embedding_model_dims"] = embedding_dims
+        elif target_zvec_dims == embedding_dims:
+            vector_config["collection_name"] = target_collection_name
+            vector_config["embedding_model_dims"] = embedding_dims
     elif provider == "sqlite_vec":
         vector_config["path"] = str(
             vector_config.get("path") or os.path.join(config_dir, "sqlite_vec.db")

@@ -113,6 +113,29 @@ _OPERATIONAL_TRANSPORT_RE = re.compile(
     r"^\s*(?:ran|read|grep|glob|searched|opened|listed|codex running|claude running)\b",
     re.IGNORECASE,
 )
+_OPERATIONAL_FAILURE_RE = re.compile(
+    r"^\s*(?:bash|shell|command|tool|pytest|uv|python|npm|pnpm|ruff|mypy)\s+failed\b|"
+    r"^\s*failed:\s*(?:pytest|uv|python|npm|pnpm|ruff|mypy)\b",
+    re.IGNORECASE,
+)
+_SHELL_COMMAND_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:/[\w .@%+=:,~/-]+|~/?[\w .@%+=:,~/-]*|\./[\w .@%+=:,~/-]+)"
+    r"(?:python[0-9.]*|pip[0-9.]*|pytest|sqlite3|curl|bash|sh)\b|"
+    r"(?:/[\w .@%+=:,~/-]+|~/?[\w .@%+=:,~/-]*|\./[\w .@%+=:,~/-]+)\s+"
+    r"(?:-m\s+)?(?:python[0-9.]*|pip[0-9.]*|pytest|uv|npm|pnpm|yarn|git|gh|sqlite3|curl|claude|codex|dhee|ruff|mypy|sed|rg|grep|ls|cat|echo|export)\b|"
+    r"[A-Z_][A-Z0-9_]*=.*\b(?:python[0-9.]*|pytest|sqlite3|curl|git|echo)\b|"
+    r"(?:python[0-9.]*|pip[0-9.]*|pytest|ruff|mypy|sqlite3|curl|echo|export)\b|"
+    r"time\s+\(|"
+    r"uv\s+(?:run|sync|pip|tool|python)\b|"
+    r"(?:npm|pnpm|yarn)\s+(?:run|test|install|build|lint|exec)\b|"
+    r"git\s+(?:-[A-Za-z]\s+\S+\s+)?(?:status|diff|show|log|push|pull|fetch|merge|commit|tag|checkout|branch|add)\b|"
+    r"gh\s+(?:pr|issue|release|repo|run|api|auth)\b|"
+    r"(?:claude|codex|dhee)\s+(?:mcp|run|context|memory|release|doctor|init|check|audit|repair)\b|"
+    r"(?:sed|rg|grep|ls|cat)\s+(?:-|/|~|\.|['\"]|[A-Za-z0-9_./-])"
+    r")",
+    re.IGNORECASE,
+)
 _GOAL_RE = re.compile(
     r"\b(my goal is|our goal is|goal is|i want to|we want to|i plan to|we plan to|"
     r"working on|personal assistant goal|product goal|north star|objective)\b",
@@ -340,10 +363,12 @@ def _is_operational_event(content: str, metadata: Mapping[str, Any]) -> bool:
     success = metadata.get("success")
     text = " ".join(str(content or "").strip().split())
 
-    if kind in {"file_touched", "tool_event", "session_log", "codex_event", "claude_code_event"}:
-        return str(success).lower() not in {"false", "0", "no"}
-    if source in {"claude_code_hook", "codex_hook", "session_log"} and tool not in {"bash", "bashoutput"}:
-        return str(success).lower() not in {"false", "0", "no"}
+    if kind in {"file_touched", "tool_event", "tool_failure", "failure", "session_log", "codex_event", "claude_code_event"}:
+        return True
+    if source in {"claude_code_hook", "codex_hook", "session_log"}:
+        return True
+    if _OPERATIONAL_FAILURE_RE.match(text):
+        return True
     success_match = _OPERATIONAL_SUCCESS_RE.match(text)
     if success_match:
         target = success_match.group(1).strip()
@@ -354,8 +379,8 @@ def _is_operational_event(content: str, metadata: Mapping[str, Any]) -> bool:
             or re.search(r"\.[A-Za-z0-9]{1,8}(?:$|[\s:])", target)
         ):
             return True
-    if _OPERATIONAL_TRANSPORT_RE.match(text):
-        return "failed" not in text.lower()
+    if _OPERATIONAL_TRANSPORT_RE.match(text) or _SHELL_COMMAND_RE.match(text):
+        return True
     return False
 
 
@@ -885,9 +910,14 @@ def query_allows_suppressed_class(query: str, memory_class: str) -> bool:
             term in query_l
             for term in (
                 "edited",
+                "failed",
+                "failure",
                 "file touched",
                 "tool event",
                 "operational",
+                "pytest",
+                "test result",
+                "test failure",
                 "session log",
                 "what changed",
                 "recent edits",
@@ -908,6 +938,108 @@ def query_allows_suppressed_class(query: str, memory_class: str) -> bool:
             )
         )
     return True
+
+
+def is_profile_anchor_contaminated(text: Any) -> bool:
+    """Return True when derived profile text is actually tool/test transport.
+
+    Profiles are long-lived and high-salience, so a shell command or failed
+    test accidentally promoted into a profile is more damaging than the same
+    string staying in short-term memory. Keep this intentionally conservative:
+    it targets transport-shaped rows, fixtures, and doc-chunk fragments rather
+    than arbitrary technical facts.
+    """
+    value = " ".join(str(text or "").split())
+    if not value:
+        return False
+    lowered = value.lower()
+    if _is_test_fixture(value, {}, explicit_remember=False):
+        return True
+    if _is_operational_event(value, {"source": "profile_anchor"}):
+        return True
+    if _OPERATIONAL_FAILURE_RE.match(value) or _SHELL_COMMAND_RE.match(value):
+        return True
+    if lowered in {"ran", "bash failed", "codex running", "claude running"}:
+        return True
+    if lowered.startswith(("repository guidelines ›", "dhee ›", "dhee native integration")):
+        return True
+    if "<!-- engram_continuity:start -->" in lowered or "<!-- dhee:start -->" in lowered:
+        return True
+    return False
+
+
+def sanitize_profile_for_recall(profile: Mapping[str, Any]) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    """Strip contaminated facts/preferences from a profile before recall.
+
+    Returns ``(clean_profile, issue)``. ``clean_profile`` is ``None`` when the
+    profile is entirely a transport artifact and should not appear as a
+    hierarchical anchor. ``issue`` is empty when no contamination was found.
+    """
+    cleaned = dict(profile or {})
+    facts = [str(item) for item in (cleaned.get("facts") or []) if str(item).strip()]
+    preferences = [str(item) for item in (cleaned.get("preferences") or []) if str(item).strip()]
+    aliases = [str(item) for item in (cleaned.get("aliases") or []) if str(item).strip()]
+    narrative = str(cleaned.get("narrative") or "").strip()
+    summary = str(cleaned.get("profile_summary") or "").strip()
+    name = str(cleaned.get("name") or "").strip()
+
+    kept_facts = [item for item in facts if not is_profile_anchor_contaminated(item)]
+    kept_preferences = [item for item in preferences if not is_profile_anchor_contaminated(item)]
+    kept_aliases = [item for item in aliases if not is_profile_anchor_contaminated(item)]
+    narrative_contaminated = bool(narrative and is_profile_anchor_contaminated(narrative))
+    summary_contaminated = bool(summary and is_profile_anchor_contaminated(summary))
+    name_contaminated = is_profile_anchor_contaminated(name)
+    replacement_name = ""
+    if name_contaminated:
+        for alias in kept_aliases:
+            if not is_profile_anchor_contaminated(alias):
+                replacement_name = alias.strip()
+                break
+
+    removed = {
+        "facts": len(facts) - len(kept_facts),
+        "preferences": len(preferences) - len(kept_preferences),
+        "aliases": len(aliases) - len(kept_aliases),
+        "narrative": 1 if narrative_contaminated else 0,
+        "profile_summary": 1 if summary_contaminated else 0,
+        "name": 1 if name_contaminated else 0,
+    }
+    total_removed = sum(removed.values())
+    issue = {
+        "profile_id": cleaned.get("id"),
+        "name": name,
+        "removed": removed,
+    } if total_removed else {}
+
+    cleaned["facts"] = kept_facts
+    cleaned["preferences"] = kept_preferences
+    cleaned["aliases"] = kept_aliases
+    if narrative_contaminated:
+        cleaned["narrative"] = None
+    if summary_contaminated:
+        cleaned["profile_summary"] = None
+    if replacement_name:
+        cleaned["name"] = replacement_name
+
+    has_recall_material = any(
+        [
+            str(cleaned.get("narrative") or "").strip(),
+            str(cleaned.get("profile_summary") or "").strip(),
+            kept_facts,
+            kept_preferences,
+            kept_aliases,
+        ]
+    )
+    strength = float(cleaned.get("strength") or 0.0)
+    if total_removed and not has_recall_material and strength <= 0.0:
+        return None, {}
+    if name_contaminated and has_recall_material and not replacement_name:
+        return None, issue
+    if name_contaminated and not has_recall_material:
+        return None, issue or {"profile_id": cleaned.get("id"), "name": name, "removed": removed}
+    if not has_recall_material and total_removed:
+        return None, issue
+    return cleaned, issue
 
 
 def memory_quality_from_record(memory: Mapping[str, Any]) -> MemoryQuality:

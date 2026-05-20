@@ -82,6 +82,26 @@ def test_get_memory_instance_uses_nvidia_default_dims_when_not_preserving_histor
     assert config.embedding_model_dims == 2048
 
 
+def test_get_memory_instance_uses_dimmed_zvec_collection_when_base_is_legacy(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("DHEE_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("NVIDIA_API_KEY", "test-key")
+    monkeypatch.setattr("dhee.memory.main.FullMemory", FakeFullMemory)
+    monkeypatch.setattr(
+        "dhee.cli_config._existing_zvec_dims",
+        lambda _path, collection: 384 if collection == "dhee" else 2048 if collection == "dhee_nvidia_2048" else None,
+    )
+    _write_history_embedding(tmp_path, 2048)
+
+    memory = get_memory_instance({"provider": "nvidia", "embedding_dims": 2048})
+    config = memory.config
+
+    assert config.vector_store.config["collection_name"] == "dhee_nvidia_2048"
+    assert config.vector_store.config["embedding_model_dims"] == 2048
+
+
 def test_get_memory_instance_honors_explicit_sqlite_vec(monkeypatch, tmp_path):
     monkeypatch.setenv("DHEE_DATA_DIR", str(tmp_path))
     monkeypatch.setattr("dhee.memory.main.FullMemory", FakeFullMemory)

@@ -431,6 +431,7 @@ TOOLS = [
                 "query": {"type": "string", "description": "The search query - what you're trying to remember"},
                 "user_id": {"type": "string", "description": "User identifier (default: 'default')"},
                 "agent_id": {"type": "string", "description": "Agent identifier to scope search to (optional)"},
+                "repo": {"type": "string", "description": "Optional repository/workspace path for repo handoff continuity."},
                 "limit": {"type": "integer", "description": "Maximum number of results to return (default: 10)"},
                 "categories": {"type": "array", "items": {"type": "string"}, "description": "Filter results by categories"},
                 "orchestration_mode": {
@@ -825,6 +826,7 @@ TOOLS = [
             "properties": {
                 "question": {"type": "string", "description": "The question to reason about"},
                 "user_id": {"type": "string", "description": "User identifier (default: 'default')"},
+                "repo": {"type": "string", "description": "Optional repository/workspace path for repo handoff continuity."},
                 "max_depth": {"type": "integer", "description": "Maximum decomposition depth (default: 3)"},
             },
             "required": ["question"],
@@ -1491,6 +1493,7 @@ def _handle_search_memory(memory, args):
             query=args.get("query", ""),
             user_id=_default_user_id(args),
             agent_id=args.get("agent_id"),
+            repo=args.get("repo"),
             categories=args.get("categories"),
             limit=limit,
             question_type=args.get("question_type", ""),
@@ -2548,6 +2551,7 @@ def _handle_think(memory, arguments: Dict[str, Any]) -> Dict[str, Any]:
             question=question,
             user_id=_default_user_id(arguments) if not arguments.get("user_id") else user_id,
             max_depth=max_depth,
+            repo=arguments.get("repo"),
         )
         if hasattr(result, "to_dict"):
             return result.to_dict()

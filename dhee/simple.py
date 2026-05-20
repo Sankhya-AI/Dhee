@@ -101,6 +101,36 @@ def _existing_sqlite_vec_dims(db_path: Path, collection_name: str) -> Optional[i
     return int(match.group(1))
 
 
+def _existing_zvec_dims(zvec_path: Path, collection_name: str) -> Optional[int]:
+    """Return the stored zvec dimension for an existing collection."""
+    collection_path = zvec_path / collection_name
+    if not collection_path.exists():
+        return None
+    try:
+        import zvec
+
+        collection = zvec.open(str(collection_path))
+        schema = getattr(collection, "schema", None)
+        vectors = getattr(schema, "vectors", []) if schema is not None else []
+        if isinstance(vectors, dict):
+            iterable = vectors.values()
+        else:
+            iterable = vectors
+        for vector_schema in iterable:
+            name = getattr(vector_schema, "name", None)
+            if name is None and isinstance(vector_schema, dict):
+                name = vector_schema.get("name")
+            if name != "embedding":
+                continue
+            dimension = getattr(vector_schema, "dimension", None)
+            if dimension is None and isinstance(vector_schema, dict):
+                dimension = vector_schema.get("dimension")
+            return int(dimension) if dimension else None
+    except Exception:
+        return None
+    return None
+
+
 def _history_embedding_dims(data_dir: Path) -> Optional[int]:
     """Return the dominant stored embedding dimension from history.db."""
     history_path = data_dir / "history.db"
@@ -206,10 +236,15 @@ class Engram:
         # mixing embedding spaces.
         provider_embedding_dims = _get_embedding_dims(self._provider)
         existing_embedding_dims = None
+        existing_zvec_dims = None
         if not in_memory:
             existing_embedding_dims = _history_embedding_dims(self._data_dir)
+            existing_zvec_dims = _existing_zvec_dims(
+                self._data_dir / "zvec",
+                collection_name,
+            )
             if existing_embedding_dims is None:
-                existing_embedding_dims = _existing_sqlite_vec_dims(
+                existing_embedding_dims = existing_zvec_dims or _existing_sqlite_vec_dims(
                     self._data_dir / "sqlite_vec.db",
                     collection_name,
                 )
@@ -222,13 +257,25 @@ class Engram:
             else provider_embedding_dims
         )
         vector_collection_name = collection_name
-        if (
-            existing_embedding_dims
-            and existing_embedding_dims != provider_embedding_dims
-            and not preserve_existing_dims
-            and not in_memory
-        ):
-            vector_collection_name = f"{collection_name}_nvidia_{provider_embedding_dims}"
+        collection_provider = self._provider if self._provider != "mock" else DEFAULT_PROVIDER
+        target_collection_name = f"{collection_name}_{collection_provider}_{embedding_dims}"
+        target_zvec_dims = None
+        if not in_memory:
+            target_zvec_dims = _existing_zvec_dims(
+                self._data_dir / "zvec",
+                target_collection_name,
+            )
+        if not in_memory:
+            if existing_zvec_dims and existing_zvec_dims != embedding_dims:
+                vector_collection_name = target_collection_name
+            elif target_zvec_dims == embedding_dims:
+                vector_collection_name = target_collection_name
+            elif (
+                existing_embedding_dims
+                and existing_embedding_dims != provider_embedding_dims
+                and not preserve_existing_dims
+            ):
+                vector_collection_name = f"{collection_name}_nvidia_{provider_embedding_dims}"
 
         if in_memory:
             vector_config = VectorStoreConfig(

@@ -884,6 +884,7 @@ class FullMemory(SmartMemory, SceneProfileMixin):
         user_id: str,
         question_type: str = "",
         question_date: str = "",
+        repo: Optional[str] = None,
         agent_id: Optional[str] = None,
         run_id: Optional[str] = None,
         app_id: Optional[str] = None,
@@ -913,6 +914,7 @@ class FullMemory(SmartMemory, SceneProfileMixin):
             user_id=user_id,
             question_type=question_type,
             question_date=question_date,
+            repo=repo,
             agent_id=agent_id,
             run_id=run_id,
             app_id=app_id,
@@ -1746,6 +1748,7 @@ class FullMemory(SmartMemory, SceneProfileMixin):
         question: str,
         user_id: str = "default",
         max_depth: Optional[int] = None,
+        repo: Optional[str] = None,
         ask_user_fn=None,
     ):
         """Cognitive decomposition loop — memory-grounded reasoning.
@@ -1760,6 +1763,7 @@ class FullMemory(SmartMemory, SceneProfileMixin):
             question=question,
             user_id=user_id,
             max_depth=max_depth,
+            repo=repo,
             ask_user_fn=ask_user_fn,
         )
 
@@ -2042,6 +2046,7 @@ class FullMemory(SmartMemory, SceneProfileMixin):
             enforce_quality_layer,
             enforce_quality_strength,
             memory_quality_from_record,
+            sanitize_profile_for_recall,
         )
 
         memories = self._get_quality_health_memories(
@@ -2075,6 +2080,7 @@ class FullMemory(SmartMemory, SceneProfileMixin):
             "damaged_canonical": 0,
             "evidence_without_distillation": 0,
             "contract_repairs_available": 0,
+            "profile_contamination": 0,
         }
         samples: Dict[str, List[Dict[str, Any]]] = {
             "unresolved_test_noise": [],
@@ -2084,6 +2090,7 @@ class FullMemory(SmartMemory, SceneProfileMixin):
             "unpromoted_canonical": [],
             "damaged_canonical": [],
             "evidence_without_distillation": [],
+            "profile_contamination": [],
         }
 
         def _sample(memory: Dict[str, Any], issue: str, updates: List[str]) -> None:
@@ -2199,6 +2206,29 @@ class FullMemory(SmartMemory, SceneProfileMixin):
                 counts["damaged_canonical"] += 1
                 _sample(memory, "damaged_canonical", updates_needed or ["canonical_integrity"])
 
+        try:
+            profiles = self.db.get_all_profiles(user_id=user_id)
+        except Exception:
+            profiles = []
+        for profile in profiles or []:
+            cleaned_profile, issue = sanitize_profile_for_recall(profile)
+            if not issue:
+                continue
+            counts["profile_contamination"] += 1
+            counts["contract_repairs_available"] += 1
+            bucket = samples.setdefault("profile_contamination", [])
+            if len(bucket) < 8:
+                bucket.append(
+                    {
+                        "id": profile.get("id"),
+                        "name": profile.get("name"),
+                        "profile_type": profile.get("profile_type"),
+                        "strength": round(float(profile.get("strength") or 0.0), 3),
+                        "removed": issue.get("removed", {}),
+                        "suppressed_entire_profile": cleaned_profile is None,
+                    }
+                )
+
         checks: List[Dict[str, Any]] = []
 
         def _check(name: str, passed: bool, severity: str, detail: str) -> None:
@@ -2274,6 +2304,12 @@ class FullMemory(SmartMemory, SceneProfileMixin):
             "warning",
             f"{counts['evidence_without_distillation']} evidence/passive records lack structured distillation.",
         )
+        _check(
+            "no_profile_contamination",
+            counts["profile_contamination"] == 0,
+            "critical",
+            f"{counts['profile_contamination']} derived profile anchors contain tool/test/doc noise.",
+        )
 
         failed_critical = [check for check in checks if check["severity"] == "critical" and not check["passed"]]
         failed_warnings = [check for check in checks if check["severity"] == "warning" and not check["passed"]]
@@ -2336,6 +2372,7 @@ class FullMemory(SmartMemory, SceneProfileMixin):
             apply_memory_quality_contract,
             enforce_quality_layer,
             enforce_quality_strength,
+            sanitize_profile_for_recall,
         )
 
         memories = self.db.get_all_memories(
@@ -2353,6 +2390,7 @@ class FullMemory(SmartMemory, SceneProfileMixin):
             "ordinary_demoted_from_lml": 0,
             "queued_reopened": 0,
             "malformed_metadata_normalized": 0,
+            "profiles_cleaned": 0,
         }
         for memory in memories:
             raw_metadata = memory.get("metadata")
@@ -2422,6 +2460,52 @@ class FullMemory(SmartMemory, SceneProfileMixin):
                         payload_updates[key] = updates[key]
                 if payload_updates:
                     self._update_vectors_for_memory(str(memory["id"]), payload_updates)
+
+        try:
+            profiles = self.db.get_all_profiles(user_id=user_id)
+        except Exception:
+            profiles = []
+        for profile in profiles or []:
+            cleaned_profile, issue = sanitize_profile_for_recall(profile)
+            if not issue:
+                continue
+            updates: Dict[str, Any] = {}
+            if cleaned_profile is None:
+                updates = {
+                    "facts": [],
+                    "preferences": [],
+                    "aliases": [],
+                    "narrative": None,
+                    "profile_summary": None,
+                    "strength": 0.0,
+                }
+            else:
+                for key in ("name", "facts", "preferences", "aliases", "narrative", "profile_summary"):
+                    if cleaned_profile.get(key) != profile.get(key):
+                        updates[key] = cleaned_profile.get(key)
+                if not any(
+                    [
+                        cleaned_profile.get("facts"),
+                        cleaned_profile.get("preferences"),
+                        cleaned_profile.get("aliases"),
+                        cleaned_profile.get("narrative"),
+                        cleaned_profile.get("profile_summary"),
+                    ]
+                ):
+                    updates["strength"] = 0.0
+            if not updates:
+                continue
+            counts["profiles_cleaned"] += 1
+            repaired.append(
+                {
+                    "id": profile.get("id"),
+                    "memory_class": "profile_anchor",
+                    "updates": sorted(updates.keys()),
+                    "name": profile.get("name"),
+                }
+            )
+            if not dry_run:
+                self.db.update_profile(str(profile["id"]), updates)
 
         result = {
             "dry_run": dry_run,

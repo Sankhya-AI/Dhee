@@ -9,11 +9,31 @@ The memory layer DICTATES the LLM:
 
 import json
 import logging
+import re
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+_STOPWORDS = {
+    "about", "after", "again", "also", "and", "are", "before", "did",
+    "does", "for", "from", "had", "has", "have", "how", "into", "latest",
+    "now", "the", "this", "what", "when", "where", "which", "with",
+}
+_REPO_CONTEXT_TERMS = {
+    "blocker", "blocked", "branch", "commit", "diff", "file", "files",
+    "handoff", "hero", "pypi", "push", "readme", "release", "session",
+    "tag", "todo", "todos", "touched", "upload",
+}
+
+
+def _salient_terms(text: str) -> set[str]:
+    return {
+        term
+        for term in re.findall(r"\b[a-z0-9][a-z0-9_-]{2,}\b", str(text or "").lower())
+        if term not in _STOPWORDS
+    }
 
 # Decomposition prompt
 _DECOMPOSE_PROMPT = """Break down this question into simple yes/no sub-questions that can be answered from memory.
@@ -140,6 +160,7 @@ class CognitionEngine:
         question: str,
         user_id: str = "default",
         max_depth: Optional[int] = None,
+        repo: Optional[str] = None,
         ask_user_fn: Optional[Callable] = None,
     ) -> CognitionResult:
         """Run cognitive decomposition loop.
@@ -154,7 +175,7 @@ class CognitionEngine:
         trace = []
 
         # Step 1: Try direct memory search first
-        direct_result = self._try_direct_search(question, user_id)
+        direct_result = self._try_direct_search(question, user_id, repo=repo)
         if direct_result and direct_result.confidence >= 0.9:
             return CognitionResult(
                 answer=direct_result.answer or "",
@@ -179,7 +200,7 @@ class CognitionEngine:
         grounded_facts = []
         gaps = []
         for sq in sub_questions[:self.max_sub_questions]:
-            fact = self._ground(sq, user_id, depth - 1, ask_user_fn)
+            fact = self._ground(sq, user_id, depth - 1, ask_user_fn, repo=repo)
             if fact.confidence > 0:
                 grounded_facts.append(fact)
             else:
@@ -295,6 +316,7 @@ class CognitionEngine:
         user_id: str,
         remaining_depth: int,
         ask_user_fn: Optional[Callable],
+        repo: Optional[str] = None,
     ) -> GroundedFact:
         """Search memory for answer to a sub-question."""
         # Try context resolver first (deterministic)
@@ -315,13 +337,25 @@ class CognitionEngine:
         # Try vector search
         for query in sub_q.search_queries or [sub_q.question]:
             try:
-                search_result = self.memory.search(
-                    query=query,
-                    user_id=user_id,
-                    limit=5,
-                )
+                if repo and hasattr(self.memory, "search_orchestrated"):
+                    search_result = self.memory.search_orchestrated(
+                        query=query,
+                        user_id=user_id,
+                        repo=repo,
+                        limit=5,
+                        orchestration_mode="hybrid",
+                        question_type="repo_continuity",
+                        keyword_search=True,
+                        include_evidence=True,
+                    )
+                else:
+                    search_result = self.memory.search(
+                        query=query,
+                        user_id=user_id,
+                        limit=5,
+                    )
                 results = search_result.get("results", [])
-                if results:
+                if results and self._result_is_grounded_enough(query, results[0]):
                     top = results[0]
                     memory_text = top.get("memory", "")
                     score = top.get("composite_score", top.get("score", 0.5))
@@ -364,17 +398,29 @@ class CognitionEngine:
             confidence=0.0,
         )
 
-    def _try_direct_search(self, question: str, user_id: str) -> Optional[GroundedFact]:
+    def _try_direct_search(self, question: str, user_id: str, repo: Optional[str] = None) -> Optional[GroundedFact]:
         """Try to answer directly from memory without decomposition."""
         try:
-            search_result = self.memory.search(
-                query=question,
-                user_id=user_id,
-                limit=3,
-            )
+            if repo and hasattr(self.memory, "search_orchestrated"):
+                search_result = self.memory.search_orchestrated(
+                    query=question,
+                    user_id=user_id,
+                    repo=repo,
+                    limit=3,
+                    orchestration_mode="hybrid",
+                    question_type="repo_continuity",
+                    keyword_search=True,
+                    include_evidence=True,
+                )
+            else:
+                search_result = self.memory.search(
+                    query=question,
+                    user_id=user_id,
+                    limit=3,
+                )
             results = search_result.get("results", [])
             top_score = results[0].get("composite_score", results[0].get("score", 0)) if results else 0
-            if results and top_score >= 0.85:
+            if results and top_score >= 0.85 and self._result_is_grounded_enough(question, results[0]):
                 top = results[0]
                 return GroundedFact(
                     question=question,
@@ -394,6 +440,33 @@ class CognitionEngine:
         except Exception:
             pass
         return None
+
+    def _result_is_grounded_enough(self, question: str, result: Dict[str, Any]) -> bool:
+        """Reject high-score but semantically wrong direct answers.
+
+        Vector similarity can over-rank durable canonical policy memories for
+        unrelated repo questions because both mention "Dhee" or "memory".
+        Direct cognition answers need a small lexical/domain sanity check; if
+        it fails, decomposition can still search other routes instead of
+        confidently returning the wrong fact.
+        """
+        memory_class = str(result.get("memory_class") or "")
+        if memory_class == "repo_continuity":
+            return True
+        question_terms = _salient_terms(question)
+        memory_terms = _salient_terms(str(result.get("memory") or ""))
+        overlap = question_terms & memory_terms
+        if question_terms & _REPO_CONTEXT_TERMS and memory_class == "canonical_personal":
+            return bool(overlap & _REPO_CONTEXT_TERMS)
+        if len(overlap) >= 2:
+            return True
+        explanation = result.get("recall_explanation") or {}
+        explained_overlap = {
+            str(item).lower()
+            for item in (explanation.get("overlap_terms") or [])
+            if str(item).lower() not in _STOPWORDS
+        }
+        return len(explained_overlap) >= 2
 
     def _synthesize(
         self,

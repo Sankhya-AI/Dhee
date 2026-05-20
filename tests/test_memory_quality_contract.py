@@ -658,3 +658,288 @@ def test_audit_and_apply_repair_clear_legacy_chotu_memory_quality_failures(tmp_p
     assert repaired_malformed["metadata"]["legacy_metadata_raw"] == ["legacy", "metadata"]
     assert repaired_malformed["metadata"]["legacy_metadata_type"] == "list"
     memory.close()
+
+
+def test_failed_tool_rows_are_operational_noise_not_personal_truth(tmp_path):
+    memory = Engram(provider="mock", in_memory=True, data_dir=str(tmp_path))
+    memory.memory.db.add_memory(
+        {
+            "id": "legacy-bash-failure",
+            "memory": "bash failed: pytest tests/test_login.py — FAILED: missing exp claim",
+            "user_id": "default",
+            "metadata": {
+                "kind": "failure",
+                "source": "claude_code_hook",
+                "tool": "Bash",
+                "success": False,
+            },
+            "namespace": "default",
+            "memory_type": "semantic",
+            "layer": "lml",
+            "strength": 0.98,
+        }
+    )
+
+    before = memory.audit_memory_quality(user_id="default", require_personal_model=False)
+    assert before["ready"] is False
+    assert before["counts"]["unresolved_operational_noise"] == 1
+    assert before["counts"]["unapproved_lml"] == 1
+
+    repair = memory.repair_memory_quality(user_id="default", dry_run=False)
+    assert repair["operational_isolated"] == 1
+
+    loaded = memory.get("legacy-bash-failure")
+    assert loaded["namespace"] == "operational"
+    assert loaded["memory_type"] == "operational_event"
+    assert loaded["layer"] == "sml"
+    assert loaded["strength"] <= 0.05
+    assert loaded["metadata"]["suppress_from_default_recall"] is True
+
+    after = memory.audit_memory_quality(user_id="default", require_personal_model=False)
+    assert after["ready"] is True
+    assert after["counts"]["unresolved_operational_noise"] == 0
+    assert after["counts"]["unapproved_lml"] == 0
+    memory.close()
+
+
+def test_audit_and_repair_clean_contaminated_profile_anchors(tmp_path):
+    memory = Engram(provider="mock", in_memory=True, data_dir=str(tmp_path))
+    memory.memory.db.add_profile(
+        {
+            "id": "profile-bash-failed",
+            "user_id": "default",
+            "name": "bash failed",
+            "profile_type": "contact",
+            "facts": ["pytest tests/test_login.py — FAILED: missing exp claim"],
+            "preferences": [],
+            "strength": 1.0,
+        }
+    )
+
+    before = memory.audit_memory_quality(user_id="default", require_personal_model=False)
+    assert before["ready"] is False
+    assert before["counts"]["profile_contamination"] == 1
+
+    repair = memory.repair_memory_quality(user_id="default", dry_run=False)
+    assert repair["profiles_cleaned"] == 1
+
+    cleaned = memory.memory.db.get_profile("profile-bash-failed")
+    assert cleaned["facts"] == []
+    assert cleaned["preferences"] == []
+    assert cleaned["strength"] == 0.0
+    assert memory.memory.profile_processor.search_profiles(
+        query="pytest login failure",
+        user_id="default",
+        limit=5,
+    ) == []
+
+    after = memory.audit_memory_quality(user_id="default", require_personal_model=False)
+    assert after["ready"] is True
+    assert after["counts"]["profile_contamination"] == 0
+    memory.close()
+
+
+def test_repair_makes_command_only_profile_anchor_inert(tmp_path):
+    memory = Engram(provider="mock", in_memory=True, data_dir=str(tmp_path))
+    memory.memory.db.add_profile(
+        {
+            "id": "profile-ran",
+            "user_id": "default",
+            "name": "ran",
+            "profile_type": "contact",
+            "facts": [
+                "git -C /Users/example/project show abc123 --stat | head -60",
+                "sqlite3 ~/.dhee/handoff.db \"SELECT name FROM sqlite_master\"",
+                "curl -H \"Authorization: [REDACTED]\" https://api.example.com",
+                "OUT=$(echo '{\"prompt\":\"fix login\"}' | python -m dhee.hooks.claude_code UserPromptSubmit)",
+            ],
+            "preferences": [],
+            "strength": 1.0,
+        }
+    )
+
+    before = memory.audit_memory_quality(user_id="default", require_personal_model=False)
+    assert before["counts"]["profile_contamination"] == 1
+
+    repair = memory.repair_memory_quality(user_id="default", dry_run=False)
+    assert repair["profiles_cleaned"] == 1
+
+    cleaned = memory.memory.db.get_profile("profile-ran")
+    assert cleaned["facts"] == []
+    assert cleaned["strength"] == 0.0
+    after = memory.audit_memory_quality(user_id="default", require_personal_model=False)
+    assert after["ready"] is True
+    assert after["counts"]["profile_contamination"] == 0
+    memory.close()
+
+
+def test_repair_renames_doc_heading_profile_when_clean_alias_exists(tmp_path):
+    memory = Engram(provider="mock", in_memory=True, data_dir=str(tmp_path))
+    memory.memory.db.add_profile(
+        {
+            "id": "profile-dhee-heading",
+            "user_id": "default",
+            "name": "Dhee Native Integration\n\nDhee",
+            "profile_type": "contact",
+            "facts": ["Dhee serves as memory/context router"],
+            "preferences": ["memory", "context"],
+            "aliases": ["Dhee"],
+            "strength": 1.0,
+        }
+    )
+
+    before = memory.audit_memory_quality(user_id="default", require_personal_model=False)
+    assert before["counts"]["profile_contamination"] == 1
+
+    repair = memory.repair_memory_quality(user_id="default", dry_run=False)
+    assert repair["profiles_cleaned"] == 1
+
+    cleaned = memory.memory.db.get_profile("profile-dhee-heading")
+    assert cleaned["name"] == "Dhee"
+    assert cleaned["facts"] == ["Dhee serves as memory/context router"]
+    assert cleaned["strength"] == 1.0
+    after = memory.audit_memory_quality(user_id="default", require_personal_model=False)
+    assert after["ready"] is True
+    assert after["counts"]["profile_contamination"] == 0
+    memory.close()
+
+
+def test_orchestrated_search_uses_repo_handoff_before_semantic_policy_collision(tmp_path, monkeypatch):
+    from dhee.memory import orchestration as orchestration_module
+
+    repo = str(tmp_path / "repo")
+    session = {
+        "id": "handoff-hero",
+        "agent_id": "codex",
+        "repo": repo,
+        "status": "completed",
+        "task_summary": "Replaced the Dhee README hero with a Sankhya homepage-style PNG and pushed to main.",
+        "decisions": [
+            "Replaced README hero reference from docs/dhee-hero.svg to docs/dhee-hero.png.",
+            "Removed docs/dhee-flow.svg and docs/dhee-impact.svg.",
+        ],
+        "files_touched": ["README.md", "docs/dhee-hero.png"],
+        "todos": ["PyPI 7.0.0 upload remains blocked until credentials are available."],
+        "updated": "2026-05-20T17:06:03+00:00",
+        "source": "bus_session",
+    }
+    monkeypatch.setattr(
+        orchestration_module,
+        "_load_repo_handoff",
+        lambda repo, user_id, agent_id: session,
+    )
+
+    memory = Engram(provider="mock", in_memory=True, data_dir=str(tmp_path))
+    memory.add(
+        "Dhee must never supersede or demote a good Chotu profile, style, goal, preference, or decision memory until the replacement memory has been successfully stored and verified.",
+        user_id="default",
+        metadata={"explicit_remember": True, "canonical_kind": "decision"},
+        infer=False,
+    )
+
+    result = memory.memory.search_orchestrated(
+        query="What happened in the latest Dhee README hero replacement and what PyPI blocker remains?",
+        user_id="default",
+        repo=repo,
+        orchestration_mode="hybrid",
+        question_type="repo_continuity",
+        limit=3,
+    )
+
+    top = result["results"][0]
+    assert top["memory_class"] == "repo_continuity"
+    assert "docs/dhee-hero.png" in top["memory"]
+    assert "PyPI 7.0.0 upload remains blocked" in top["memory"]
+    assert "repo_handoff_included" in result["reason_codes"]
+    memory.close()
+
+
+def test_repo_handoff_retrieval_prefers_query_relevant_session_over_latest(tmp_path, monkeypatch):
+    from dhee.memory import orchestration as orchestration_module
+
+    repo = str(tmp_path / "repo")
+    latest_unrelated = {
+        "id": "handoff-chotu",
+        "agent_id": "codex",
+        "repo": repo,
+        "status": "completed",
+        "task_summary": "Analyzed whether the Chotu native Dhee integration is architecturally right.",
+        "decisions": ["No code changes were made."],
+        "files_touched": [],
+        "todos": [],
+    }
+    older_relevant = {
+        "id": "handoff-hero",
+        "agent_id": "codex",
+        "repo": repo,
+        "status": "completed",
+        "task_summary": "Replaced the Dhee README hero with a Sankhya homepage-style PNG and pushed to main.",
+        "decisions": ["Replaced README hero reference from docs/dhee-hero.svg to docs/dhee-hero.png."],
+        "files_touched": ["README.md", "docs/dhee-hero.png"],
+        "todos": ["PyPI 7.0.0 upload remains blocked until credentials are available."],
+    }
+    monkeypatch.setattr(
+        orchestration_module,
+        "_load_repo_handoff_candidates",
+        lambda repo, user_id, agent_id, limit=50: [latest_unrelated, older_relevant],
+    )
+    monkeypatch.setattr(
+        orchestration_module,
+        "_load_repo_handoff",
+        lambda repo, user_id, agent_id: latest_unrelated,
+    )
+
+    memory = Engram(provider="mock", in_memory=True, data_dir=str(tmp_path))
+    result = memory.memory.search_orchestrated(
+        query="What happened in the latest Dhee README hero replacement and what PyPI blocker remains?",
+        user_id="default",
+        repo=repo,
+        orchestration_mode="hybrid",
+        question_type="repo_continuity",
+        limit=3,
+    )
+
+    top = result["results"][0]
+    assert top["id"] == "session:handoff-hero"
+    assert "docs/dhee-hero.png" in top["memory"]
+    assert "PyPI 7.0.0 upload remains blocked" in top["memory"]
+    memory.close()
+
+
+def test_think_rejects_wrong_canonical_policy_when_repo_handoff_answers(tmp_path, monkeypatch):
+    from dhee.memory import orchestration as orchestration_module
+
+    repo = str(tmp_path / "repo")
+    monkeypatch.setattr(
+        orchestration_module,
+        "_load_repo_handoff",
+        lambda repo, user_id, agent_id: {
+            "id": "handoff-hero",
+            "agent_id": "codex",
+            "repo": repo,
+            "status": "completed",
+            "task_summary": "Replaced the Dhee README hero with docs/dhee-hero.png.",
+            "decisions": ["Used the Sankhya homepage visual style for the hero image."],
+            "files_touched": ["README.md", "docs/dhee-hero.png"],
+            "todos": ["PyPI 7.0.0 upload remains blocked until credentials are available."],
+        },
+    )
+
+    memory = Engram(provider="mock", in_memory=True, data_dir=str(tmp_path))
+    memory.add(
+        "Dhee must never supersede or demote a good Chotu profile, style, goal, preference, or decision memory until the replacement memory has been successfully stored and verified.",
+        user_id="default",
+        metadata={"explicit_remember": True, "canonical_kind": "decision"},
+        infer=False,
+    )
+
+    result = memory.memory.think(
+        "What happened in the latest Dhee README hero replacement and what blocker remains?",
+        user_id="default",
+        repo=repo,
+    )
+
+    assert "docs/dhee-hero.png" in result.answer
+    assert "PyPI 7.0.0 upload remains blocked" in result.answer
+    assert result.grounded_facts[0].memory_ids == ["session:handoff-hero"]
+    memory.close()

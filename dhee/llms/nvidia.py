@@ -9,6 +9,15 @@ from dhee.provider_defaults import DEFAULT_NVIDIA_LLM_MODEL
 logger = logging.getLogger(__name__)
 
 
+def _stored_nvidia_api_key() -> Optional[str]:
+    try:
+        from dhee.cli_config import get_api_key
+
+        return get_api_key("nvidia")
+    except Exception:
+        return None
+
+
 class NvidiaLLM(BaseLLM):
     """LLM provider for NVIDIA API (OpenAI-compatible)."""
 
@@ -25,6 +34,7 @@ class NvidiaLLM(BaseLLM):
             or os.getenv("NVIDIA_LLAMA_4_MAV_API_KEY")
             or os.getenv("LLAMA_API_KEY")
             or os.getenv("NVIDIA_API_KEY")
+            or _stored_nvidia_api_key()
         )
         if not api_key:
             raise ValueError(

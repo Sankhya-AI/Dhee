@@ -8,6 +8,15 @@ from dhee.provider_defaults import DEFAULT_NVIDIA_EMBEDDER_MODEL
 logger = logging.getLogger(__name__)
 
 
+def _stored_nvidia_api_key() -> Optional[str]:
+    try:
+        from dhee.cli_config import get_api_key
+
+        return get_api_key("nvidia")
+    except Exception:
+        return None
+
+
 class NvidiaEmbedder(BaseEmbedder):
     """Embedding provider for NVIDIA API (OpenAI-compatible)."""
 
@@ -23,6 +32,7 @@ class NvidiaEmbedder(BaseEmbedder):
             or os.getenv("NVIDIA_EMBEDDING_API_KEY")
             or os.getenv("NVIDIA_EMBED_API_KEY")
             or os.getenv("NVIDIA_API_KEY")
+            or _stored_nvidia_api_key()
         )
         if not api_key:
             raise ValueError(

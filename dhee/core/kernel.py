@@ -111,6 +111,37 @@ def get_last_session(
         return None
 
 
+def list_sessions(
+    agent_id: str = "mcp-server",
+    repo: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 50,
+    db_path: Optional[str] = None,
+    user_id: Optional[str] = None,
+    requester_agent_id: Optional[str] = None,
+) -> List[Dict]:
+    """List recent bus session digests for query-aware continuity retrieval."""
+    bus = None
+    try:
+        bus = _get_bus(db_path)
+        rows = bus.list_sessions(agent_id=agent_id, status=status, repo=repo)
+        sessions: List[Dict] = []
+        for row in rows[: max(1, int(limit))]:
+            session = dict(row)
+            session["source"] = "bus_session"
+            sessions.append(session)
+        return sessions
+    except Exception:
+        logger.debug("Bus session list failed", exc_info=True)
+        return []
+    finally:
+        if bus is not None:
+            try:
+                bus.close()
+            except Exception:
+                pass
+
+
 def save_session_digest(
     task_summary: str,
     agent_id: str = "claude-code",

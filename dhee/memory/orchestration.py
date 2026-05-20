@@ -6,6 +6,7 @@ Dhee's job: retrieve well, assemble context, return it. No answer synthesis.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -15,6 +16,80 @@ from dhee.core.answer_orchestration import (
 )
 
 logger = logging.getLogger(__name__)
+
+_QUERY_STOPWORDS = {
+    "about", "after", "again", "also", "and", "are", "before", "blocker",
+    "did", "does", "for", "from", "had", "has", "have", "how", "into",
+    "latest", "now", "the", "this", "what", "when", "where", "which",
+    "with", "work",
+}
+_REPO_CONTINUITY_HINTS = {
+    "blocker", "blocked", "branch", "commit", "diff", "file", "files",
+    "handoff", "hero", "latest", "pypi", "push", "readme", "release",
+    "session", "tag", "todo", "todos", "touched", "upload",
+}
+
+
+def _query_tokens(text: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"\b[a-z0-9][a-z0-9_-]{2,}\b", str(text or "").lower())
+        if token not in _QUERY_STOPWORDS
+    }
+
+
+def _load_repo_handoff(repo: Optional[str], user_id: str, agent_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not repo:
+        return None
+    try:
+        from dhee.core.kernel import get_last_session
+
+        requester = (
+            agent_id
+            or os.environ.get("DHEE_REQUESTER_AGENT_ID")
+            or os.environ.get("DHEE_AGENT_ID")
+            or "codex"
+        )
+        return get_last_session(
+            agent_id=requester,
+            requester_agent_id=requester,
+            repo=repo,
+            user_id=user_id,
+            fallback_log_recovery=True,
+        )
+    except Exception as exc:
+        logger.debug("Repo handoff lookup skipped: %s", exc)
+        return None
+
+
+def _load_repo_handoff_candidates(
+    repo: Optional[str],
+    user_id: str,
+    agent_id: Optional[str],
+    *,
+    limit: int = 50,
+) -> List[Dict[str, Any]]:
+    if not repo:
+        return []
+    try:
+        from dhee.core.kernel import list_sessions
+
+        requester = (
+            agent_id
+            or os.environ.get("DHEE_REQUESTER_AGENT_ID")
+            or os.environ.get("DHEE_AGENT_ID")
+            or "codex"
+        )
+        return list_sessions(
+            agent_id=requester,
+            requester_agent_id=requester,
+            repo=repo,
+            user_id=user_id,
+            limit=limit,
+        )
+    except Exception as exc:
+        logger.debug("Repo handoff candidate lookup skipped: %s", exc)
+        return []
 
 
 class OrchestrationEngine:
@@ -164,6 +239,126 @@ class OrchestrationEngine:
                 logger.debug("Profile anchor retrieval failed: %s", e)
         return anchors[: max(0, int(limit) * 2)]
 
+    @staticmethod
+    def _session_text(session: Dict[str, Any]) -> str:
+        parts: List[str] = []
+        for key in ("task_summary", "summary", "status", "repo", "updated"):
+            value = session.get(key)
+            if value:
+                parts.append(str(value))
+        for key in ("decisions", "files_touched", "todos", "blockers", "key_commands", "test_results"):
+            value = session.get(key)
+            if isinstance(value, list):
+                parts.extend(str(item) for item in value if str(item).strip())
+            elif value:
+                parts.append(str(value))
+        metadata = session.get("metadata")
+        if isinstance(metadata, dict):
+            for key in ("blockers", "key_commands", "test_results"):
+                value = metadata.get(key)
+                if isinstance(value, list):
+                    parts.extend(str(item) for item in value if str(item).strip())
+                elif value:
+                    parts.append(str(value))
+        return "\n".join(parts)
+
+    @classmethod
+    def _build_repo_handoff_result(
+        cls,
+        *,
+        query: str,
+        repo: Optional[str],
+        user_id: str,
+        agent_id: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        query_terms = _query_tokens(query)
+        candidates = _load_repo_handoff_candidates(repo, user_id, agent_id, limit=50)
+        scored_candidates: List[Tuple[float, Dict[str, Any], List[str]]] = []
+        for idx, candidate in enumerate(candidates):
+            text = cls._session_text(candidate)
+            session_terms = _query_tokens(text)
+            overlap = sorted(query_terms & session_terms)
+            if not overlap and not (query_terms & _REPO_CONTINUITY_HINTS):
+                continue
+            specificity = len(overlap)
+            hint_overlap = len((query_terms & _REPO_CONTINUITY_HINTS) & session_terms)
+            recency = max(0.0, 1.0 - (idx * 0.01))
+            scored_candidates.append((specificity + hint_overlap + recency, candidate, overlap))
+        session = None
+        selected_overlap: List[str] = []
+        if scored_candidates:
+            _score, session, selected_overlap = max(scored_candidates, key=lambda item: item[0])
+        if session is None:
+            session = _load_repo_handoff(repo, user_id, agent_id)
+            selected_overlap = []
+        if not session:
+            return None
+        text = cls._session_text(session)
+        session_terms = _query_tokens(text)
+        overlap = selected_overlap or sorted(query_terms & session_terms)
+        continuity_query = bool(query_terms & _REPO_CONTINUITY_HINTS)
+        if not overlap and not continuity_query:
+            return None
+        overlap_score = len(overlap) / max(4.0, float(len(query_terms) or 1))
+        score = min(3.0, 1.15 + overlap_score + (0.35 if continuity_query else 0.0))
+        session_id = str(session.get("id") or "latest")
+        summary = str(session.get("task_summary") or session.get("summary") or "").strip()
+        decisions = session.get("decisions") if isinstance(session.get("decisions"), list) else []
+        files = session.get("files_touched") if isinstance(session.get("files_touched"), list) else []
+        todos = session.get("todos") if isinstance(session.get("todos"), list) else []
+        memory_text = "\n".join(
+            part
+            for part in (
+                f"Latest repo handoff for {repo or 'workspace'}:",
+                f"Summary: {summary}" if summary else "",
+                "Decisions:\n- " + "\n- ".join(str(item) for item in decisions[:8]) if decisions else "",
+                "Files touched: " + ", ".join(str(item) for item in files[:12]) if files else "",
+                "Todos/blockers:\n- " + "\n- ".join(str(item) for item in todos[:8]) if todos else "",
+            )
+            if part
+        )
+        return {
+            "id": f"session:{session_id}",
+            "memory": memory_text,
+            "user_id": user_id,
+            "agent_id": session.get("agent_id"),
+            "metadata": {
+                "dhee_memory_class": "repo_continuity",
+                "canonical_kind": "handoff",
+                "repo": repo,
+                "session_id": session_id,
+                "source": session.get("source") or "handoff",
+                "updated_at": session.get("updated"),
+            },
+            "categories": ["context"],
+            "score": score,
+            "keyword_score": len(overlap),
+            "strength": 1.0,
+            "layer": "lml",
+            "composite_score": score,
+            "namespace": "repo_context",
+            "source_type": "handoff",
+            "source_app": "dhee",
+            "status": session.get("status", "active"),
+            "importance": 0.95,
+            "memory_type": "handoff",
+            "memory_class": "repo_continuity",
+            "canonical_kind": "handoff",
+            "quality_boost": 0.0,
+            "recall_explanation": {
+                "matched_memory_id": f"session:{session_id}",
+                "overlap_terms": overlap[:8],
+                "memory_class": "repo_continuity",
+                "memory_kind": "handoff",
+                "confidence": round(min(1.0, 0.72 + overlap_score), 3),
+                "why_now": "latest repo handoff matched the repo-continuity request",
+                "decision_risk": "low",
+            },
+            "evidence_text": memory_text,
+            "evidence_source": "handoff",
+            "evidence_chars": len(memory_text),
+        }
+
     # -- Orchestrated context builder -----------------------------------------
 
     @staticmethod
@@ -248,6 +443,7 @@ class OrchestrationEngine:
         user_id: str,
         question_type: str = "",
         question_date: str = "",
+        repo: Optional[str] = None,
         agent_id: Optional[str] = None,
         run_id: Optional[str] = None,
         app_id: Optional[str] = None,
@@ -388,6 +584,18 @@ class OrchestrationEngine:
         )
         results = list(search_payload.get("results", []))
 
+        handoff_result = self._build_repo_handoff_result(
+            query=query,
+            repo=os.path.abspath(os.path.expanduser(repo)) if repo else None,
+            user_id=user_id,
+            agent_id=agent_id,
+        )
+        if handoff_result:
+            existing_ids = {str(row.get("id")) for row in results}
+            if str(handoff_result.get("id")) not in existing_ids:
+                results.insert(0, handoff_result)
+                reason_codes.append("repo_handoff_included")
+
         if event_hits and orch_cfg.enable_hierarchical_retrieval:
             ordered_ids: List[str] = []
             for event in event_hits:
@@ -427,6 +635,10 @@ class OrchestrationEngine:
                 tail = [row for row in results if str(row.get("id")) not in ordered_ids]
                 results = head + tail
                 reason_codes.append("event_first_reorder")
+
+        if handoff_result:
+            handoff_id = str(handoff_result.get("id"))
+            results = [handoff_result] + [row for row in results if str(row.get("id")) != handoff_id]
 
         hierarchical_anchors: List[str] = []
         if orch_cfg.enable_hierarchical_retrieval:
@@ -489,4 +701,3 @@ class OrchestrationEngine:
             "reduced_answer": reduced_answer,
             "facts": facts,
         }
-
