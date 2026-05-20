@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Sankhya-AI/Dhee/main/docs/dhee-hero.svg" alt="Dhee turns messy coding-agent context into a grounded action loop" width="100%">
+  <img src="https://raw.githubusercontent.com/Sankhya-AI/Dhee/main/docs/dhee-hero.png" alt="The shared learning layer for AI agents" width="100%">
 </p>
 
 <h1 align="center">Dhee</h1>
@@ -66,10 +66,6 @@ MCP clients can use:
 
 ## How It Helps A Coding Agent
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/Sankhya-AI/Dhee/main/docs/dhee-flow.svg" alt="Dhee coding agent flow" width="100%">
-</p>
-
 Without Dhee, every turn is a loose pile of files, logs, stale memory, and guesses.
 
 With Dhee, the agent gets a compact working packet:
@@ -81,10 +77,6 @@ With Dhee, the agent gets a compact working packet:
 5. **Learn:** only durable lessons are promoted; junk stays suppressed.
 
 ## Deep Repo Cognition
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/Sankhya-AI/Dhee/main/docs/dhee-impact.svg" alt="Dhee repo impact map" width="100%">
-</p>
 
 Ask: **"If I touch this file, what breaks?"**
 
