@@ -168,6 +168,20 @@ class TestProfileLifecycle:
         profile = db.get_profile(pid)
         assert len(profile["facts"]) <= 3
 
+    def test_apply_update_drops_contaminated_command_profile(self, processor, db):
+        mem_id = str(uuid.uuid4())
+        db.add_memory({"id": mem_id, "memory": "bash failed", "user_id": "u1"})
+
+        update = ProfileUpdate(
+            profile_name="bash failed",
+            profile_type="contact",
+            new_facts=["pytest tests/test_login.py exited 1 with traceback"],
+        )
+        pid = processor.apply_update(update, mem_id, "u1")
+
+        assert pid == ""
+        assert db.get_all_profiles(user_id="u1") == []
+
 
 class TestProfileSearch:
     def test_keyword_search(self, processor, db):

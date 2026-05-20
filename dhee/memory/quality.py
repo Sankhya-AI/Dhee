@@ -118,6 +118,22 @@ _OPERATIONAL_FAILURE_RE = re.compile(
     r"^\s*failed:\s*(?:pytest|uv|python|npm|pnpm|ruff|mypy)\b",
     re.IGNORECASE,
 )
+_TRANSPORT_FAILURE_HINT_RE = re.compile(
+    r"\b(?:failed|failure|errored|error|traceback|exception|non[- ]?zero|exit(?:ed)?\s*(?:code|status)?\s*[=:]?\s*[1-9]|"
+    r"returned\s+[1-9]\d*|timed\s*out|timeout|crashed)\b",
+    re.IGNORECASE,
+)
+_TOOL_OR_COMMAND_HINT_RE = re.compile(
+    r"\b(?:bash|shell|command|tool|hook|pytest|ruff|mypy|uv|python[0-9.]*|pip[0-9.]*|npm|pnpm|yarn|"
+    r"git|gh|sqlite3|curl|sed|rg|grep|ls|cat|claude|codex|mcp)\b",
+    re.IGNORECASE,
+)
+_PATH_OR_SECRET_HINT_RE = re.compile(
+    r"(?:^|\s)(?:/[\w .@%+=:,~/-]+|~/?[\w .@%+=:,~/-]*|\./[\w .@%+=:,~/-]+)|"
+    r"\b[A-Za-z0-9_./-]+\.(?:py|js|ts|tsx|jsx|go|rs|java|rb|php|sh|sql|toml|yaml|yml|json|md)\b|"
+    r"\b(?:API_KEY|SECRET|TOKEN|AUTHORIZATION|PASSWORD)\b",
+    re.IGNORECASE,
+)
 _SHELL_COMMAND_RE = re.compile(
     r"^\s*(?:"
     r"(?:/[\w .@%+=:,~/-]+|~/?[\w .@%+=:,~/-]*|\./[\w .@%+=:,~/-]+)"
@@ -174,6 +190,14 @@ _ACTION_RE = re.compile(
 )
 _ENTITY_RE = re.compile(r"\b[A-Z][A-Za-z0-9_]*(?:\s+[A-Z][A-Za-z0-9_]+){0,3}\b")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+_PROFILE_DOC_HEADING_RE = re.compile(
+    r"^\s*(?:"
+    r"repository guidelines|project structure|module organization|development commands|"
+    r"coding style|naming conventions|testing guidelines|pull request guidelines|"
+    r"configuration secrets|engram continuity|dhee native integration|prefer engram|use dhee"
+    r")\s*$",
+    re.IGNORECASE,
+)
 
 _TOPIC_STOPWORDS = {
     "about",
@@ -381,7 +405,38 @@ def _is_operational_event(content: str, metadata: Mapping[str, Any]) -> bool:
             return True
     if _OPERATIONAL_TRANSPORT_RE.match(text) or _SHELL_COMMAND_RE.match(text):
         return True
+    if _is_suspicious_transport_noise(text, metadata):
+        return True
     return False
+
+
+def _is_suspicious_transport_noise(content: str, metadata: Mapping[str, Any]) -> bool:
+    """Quarantine weirdly phrased tool/command records.
+
+    The explicit regexes catch common hook strings. This scorer catches
+    near-misses like "the command exited 1 while running pytest" without
+    turning normal product memories into operational noise.
+    """
+    if not content:
+        return False
+    lowered = str(content or "").lower()
+    if _metadata_bool(metadata, "policy_explicit", "explicit_remember", "canonical", "canonical_personal"):
+        return False
+    score = 0
+    if _TRANSPORT_FAILURE_HINT_RE.search(content):
+        score += 2
+    if _TOOL_OR_COMMAND_HINT_RE.search(content):
+        score += 1
+    if _PATH_OR_SECRET_HINT_RE.search(content):
+        score += 1
+    if any(marker in lowered for marker in ("```", "$ ", "=>", "stderr", "stdout", "traceback", "command:")):
+        score += 1
+    if re.search(r"\b(?:exit|status|code)\s*[=:]?\s*[1-9]\d*\b", lowered):
+        score += 1
+    source = str(metadata.get("source") or metadata.get("source_type") or metadata.get("source_app") or "").lower()
+    if "hook" in source or "session" in source:
+        score += 1
+    return score >= 3
 
 
 def evidence_kind_from_metadata(metadata: Mapping[str, Any]) -> str:
@@ -960,6 +1015,8 @@ def is_profile_anchor_contaminated(text: Any) -> bool:
     if _OPERATIONAL_FAILURE_RE.match(value) or _SHELL_COMMAND_RE.match(value):
         return True
     if lowered in {"ran", "bash failed", "codex running", "claude running"}:
+        return True
+    if _PROFILE_DOC_HEADING_RE.match(value):
         return True
     if lowered.startswith(("repository guidelines ›", "dhee ›", "dhee native integration")):
         return True

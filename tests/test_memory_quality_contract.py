@@ -702,6 +702,24 @@ def test_failed_tool_rows_are_operational_noise_not_personal_truth(tmp_path):
     memory.close()
 
 
+def test_weirdly_phrased_command_failure_is_quarantined(tmp_path):
+    memory = Engram(provider="mock", in_memory=True, data_dir=str(tmp_path))
+    result = memory.add(
+        "The subprocess exited 2 while running pytest tests/test_login.py; traceback shows missing exp claim.",
+        user_id="default",
+        infer=False,
+    )
+    memory_id = result["results"][0]["id"]
+
+    loaded = memory.get(memory_id)
+
+    assert loaded["namespace"] == "operational"
+    assert loaded["memory_type"] == "operational_event"
+    assert loaded["metadata"]["dhee_memory_class"] == "operational_event"
+    assert loaded["metadata"]["suppress_from_default_recall"] is True
+    memory.close()
+
+
 def test_audit_and_repair_clean_contaminated_profile_anchors(tmp_path):
     memory = Engram(provider="mock", in_memory=True, data_dir=str(tmp_path))
     memory.memory.db.add_profile(
@@ -801,6 +819,25 @@ def test_repair_renames_doc_heading_profile_when_clean_alias_exists(tmp_path):
     after = memory.audit_memory_quality(user_id="default", require_personal_model=False)
     assert after["ready"] is True
     assert after["counts"]["profile_contamination"] == 0
+    memory.close()
+
+
+def test_profile_extraction_skips_raw_doc_and_tool_evidence(tmp_path):
+    memory = Engram(provider="mock", in_memory=True, data_dir=str(tmp_path))
+    memory.memory._update_profiles(
+        memory_id="mem-doc",
+        content="Repository Guidelines\nProject Structure\nDhee Native Integration",
+        metadata={"kind": "doc_chunk", "source": "readme", "source_path": "AGENTS.md"},
+        user_id="default",
+    )
+    memory.memory._update_profiles(
+        memory_id="mem-tool",
+        content="User Transcript:\nBash Failed: pytest tests/test_login.py exited 1",
+        metadata={"source": "claude_code_hook", "tool": "Bash", "success": False},
+        user_id="default",
+    )
+
+    assert memory.memory.db.get_all_profiles(user_id="default") == []
     memory.close()
 
 

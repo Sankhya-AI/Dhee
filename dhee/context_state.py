@@ -917,8 +917,22 @@ class ContextStateStore:
 
     def debt_summary(self, *, top: bool = False) -> Dict[str, Any]:
         state = self.load()
-        events = self._read_audit(limit=_MAX_LEDGER_READ)
+        all_events = self._read_audit(limit=_MAX_LEDGER_READ)
+        events = self._events_after_latest_rollover(all_events)
+        current_epoch = int(state.get("task_epoch") or 1)
         admissions = [e for e in events if e.get("event") == "admission"]
+        epoch_admissions: List[Dict[str, Any]] = []
+        for row in admissions:
+            raw_epoch = row.get("task_epoch")
+            if not raw_epoch:
+                epoch_admissions.append(row)
+                continue
+            try:
+                if int(raw_epoch) == current_epoch:
+                    epoch_admissions.append(row)
+            except (TypeError, ValueError):
+                epoch_admissions.append(row)
+        admissions = epoch_admissions
         expansions = [e for e in events if e.get("event") == "pointer_expansion" or e.get("decision") == "expand"]
         admitted = [
             e for e in admissions
@@ -955,6 +969,7 @@ class ContextStateStore:
             bucket["count"] += 1
             bucket["tokens"] += int(row.get("token_estimate") or 0)
         warnings = [row for row in _as_list(state.get("ledger_warnings")) if isinstance(row, dict)]
+        rollover_receipts = [row for row in _as_list(state.get("rollover_receipts")) if isinstance(row, dict)]
         assertion_mismatch_count = sum(
             1
             for row in warnings
@@ -973,6 +988,17 @@ class ContextStateStore:
             "expansion_rate": round(expansion_rate, 3),
             "risk": "high" if expansion_rate >= EXPANSION_CRITICAL else ("medium" if expansion_rate >= EXPANSION_WARNING else "low"),
             "disclaimer": "Replay estimates context pressure, not live action-distribution equivalence.",
+        }
+        latest_receipt = rollover_receipts[-1] if rollover_receipts else {}
+        rollover_health = {
+            "latest_receipt_id": latest_receipt.get("id") if latest_receipt else "",
+            "receipts_retained": len(rollover_receipts),
+            "post_rollover_admissions": len(admissions),
+            "post_rollover_admitted_tokens": admitted_tokens,
+            "debt_window": "after_latest_rollover" if len(events) != len(all_events) else "full_epoch",
+            "safe_to_resume_from_compiled_state": bool(
+                level != "rollover_required" and expansion_level != "critical"
+            ),
         }
         out = {
             "format": "dhee_context_debt",
@@ -993,6 +1019,7 @@ class ContextStateStore:
             "expansion_level": expansion_level,
             "cache_tier_breakdown": cache_tier_breakdown,
             "receipt_count": len(receipts),
+            "rollover_health": rollover_health,
             "assertion_mismatch_count": assertion_mismatch_count,
             "reread_short_circuit_count": reread_short_circuit_count,
             "suppression_equivalence_projection": suppression_equivalence_projection,
@@ -1042,6 +1069,7 @@ class ContextStateStore:
             "expansion_rate": debt["expansion_rate"],
             "expansion_level": debt["expansion_level"],
             "cache_tier_breakdown": debt["cache_tier_breakdown"],
+            "rollover_health": debt.get("rollover_health", {}),
             "rollover_required": debt["rollover_required"],
         }
 
@@ -1131,6 +1159,7 @@ class ContextStateStore:
                 "checkpoint_id": snapshot["id"],
                 "rollover_receipt_id": receipt.get("id"),
                 "reason": reason,
+                "task_epoch": receipt.get("task_epoch"),
             }
         )
         return result
@@ -1739,6 +1768,16 @@ class ContextStateStore:
             if isinstance(row, dict):
                 out.append(row)
         return out
+
+    @staticmethod
+    def _events_after_latest_rollover(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        latest_rollover_idx = -1
+        for idx, row in enumerate(events):
+            if row.get("event") == "rollover":
+                latest_rollover_idx = idx
+        if latest_rollover_idx >= 0:
+            return events[latest_rollover_idx + 1 :]
+        return events
 
 
 class ContextAdmissionController:

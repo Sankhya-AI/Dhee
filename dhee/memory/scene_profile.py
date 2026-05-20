@@ -92,6 +92,19 @@ class SceneProfileMixin:
         """Extract and apply profile updates from memory content."""
         if not self.profile_processor or not user_id:
             return
+        try:
+            from dhee.memory.quality import classify_memory_quality
+
+            quality = classify_memory_quality(
+                content,
+                metadata,
+                None,
+                explicit_remember=bool(metadata.get("policy_explicit") or metadata.get("explicit_remember")),
+            )
+            if quality.memory_class in {"test_fixture", "operational_event", "passive_screen", "evidence_artifact"}:
+                return
+        except Exception:
+            pass
 
         updates: List[Any] = []
         if hasattr(self.profile_processor, "extract_profile_mentions_from_speakers"):

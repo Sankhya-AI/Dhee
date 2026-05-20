@@ -279,6 +279,11 @@ class ProfileProcessor:
         user_id: str,
     ) -> str:
         """Apply a ProfileUpdate to an existing or new profile. Returns profile_id."""
+        profile_update = self._sanitize_update(profile_update)
+        if profile_update is None:
+            logger.debug("Dropped low-quality profile update for memory %s", memory_id)
+            return ""
+
         name = profile_update.profile_name
         normalized_type = normalize_profile_type(profile_update.profile_type)
         if str(name or "").strip().lower() == "self":
@@ -315,7 +320,11 @@ class ProfileProcessor:
             }
             self.db.add_profile(profile_data)
 
+        self._sanitize_persisted_profile(profile_id)
+
         # Link memory
+        if not profile_id:
+            return ""
         role = "about" if normalized_type == "self" else "mentioned"
         self.db.add_profile_memory(profile_id, memory_id, role=role)
 
@@ -327,6 +336,70 @@ class ProfileProcessor:
             self._update_counts[profile_id] = 0
 
         return profile_id
+
+    def _sanitize_update(self, update: ProfileUpdate) -> Optional[ProfileUpdate]:
+        """Drop contaminated profile updates before they create durable anchors."""
+        try:
+            from dhee.memory.quality import is_profile_anchor_contaminated
+        except Exception:
+            return update
+
+        name = str(update.profile_name or "").strip()
+        if not name or is_profile_anchor_contaminated(name):
+            return None
+        facts = [
+            str(item).strip()
+            for item in (update.new_facts or [])
+            if str(item).strip() and not is_profile_anchor_contaminated(item)
+        ]
+        preferences = [
+            str(item).strip()
+            for item in (update.new_preferences or [])
+            if str(item).strip() and not is_profile_anchor_contaminated(item)
+        ]
+        update.new_facts = facts[: self.max_facts]
+        update.new_preferences = preferences
+        has_signal = bool(
+            update.new_facts
+            or update.new_preferences
+            or update.new_relationships
+            or update.sentiment
+            or normalize_profile_type(update.profile_type) == "self"
+        )
+        return update if has_signal else None
+
+    def _sanitize_persisted_profile(self, profile_id: str) -> None:
+        """Enforce the profile recall contract immediately after every update."""
+        try:
+            from dhee.memory.quality import sanitize_profile_for_recall
+
+            profile = self.db.get_profile(profile_id)
+            if not profile:
+                return
+            cleaned, issue = sanitize_profile_for_recall(profile)
+            if not issue:
+                return
+            if cleaned is None:
+                self.db.update_profile(
+                    profile_id,
+                    {
+                        "facts": [],
+                        "preferences": [],
+                        "aliases": [],
+                        "narrative": None,
+                        "profile_summary": None,
+                        "strength": 0.0,
+                    },
+                )
+                return
+            updates: Dict[str, Any] = {}
+            for key in ("name", "facts", "preferences", "aliases", "narrative", "profile_summary"):
+                if cleaned.get(key) != profile.get(key):
+                    updates[key] = cleaned.get(key)
+            if updates:
+                self.db.update_profile(profile_id, updates)
+        except Exception as exc:
+            logger.debug("Profile sanitation skipped for %s: %s", profile_id, exc)
 
     def _find_profile(self, name: str, user_id: str) -> Optional[Dict[str, Any]]:
         """Find a profile by name or alias, with fuzzy matching."""

@@ -172,6 +172,24 @@ def test_reread_after_rollover_short_circuits_to_receipt(tmp_path):
     assert debt["reread_short_circuit_count"] == 1
 
 
+def test_rollover_resets_context_debt_window(tmp_path):
+    store = make_store(tmp_path)
+    controller = ContextAdmissionController(store)
+    big_text = "x" * int((BURN_ROLLOVER_TOKENS + 1000) * 3.5)
+
+    first = controller.decide(ContextBlock(kind="tool_result", text=big_text, source="pytest"))
+    assert first.decision == "rollover_required"
+    assert store.status()["rollover_required"] is True
+
+    rollover = store.rollover(reason="test rollover")
+    status = store.status()
+
+    assert rollover["rollover_receipt"]["id"].startswith("RR-")
+    assert status["rollover_required"] is False
+    assert status["rollover_health"]["debt_window"] == "after_latest_rollover"
+    assert status["rollover_health"]["safe_to_resume_from_compiled_state"] is True
+
+
 def test_echo_detection_catches_paraphrased_tool_result():
     tool = (
         "tests/test_auth.py failed with KeyError iat in middleware.py line 47 "
