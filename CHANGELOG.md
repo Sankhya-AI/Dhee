@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [7.0.2] - 2026-05-21 — Chotu dependency compatibility
+
+- Relaxed Dhee's tree-sitter dependency family from `<0.24` to `<0.26` so
+  downstream agents such as Chotu can depend on `tree-sitter>=0.25.0` without a
+  resolver conflict.
+- Validated Dhee repo cognition against `tree-sitter==0.25.2` with current
+  Python, JavaScript, TypeScript, and TSX grammar wheels.
+- Updated the curl installer floor to prefer this compatibility release.
+
 ## [7.0.1] - 2026-05-21 — Release quality hardening
 
 - Hardened context rollover so context-debt summaries only count the active

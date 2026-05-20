@@ -46,13 +46,23 @@ def test_mcp_extra_is_python_version_honest():
     assert '"mcp>=1.0.0",' not in pyproject
 
 
+def test_tree_sitter_range_allows_chotu_runtime():
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert '"tree-sitter>=0.23.2,<0.26"' in pyproject
+    assert '"tree-sitter-python>=0.23.6,<0.26"' in pyproject
+    assert '"tree-sitter-javascript>=0.23.1,<0.26"' in pyproject
+    assert '"tree-sitter-typescript>=0.23.2,<0.26"' in pyproject
+    assert '"tree-sitter>=0.23.2,<0.24"' not in pyproject
+
+
 def test_curl_installer_verifies_handoff_bus():
     installer = (ROOT / "install.sh").read_text(encoding="utf-8")
 
     assert "Cross-agent handoff bus ready" in installer
     assert "from dhee.core.kernel import _get_bus" in installer
     assert "for bin_name in dhee dhee-mcp engram-bus" in installer
-    assert 'DEFAULT_PACKAGE="dhee>=7.0.1"' in installer
+    assert 'DEFAULT_PACKAGE="dhee>=7.0.2"' in installer
     assert "DHEE_INSTALL_PACKAGE" in installer
     assert "FALLBACK_PACKAGE" in installer
     assert "DHEE_INIT_REPO" in installer
