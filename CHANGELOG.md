@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [7.0.1] - 2026-05-21 — Release quality hardening
+
+- Hardened context rollover so context-debt summaries only count the active
+  post-rollover task window and expose explicit rollover health.
+- Expanded memory-quality quarantine for oddly phrased tool/command failures so
+  operational noise does not re-enter personal or project recall.
+- Made profile extraction stricter: raw docs, passive evidence, test fixtures,
+  and operational events cannot create durable user/project profiles.
+- Added immediate persisted-profile cleanup so contaminated profiles are
+  sanitized, renamed, or made inert continuously rather than only during manual
+  repair.
+- Updated the curl installer floor to prefer this hardened 7.0.1 release.
+
 ## [7.0.0] - 2026-05-20 — Production-ready Developer Brain
 
 - Marked Dhee as the production-ready local developer brain for coding agents:
