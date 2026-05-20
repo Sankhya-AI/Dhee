@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,9 +39,7 @@ CODEX_NATIVE_SURFACES = (
     "codex_session_stream_auto_sync",
 )
 CODEX_CONTEXT_FIRST_TOOLS = (
-    "dhee_handoff",
-    "dhee_shared_task",
-    "dhee_shared_task_results",
+    "dhee_context_bootstrap",
     "dhee_inbox",
     "dhee_search_learnings",
 )
@@ -48,6 +47,37 @@ CODEX_ROUTER_TOOLS = (
     "dhee_read",
     "dhee_grep",
     "dhee_bash",
+    "dhee_expand_result",
+)
+CODEX_TRUSTED_READ_ONLY_TOOLS = (
+    "recall",
+    "context",
+    "dhee_context_bootstrap",
+    "dhee_handoff",
+    "dhee_shared_task_results",
+    "dhee_inbox",
+    "dhee_search_learnings",
+    "dhee_context_status",
+    "dhee_context_state",
+    "dhee_scene_search",
+    "dhee_context_pack",
+    "dhee_task_contract_compile",
+    "dhee_task_contract_list",
+    "dhee_task_contract_get",
+    "dhee_task_contract_interpret",
+    "dhee_contract_runtime_status",
+    "dhee_contract_enforcement_status",
+    "dhee_contract_runtime_doctor",
+    "dhee_update_capsule_list",
+    "dhee_update_capsule_get",
+    "dhee_update_capsule_interpret",
+    "dhee_tools_list",
+    "dhee_list_assets",
+    "dhee_get_asset",
+    "dhee_why",
+    "dhee_read",
+    "dhee_grep",
+    "dhee_agent",
     "dhee_expand_result",
 )
 
@@ -180,10 +210,45 @@ def _dhee_full_mcp_entry() -> str:
         Path.home() / ".local" / "bin" / "dhee-mcp-full",
         Path.home() / ".dhee" / ".venv" / "bin" / "dhee-mcp-full",
     ]
-    for candidate in candidates:
-        if candidate.exists():
-            return str(candidate)
+    existing = [candidate for candidate in candidates if candidate.exists()]
+    healthy = [candidate for candidate in existing if _mcp_entry_is_healthy(candidate)]
+    if healthy:
+        return str(healthy[0])
+    if existing:
+        return str(existing[0])
     return "dhee-mcp-full"
+
+
+def _mcp_entry_is_healthy(entry: Path) -> bool:
+    """Best-effort smoke check for the Python behind an MCP entrypoint."""
+
+    try:
+        first = entry.read_text(encoding="utf-8", errors="ignore").splitlines()[0]
+    except (OSError, IndexError):
+        return False
+    if not first.startswith("#!"):
+        return False
+    python = first[2:].strip()
+    if not python:
+        return False
+    probe = (
+        "import dhee.mcp_server\n"
+        "try:\n"
+        "    import sqlite_vec\n"
+        "except ModuleNotFoundError:\n"
+        "    raise SystemExit(7)\n"
+    )
+    try:
+        result = subprocess.run(
+            [python, "-c", probe],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
 
 
 def _install_claude_code(config: Dict[str, Any], *, enable_router: bool) -> HarnessResult:
@@ -354,6 +419,7 @@ def _status_codex(config: Dict[str, Any]) -> Dict[str, Any]:
         "auto_sync": _codex_env_value(dhee_block, "DHEE_CODEX_AUTO_SYNC") if mcp_registered else None,
         "context_first_tools": _codex_env_value(dhee_block, "DHEE_CONTEXT_FIRST_TOOLS") if mcp_registered else None,
         "router_tools": _codex_env_value(dhee_block, "DHEE_ROUTER_TOOLS") if mcp_registered else None,
+        "trusted_read_only_tools": _codex_trusted_read_only_tools(dhee_block) if mcp_registered else [],
         "instructions_present": instructions_path.exists() and MANAGED_MARKER_START in instructions_path.read_text(encoding="utf-8"),
         "instructions_path": str(instructions_path),
         "legacy_instructions_present": legacy_instructions_path.exists()
@@ -391,6 +457,14 @@ def _render_codex_mcp_block(config: Dict[str, Any], *, sessions_root: str) -> st
     ]
     for key, value in sorted(env.items()):
         lines.append(f'{key} = "{_escape_toml(value)}"')
+    for tool_name in CODEX_TRUSTED_READ_ONLY_TOOLS:
+        lines.extend(
+            [
+                "",
+                f"[mcp_servers.dhee.tools.{tool_name}]",
+                'approval_mode = "auto"',
+            ]
+        )
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -598,9 +672,9 @@ def _codex_instructions() -> str:
         "- Dhee syncs Codex session logs opportunistically on Dhee context and collaboration calls.\n\n"
         "Required behavior:\n"
         "- Start every substantive repo/workspace task with Dhee's router path before local reconstruction.\n"
-        "- First call `dhee_handoff` with the absolute repo path before shell/file exploration.\n"
-        "- Then call `dhee_shared_task` and `dhee_shared_task_results` for the same repo before repeating analysis or implementation.\n"
-        "- Then call `dhee_inbox` for the same repo and read any returned messages before continuing.\n"
+        "- First call `dhee_context_bootstrap` with the absolute repo path before shell/file exploration.\n"
+        "- Treat `dhee_context_bootstrap` as the normal one-call replacement for startup `dhee_handoff`, `dhee_shared_task`, `dhee_shared_task_results`, and `dhee_inbox` checks.\n"
+        "- Fall back to the separate startup tools only when bootstrap is unavailable or you need a specific legacy call.\n"
         "- When the user says continue, resume, previous, shared context, or UI context, treat Dhee handoff/shared-task results as the source of continuity.\n"
         "- Prefer `dhee_read`, `dhee_grep`, and `dhee_bash` over native file/search/shell tools for exploration that may create large reusable output.\n"
         "- Use `dhee_expand_result` only when a digest pointer needs exact raw details.\n"
@@ -616,6 +690,14 @@ def _codex_env_value(content: str, key: str) -> str | None:
     if not match:
         return None
     return match.group(1).replace('\\"', '"').replace("\\\\", "\\")
+
+
+def _codex_trusted_read_only_tools(content: str) -> list[str]:
+    pattern = re.compile(
+        r'(?ms)^\[mcp_servers\.dhee\.tools\.([^\]\s]+)\]\s*\n'
+        r'(?:(?!^\[).)*?^\s*approval_mode\s*=\s*"(?:auto|never)"\s*$'
+    )
+    return sorted({match.group(1) for match in pattern.finditer(content or "")})
 
 
 def _codex_mcp_block(content: str) -> str:

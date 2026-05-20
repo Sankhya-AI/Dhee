@@ -237,6 +237,33 @@ def test_dhee_handoff_returns_structured_snapshot(tmp_path, temp_db, monkeypatch
     assert result["recent_artifacts"][0]["filename"] == "handoff-mcp.pdf"
 
 
+def test_dhee_context_bootstrap_bundles_startup_reads(tmp_path, temp_db, monkeypatch):
+    monkeypatch.setattr(mcp_server, "get_db", lambda: temp_db)
+    monkeypatch.setattr(mcp_server, "_default_user_id", lambda args: "default")
+    monkeypatch.setattr(mcp_server, "_default_agent_id", lambda args: "codex")
+    monkeypatch.setattr(
+        "dhee.core.handoff_snapshot.resolve_continuity",
+        lambda *_, **__: {
+            "continuity_source": "last_session",
+            "thread_state": None,
+            "last_session": {"id": "sess-bootstrap", "task_summary": "Use one startup call"},
+        },
+    )
+
+    result = mcp_server._handle_dhee_context_bootstrap(
+        None,
+        {"repo": str(tmp_path), "harness": "codex"},
+    )
+
+    assert result["format"] == "dhee_context_bootstrap"
+    assert result["read_only"] is True
+    assert "dhee_handoff" in result["replaces_startup_calls"]
+    assert result["handoff"]["format"] == "dhee_handoff"
+    assert result["handoff"]["last_session"]["task_summary"] == "Use one startup call"
+    assert result["shared_task"]["status"] == "not_found"
+    assert result["inbox"]["status"] == "ok"
+
+
 def test_dhee_shared_task_create_results_and_close(tmp_path, temp_db):
     created = mcp_server._handle_dhee_shared_task(
         None,

@@ -72,6 +72,7 @@ EXPECTED_TOOL_NAMES = {
     "dhee_shared_task_results",
     "dhee_inbox",
     "dhee_broadcast",
+    "dhee_context_bootstrap",
     "dhee_handoff",
     # Router tools (digest-at-source wrappers)
     "dhee_read",
@@ -98,6 +99,7 @@ class TestMCPToolsSlim:
     def test_server_advertises_context_first_instructions(self):
         instructions = getattr(mcp_server.server, "instructions", "") or ""
         assert "consult Dhee before reconstructing" in instructions
+        assert "dhee_context_bootstrap" in instructions
         assert "dhee_handoff" in instructions
         assert "dhee_shared_task_results" in instructions
         assert "dhee_inbox" in instructions
@@ -117,4 +119,5 @@ class TestMCPToolsSlim:
         assert "dhee_context_status" in names
         assert "dhee_context_rollover" in names
         assert "dhee_grep" in names
+        assert "dhee_context_bootstrap" in names
         assert "dhee_handoff" in names

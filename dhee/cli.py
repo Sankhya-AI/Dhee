@@ -531,12 +531,114 @@ def cmd_context(args: argparse.Namespace) -> None:
             print(f"Rollover required: {'yes' if data['rollover_required'] else 'no'}")
             return
 
+    if action == "fact":
+        from dhee.temporal_fact_ledger import open_default_ledger
+
+        subaction = args.entry_id or "search"
+        extra = list(getattr(args, "context_args", []) or [])
+        fact_actions = {"assert", "search", "get", "invalidate", "stats"}
+        if subaction not in fact_actions:
+            extra = [subaction, *extra]
+            subaction = "search"
+        ledger = open_default_ledger(getattr(args, "db_path", None))
+        try:
+            if subaction == "assert":
+                fact_text = " ".join(str(item) for item in extra).strip()
+                if not fact_text:
+                    print("Pass a fact: dhee context fact assert \"User prefers concise answers\"")
+                    sys.exit(1)
+                result = ledger.assert_fact(
+                    fact_text=fact_text,
+                    user_id=getattr(args, "user_id", None) or "default",
+                    namespace=getattr(args, "namespace", None) or "default",
+                    subject=getattr(args, "subject", None) or "",
+                    predicate=getattr(args, "predicate", None) or "",
+                    object=getattr(args, "object", None) or "",
+                    confidence=float(getattr(args, "confidence", None) or 0.75),
+                    observed_at=getattr(args, "observed_at", None),
+                    valid_from=getattr(args, "valid_from", None),
+                    valid_to=getattr(args, "valid_to", None),
+                    source_scene=getattr(args, "source_scene", None) or "",
+                    privacy_scope=getattr(args, "privacy_scope", None) or "personal",
+                    actor_id="cli",
+                )
+                if args.json:
+                    _json_out(result)
+                    return
+                fact = result.get("fact") or {}
+                print(f"Temporal fact {fact.get('id')}")
+                print(f"  active     {fact.get('active')}")
+                print(f"  valid_from {fact.get('valid_from')}")
+                if result.get("invalidated"):
+                    print(f"  invalidated {len(result.get('invalidated') or [])} conflicting fact(s)")
+                return
+            if subaction == "search":
+                query = " ".join(str(item) for item in extra).strip()
+                result = ledger.search(
+                    query,
+                    user_id=getattr(args, "user_id", None) or "default",
+                    namespace=getattr(args, "namespace", None),
+                    active_only=not bool(getattr(args, "include_invalidated", False)),
+                    include_invalidated=bool(getattr(args, "include_invalidated", False)),
+                    as_of=getattr(args, "as_of", None),
+                    limit=int(getattr(args, "limit", None) or 20),
+                )
+                if args.json:
+                    _json_out(result)
+                    return
+                for fact in result.get("results") or []:
+                    print(f"  {fact.get('id')} [{fact.get('status')}] {fact.get('fact_text')}")
+                return
+            if subaction == "get":
+                fact_id = getattr(args, "fact_id", None) or (extra[0] if extra else "")
+                if not fact_id:
+                    print("Pass a fact id: dhee context fact get <fact_id>")
+                    sys.exit(1)
+                fact = ledger.get_fact(fact_id, user_id=getattr(args, "user_id", None), include_events=True)
+                result = {"format": "dhee_temporal_fact_get.v1", "ok": bool(fact), "fact": fact}
+                if args.json:
+                    _json_out(result)
+                    return
+                if not fact:
+                    print("Temporal fact not found.")
+                    return
+                print(f"{fact.get('id')} [{fact.get('status')}] {fact.get('fact_text')}")
+                for event in fact.get("events") or []:
+                    print(f"  {event.get('created_at')} {event.get('event_type')} {event.get('reason')}")
+                return
+            if subaction == "invalidate":
+                fact_id = getattr(args, "fact_id", None) or (extra[0] if extra else "")
+                if not fact_id:
+                    print("Pass a fact id: dhee context fact invalidate <fact_id>")
+                    sys.exit(1)
+                result = ledger.invalidate_fact(
+                    fact_id,
+                    user_id=getattr(args, "user_id", None) or "default",
+                    reason=getattr(args, "reason", None) or "manual invalidation",
+                    actor_id="cli",
+                )
+                if args.json:
+                    _json_out(result)
+                    return
+                print("Invalidated." if result.get("ok") else result.get("error") or "Not invalidated.")
+                return
+            if subaction == "stats":
+                result = ledger.stats(user_id=getattr(args, "user_id", None) or "default", namespace=getattr(args, "namespace", None))
+                if args.json:
+                    _json_out(result)
+                    return
+                print(f"Temporal facts: {result.get('active')}/{result.get('total')} active")
+                print(f"  by_status {result.get('by_status')}")
+                return
+        finally:
+            ledger.close()
+
     if action == "repo-brain":
         from dhee import repo_intelligence
 
         subaction = args.entry_id or "index"
         extra = list(getattr(args, "context_args", []) or [])
-        brain_actions = {"index", "show", "get", "localize"}
+        brain_actions = {"index", "show", "get", "localize", "graph", "query"}
         if subaction not in brain_actions:
             extra = [subaction, *extra]
             subaction = "localize"
@@ -613,6 +715,41 @@ def cmd_context(args: argparse.Namespace) -> None:
             for item in localization.get("candidate_files") or []:
                 print(f"  {item.get('confidence'):.2f} {item.get('path')}  {', '.join(item.get('reasons') or [])}")
             return
+        if subaction == "graph":
+            loaded = repo_intelligence.load_repo_brain(repo)
+            brain = loaded.get("brain") if isinstance(loaded.get("brain"), dict) else None
+            if not brain:
+                brain = repo_intelligence.build_repo_brain(repo, goal="repo graph export", persist=True)
+            graph = repo_intelligence.repo_graph_from_brain(brain)
+            result = {"format": "dhee_repo_graph_export.v1", "repo_graph": graph}
+            if args.json:
+                _json_out(result)
+                return
+            print(f"Repo graph: {graph.get('artifact_id')}")
+            print(f"  nodes      {len(graph.get('nodes') or [])}")
+            print(f"  edges      {len(graph.get('edges') or [])}")
+            print(f"  node types {graph.get('node_types')}")
+            print(f"  edge types {graph.get('edge_types')}")
+            return
+        if subaction == "query":
+            goal = " ".join(str(item) for item in extra).strip()
+            if not goal:
+                print("Pass a query: dhee context repo-brain query \"Fix failing context firewall tests\"")
+                sys.exit(1)
+            loaded = repo_intelligence.load_repo_brain(repo)
+            brain = loaded.get("brain") if isinstance(loaded.get("brain"), dict) else None
+            if not brain:
+                brain = repo_intelligence.build_repo_brain(repo, goal=goal, persist=True)
+            graph = repo_intelligence.context_graph_query(brain, goal)
+            result = {"format": "dhee_context_graph_query.v1", "context_graph": graph}
+            if args.json:
+                _json_out(result)
+                return
+            summary = graph.get("summary") or {}
+            print(f"Context graph: {summary.get('node_count')} nodes, {summary.get('edge_count')} edges")
+            for item in graph.get("proof_items") or []:
+                print(f"  {item.get('kind')}: {item.get('id')} score={item.get('score')}")
+            return
 
     if action == "task":
         from dhee import task_contracts
@@ -630,6 +767,7 @@ def cmd_context(args: argparse.Namespace) -> None:
             "observe",
             "proof",
             "proof-bundle",
+            "verify",
             "activate",
             "deactivate",
             "enforce",
@@ -840,6 +978,35 @@ def cmd_context(args: argparse.Namespace) -> None:
             for path in verifier.get("forbidden_changed_paths") or []:
                 print(f"  forbidden change: {path}")
             return
+        if subaction == "verify":
+            if not extra:
+                print("Pass a task id or path: dhee context task verify <task_id_or_path>")
+                sys.exit(1)
+            from dhee.verification_runner import run_verification
+
+            result = run_verification(
+                extra[0],
+                repo=args.repo or os.getcwd(),
+                timeout_sec=int(getattr(args, "timeout_sec", None) or 120),
+                max_commands=int(getattr(args, "max_commands", None) or 24),
+                strict=bool(getattr(args, "strict", False)),
+                persist=not bool(getattr(args, "dry_run", False)),
+            )
+            if args.json:
+                _json_out(result)
+                return
+            run = result.get("verification_run") or {}
+            summary = run.get("summary") or {}
+            print(f"Verification {run.get('run_id')}")
+            print(f"  status   {run.get('status')}")
+            print(f"  required {summary.get('passed_required_count')}/{summary.get('required_count')} passed")
+            if result.get("paths", {}).get("verification_run"):
+                print(f"  path     {result['paths']['verification_run']}")
+            for item in summary.get("failed_required_commands") or []:
+                print(f"  failed   {item}")
+            for item in summary.get("blocked_required_commands") or []:
+                print(f"  blocked  {item.get('command')}: {item.get('reason')}")
+            return
         if subaction == "enforce":
             from dhee.contract_runtime import set_contract_enforcement
 
@@ -921,7 +1088,7 @@ def cmd_context(args: argparse.Namespace) -> None:
             else:
                 print("No active task contract runtime.")
             return
-        print("Use: dhee context task compile|create|list|show|import|interpret|supervise|observe|proof|enforce|activate|status|deactivate")
+        print("Use: dhee context task compile|create|list|show|import|interpret|supervise|observe|proof|verify|enforce|activate|status|deactivate")
         sys.exit(1)
 
     if action == "capsule":
@@ -3499,7 +3666,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_context.add_argument(
         "context_action",
         nargs="?",
-        choices=["list", "show", "delete", "refresh", "check", "status", "state", "checkpoint", "rollover", "provision", "debt", "capsule", "repo-brain", "task"],
+        choices=["list", "show", "delete", "refresh", "check", "status", "state", "checkpoint", "rollover", "provision", "debt", "capsule", "repo-brain", "task", "fact"],
         default="list",
         help="Subcommand (default: list)",
     )
@@ -3521,10 +3688,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_context.add_argument("--next-action-json", help="For `context task observe`, optional next ChotuAction JSON")
     p_context.add_argument("--observation", help="For `context task observe`, compact observation text")
     p_context.add_argument("--outcome", default="observed", help="For `context task observe`, outcome label")
+    p_context.add_argument("--timeout-sec", type=int, help="For `context task verify`, per-command timeout seconds")
+    p_context.add_argument("--max-commands", type=int, help="For `context task verify`, maximum commands/checks to run")
     p_context.add_argument("--user-id", default="default", help="User ID for compiled-state commands")
     p_context.add_argument("--top", action="store_true", help="Show top context-debt sources")
     p_context.add_argument("--card", action="store_true", help="For `context state`, print state card XML")
     p_context.add_argument("--reason", help="Reason for checkpoint or rollover")
+    p_context.add_argument("--db-path", help="For `context fact`, override temporal fact ledger SQLite path")
+    p_context.add_argument("--namespace", help="For `context fact`, ledger namespace")
+    p_context.add_argument("--subject", help="For `context fact assert`, fact subject")
+    p_context.add_argument("--predicate", help="For `context fact assert`, fact predicate")
+    p_context.add_argument("--object", help="For `context fact assert`, fact object")
+    p_context.add_argument("--confidence", type=float, help="For `context fact assert`, confidence")
+    p_context.add_argument("--observed-at", help="For `context fact assert`, observation time")
+    p_context.add_argument("--valid-from", help="For `context fact assert`, validity start")
+    p_context.add_argument("--valid-to", help="For `context fact assert`, validity end")
+    p_context.add_argument("--source-scene", help="For `context fact assert`, source scene id")
+    p_context.add_argument("--privacy-scope", help="For `context fact assert`, privacy scope")
+    p_context.add_argument("--fact-id", help="For `context fact get|invalidate`, fact id")
+    p_context.add_argument("--as-of", help="For `context fact search`, active-at timestamp")
+    p_context.add_argument("--include-invalidated", action="store_true", help="For `context fact search`, include invalidated records")
+    p_context.add_argument("--limit", type=int, help="For context subcommands that support a row limit")
     p_context.add_argument("--quiet", action="store_true", help="No output on refresh (for git hooks)")
     p_context.add_argument("--json", action="store_true", help="JSON output")
 

@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from dhee import repo_intelligence as repo_brain_mod
 from dhee import repo_link
 
 
@@ -79,8 +80,12 @@ _EXCLUDED_DIRS = {
     ".mypy_cache",
     ".pytest_cache",
     ".ruff_cache",
+    ".cache",
+    ".direnv",
     ".tox",
     ".venv",
+    ".venv-dhee",
+    ".venv-dhee-full",
     "venv",
     "env",
     "__pycache__",
@@ -88,6 +93,7 @@ _EXCLUDED_DIRS = {
     "dist",
     "build",
     ".next",
+    "site-packages",
 }
 _STOP_WORDS = {
     "a",
@@ -315,12 +321,23 @@ def _branch_state(repo_root: Path) -> Dict[str, Any]:
 
 
 def _iter_repo_files(repo_root: Path, limit: int = 4_000) -> List[str]:
+    listed = _git_out(repo_root, ["ls-files", "--cached", "--others", "--exclude-standard"], default="")
+    if listed:
+        files: List[str] = []
+        for raw in listed.splitlines():
+            rel = raw.strip().replace(os.sep, "/")
+            if not rel or any(_is_excluded_dir(part) for part in Path(rel).parts[:-1]):
+                continue
+            files.append(rel)
+            if len(files) >= limit:
+                return sorted(files)
+        return sorted(files)
     files: List[str] = []
     for root, dirnames, filenames in os.walk(repo_root):
         dirnames[:] = [
             name
             for name in dirnames
-            if name not in _EXCLUDED_DIRS and not name.endswith(".egg-info")
+            if not _is_excluded_dir(name)
         ]
         for filename in filenames:
             path = Path(root) / filename
@@ -332,6 +349,15 @@ def _iter_repo_files(repo_root: Path, limit: int = 4_000) -> List[str]:
             if len(files) >= limit:
                 return sorted(files)
     return sorted(files)
+
+
+def _is_excluded_dir(name: str) -> bool:
+    return (
+        name in _EXCLUDED_DIRS
+        or name.endswith(".egg-info")
+        or name.startswith(".venv")
+        or name.startswith("venv-")
+    )
 
 
 def _score_file(path: str, tokens: Sequence[str]) -> int:
@@ -629,46 +655,42 @@ def _compile_repo_intelligence(
     goal: str,
     relevant_files: Sequence[str],
     must_run: Sequence[str],
-) -> Dict[str, Any]:
-    branch = _branch_state(repo_root)
-    files = _iter_repo_files(repo_root, limit=4_000)
-    python_files = [path for path in files if path.endswith(".py")]
-    focus = list(dict.fromkeys(list(relevant_files) + python_files[:300]))
-    symbols, imports, call_graph = _python_symbol_index(repo_root, focus)
-    data = {
-        "schema_version": REPO_INTELLIGENCE_SCHEMA,
-        "repo": _repo_slug(repo_root),
-        "head_commit": branch.get("head_commit"),
-        "generated_at": _now_iso(),
-        "symbols": symbols,
-        "imports": imports,
-        "call_graph": call_graph,
-        "test_map": _test_map(files, relevant_files, must_run),
-        "dependency_graph": {
-            "python_imports": imports,
-            "package_roots": _known_architecture(repo_root).get("package_roots") or [],
-        },
-        "setup_commands": _setup_commands(files),
-        "flaky_tests": [],
-        "risky_files": _risky_files(files),
-        "historical_failure_signatures": _historical_failure_signatures(repo_root, goal),
-    }
-    repo_link._ensure_repo_skeleton(repo_root)
-    path = _repo_brain_root(repo_root) / f"{branch.get('head_commit') or 'no_head'}_{_stable_hash(goal, 8)}.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_json_dumps(_sanitize_obj(data)) + "\n", encoding="utf-8")
-    return {
-        "schema_version": REPO_INTELLIGENCE_SCHEMA,
-        "ref": f"repo_brain:{path.name}",
-        "path": os.path.relpath(path, repo_root).replace(os.sep, "/"),
-        "head_commit": branch.get("head_commit"),
-        "symbol_count": len(symbols),
-        "import_file_count": len(imports),
-        "call_edge_count": len(call_graph),
-        "test_count": len(data["test_map"].get("tests") or []),
-        "risky_file_count": len(data["risky_files"]),
-        "historical_failure_count": len(data["historical_failure_signatures"]),
-    }
+) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    compiled = repo_brain_mod.compile_repo_intelligence(
+        repo_root,
+        goal=goal,
+        relevant_files=relevant_files,
+        must_run=must_run,
+    )
+    return (
+        dict(compiled.get("repo_intelligence") or {}),
+        dict(compiled.get("repo_brain") or {}),
+        dict(compiled.get("localization") or {}),
+    )
+
+
+def _merge_relevant_files(initial: Sequence[str], localization: Dict[str, Any], limit: int = 16) -> List[str]:
+    merged: List[str] = []
+    for item in localization.get("candidate_files") or []:
+        path = str(item.get("path") or "")
+        if path and path not in merged:
+            merged.append(path)
+    for path in initial:
+        if path and path not in merged:
+            merged.append(str(path))
+    return merged[:limit]
+
+
+def _merge_test_commands(initial: Sequence[str], localization: Dict[str, Any], limit: int = 8) -> List[str]:
+    merged: List[str] = []
+    for command in initial:
+        if command and str(command) not in merged:
+            merged.append(str(command))
+    for item in localization.get("candidate_tests") or []:
+        command = str(item.get("command") or "")
+        if command and command not in merged:
+            merged.append(command)
+    return merged[:limit]
 
 
 def _context_item(
@@ -721,17 +743,45 @@ def _context_ledger(contract: Dict[str, Any], repo_intelligence: Dict[str, Any])
         expected_utility=0.86,
         metadata={key: repo_intelligence.get(key) for key in ("symbol_count", "test_count", "risky_file_count", "historical_failure_count")},
     ))
+    localization = contract.get("localization") or {}
+    if localization:
+        items.append(_context_item(
+            kind="localization",
+            title=f"Localization {localization.get('status') or 'unknown'}",
+            evidence_pointer=str(repo_intelligence.get("ref") or "repo_brain:latest"),
+            why_included="Multi-signal localization ranks candidate files, symbols, tests, and evidence pointers before edit planning.",
+            token_cost=_estimate_tokens(localization),
+            freshness=f"head:{repo_intelligence.get('head_commit') or 'unknown'}",
+            confidence=float(localization.get("confidence") or 0.0),
+            expected_utility=0.9 if localization.get("status") == "localized" else 0.55,
+            metadata={
+                "engine": localization.get("engine"),
+                "candidate_file_count": len(localization.get("candidate_files") or []),
+                "candidate_test_count": len(localization.get("candidate_tests") or []),
+            },
+        ))
     for path in contract.get("relevant_files") or []:
+        localized = next(
+            (
+                item for item in localization.get("candidate_files") or []
+                if str(item.get("path") or "") == str(path)
+            ),
+            {},
+        )
         items.append(_context_item(
             kind="file",
             title=str(path),
             evidence_pointer=f"repo_file:{path}",
-            why_included="Localized by issue tokens, dirty state, or source-to-test mapping.",
+            why_included="Localized by issue tokens, symbols, dirty state, historical failures, or source-to-test mapping.",
             token_cost=_estimate_tokens(path),
             freshness=f"head:{branch.get('head_commit') or 'unknown'}",
-            confidence=0.74,
-            expected_utility=0.78,
-            metadata={"allowed_write": _path_under_allowed(str(path), contract.get("allowed_write_paths") or [])},
+            confidence=float(localized.get("confidence") or 0.74),
+            expected_utility=0.82 if localized else 0.72,
+            metadata={
+                "allowed_write": _path_under_allowed(str(path), contract.get("allowed_write_paths") or []),
+                "localization_score": localized.get("score"),
+                "localization_reasons": localized.get("reasons") or [],
+            },
         ))
     for command in contract.get("must_run") or []:
         items.append(_context_item(
@@ -770,7 +820,17 @@ def _context_ledger(contract: Dict[str, Any], repo_intelligence: Dict[str, Any])
     }
 
 
-def _verification_card(contract: Dict[str, Any], repo_intelligence: Dict[str, Any]) -> Dict[str, Any]:
+def _verification_card(
+    contract: Dict[str, Any],
+    repo_intelligence: Dict[str, Any],
+    repo_brain: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    if repo_brain:
+        return repo_brain_mod.verification_card_from_brain(
+            contract,
+            repo_brain,
+            contract.get("localization") or {},
+        )
     relevant_tests = [
         path for path in contract.get("relevant_files") or []
         if str(path).startswith("tests/") and str(path).endswith(".py")
@@ -1208,7 +1268,18 @@ def compile_task_contract(
         raise ValueError("goal is required")
     repo_root = _resolve_repo_root(repo)
     branch_state = _branch_state(repo_root)
-    relevant_files = _relevant_files(repo_root, goal, branch_state)
+    initial_relevant_files = _relevant_files(repo_root, goal, branch_state)
+    initial_test_commands = _infer_test_commands(repo_root, goal, initial_relevant_files, must_run)
+    repo_intelligence, repo_brain, localization = _compile_repo_intelligence(
+        repo_root,
+        goal=str(goal).strip(),
+        relevant_files=initial_relevant_files,
+        must_run=initial_test_commands,
+    )
+    repo_intelligence["localization_status"] = localization.get("status")
+    repo_intelligence["localization_confidence"] = localization.get("confidence")
+    relevant_files = _merge_relevant_files(initial_relevant_files, localization)
+    test_commands = initial_test_commands if must_run else _merge_test_commands(initial_test_commands, localization)
     affected_modules = _affected_modules(relevant_files, branch_state)
     failures = [dict(item) for item in (recent_failures or []) if isinstance(item, dict)]
     contract = {
@@ -1227,7 +1298,7 @@ def compile_task_contract(
         "affected_modules": affected_modules,
         "known_architecture": _known_architecture(repo_root),
         "recent_failures": failures,
-        "test_commands": _infer_test_commands(repo_root, goal, relevant_files, must_run),
+        "test_commands": test_commands,
         "relevant_files": relevant_files,
         "allowed_write_paths": list(allowed_write_paths or _default_allowed_write_paths(repo_root, affected_modules)),
         "forbidden_paths": list(forbidden_paths or DEFAULT_FORBIDDEN_PATHS),
@@ -1243,15 +1314,10 @@ def compile_task_contract(
         "context_budget": dict(context_budget or DEFAULT_CONTEXT_BUDGET),
     }
     contract["must_run"] = contract["test_commands"]
-    repo_intelligence = _compile_repo_intelligence(
-        repo_root,
-        goal=contract["goal"],
-        relevant_files=contract["relevant_files"],
-        must_run=contract["must_run"],
-    )
     contract["repo_intelligence"] = repo_intelligence
+    contract["localization"] = localization
     contract["compiled_context"] = _context_ledger(contract, repo_intelligence)
-    contract["verification_card"] = _verification_card(contract, repo_intelligence)
+    contract["verification_card"] = _verification_card(contract, repo_intelligence, repo_brain)
     contract["contamination_status"] = _contamination_status(contract["goal"], contract["memory_pointers"])
     contract["patch_families"] = [
         {
@@ -1758,6 +1824,26 @@ def render_task_contract(compiled: Dict[str, Any]) -> str:
         "## Must Run",
     ]
     lines.extend(f"- `{cmd}`" for cmd in contract.get("must_run") or ["pytest"])
+    repo_intelligence = contract.get("repo_intelligence") or {}
+    if repo_intelligence:
+        lines.extend([
+            "",
+            "## Repo Brain",
+            f"- Ref: `{repo_intelligence.get('ref') or ''}`",
+            f"- Symbols: `{repo_intelligence.get('symbol_count') or 0}`",
+            f"- Calls: `{repo_intelligence.get('call_edge_count') or 0}`",
+            f"- Tests: `{repo_intelligence.get('test_count') or 0}`",
+        ])
+    localization = contract.get("localization") or {}
+    if localization:
+        lines.extend([
+            "",
+            "## Localization",
+            f"- Status: `{localization.get('status') or ''}`",
+            f"- Confidence: `{localization.get('confidence') or 0}`",
+        ])
+        for item in (localization.get("candidate_files") or [])[:6]:
+            lines.append(f"- `{item.get('path')}` ({item.get('confidence')})")
     compiler = compiled.get("compiler") or {}
     if compiler:
         lines.extend([

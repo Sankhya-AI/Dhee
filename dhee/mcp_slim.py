@@ -25,13 +25,18 @@ from typing import Any, Dict, List, Optional
 try:
     from mcp.server import Server
     from mcp.server.stdio import stdio_server
-    from mcp.types import Tool, TextContent
+    from mcp.types import Tool, TextContent, ToolAnnotations
 except ModuleNotFoundError:
     class Tool:  # type: ignore[no-redef]
-        def __init__(self, *, name: str, description: str, inputSchema: Dict[str, Any]):
+        def __init__(self, *, name: str, description: str, inputSchema: Dict[str, Any], annotations: Any = None):
             self.name = name
             self.description = description
             self.inputSchema = inputSchema
+            self.annotations = annotations
+
+    class ToolAnnotations:  # type: ignore[no-redef]
+        def __init__(self, **kwargs: Any):
+            self.__dict__.update(kwargs)
 
     class TextContent:  # type: ignore[no-redef]
         def __init__(self, *, type: str, text: str):
@@ -78,8 +83,9 @@ from dhee.mcp_registry import CONTEXT_COMPILER_TOOL_NAMES, make_tools
 _MCP_CONTEXT_FIRST_INSTRUCTIONS = (
     "Dhee is the native memory and context-router. At the start of substantive "
     "repo/workspace tasks, use Dhee context/recall before reconstructing from "
-    "local files or shell output, then call dhee_inbox for unread live shared "
-    "context. Use dhee_broadcast for context another active agent must see "
+    "local files or shell output. Prefer one dhee_context_bootstrap call with "
+    "the repo path; it bundles handoff, active shared task, shared results, and "
+    "unread inbox. Use dhee_broadcast for context another active agent must see "
     "immediately. Search promoted Dhee/Hermes learnings when prior evolution "
     "may apply. Prefer dhee_read and dhee_bash for large reusable "
     "reads/searches/commands so raw output stays behind pointers. When "
@@ -690,6 +696,35 @@ TOOLS = [
         },
     ),
     Tool(
+        name="dhee_context_bootstrap",
+        description=(
+            "Read-only Codex startup packet. Use once at the start of repo work "
+            "instead of separate dhee_handoff, dhee_shared_task, "
+            "dhee_shared_task_results, and dhee_inbox calls."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string", "description": "Repo/workspace path"},
+                "workspace_id": {"type": "string", "description": "Explicit workspace id or path override"},
+                "project_id": {"type": "string", "description": "Optional project/channel scope"},
+                "thread_id": {"type": "string", "description": "Optional live thread id"},
+                "shared_task_id": {"type": "string", "description": "Optional shared task id"},
+                "agent_id": {"type": "string", "description": "Agent identity"},
+                "harness": {"type": "string", "description": "Harness/runtime id, e.g. codex"},
+                "session_id": {"type": "string", "description": "Native active session id"},
+                "user_id": {"type": "string", "description": "User identifier"},
+                "memory_limit": {"type": "integer", "description": "Recent memories to include"},
+                "artifact_limit": {"type": "integer", "description": "Recent artifacts to include"},
+                "task_limit": {"type": "integer", "description": "Recent tasks to include"},
+                "intention_limit": {"type": "integer", "description": "Active intentions to include"},
+                "result_limit": {"type": "integer", "description": "Shared task results to include"},
+                "inbox_limit": {"type": "integer", "description": "Unread broadcasts to include"},
+                "include_own": {"type": "boolean", "description": "Include own live broadcasts"},
+            },
+        },
+    ),
+    Tool(
         name="dhee_handoff",
         description="Emit compact cross-agent continuity for a repo before local reconstruction.",
         inputSchema={
@@ -706,6 +741,47 @@ TOOLS = [
         },
     ),
 ]
+
+
+_READ_ONLY_TOOL_HINTS = {
+    "recall",
+    "context",
+    "dhee_search_learnings",
+    "dhee_context_status",
+    "dhee_context_state",
+    "dhee_scene_search",
+    "dhee_context_pack",
+    "dhee_repo_brain_get",
+    "dhee_repo_brain_localize",
+    "dhee_task_contract_compile",
+    "dhee_task_contract_list",
+    "dhee_task_contract_get",
+    "dhee_task_contract_interpret",
+    "dhee_contract_runtime_status",
+    "dhee_contract_enforcement_status",
+    "dhee_contract_runtime_doctor",
+    "dhee_update_capsule_list",
+    "dhee_update_capsule_get",
+    "dhee_update_capsule_interpret",
+    "dhee_tools_list",
+    "dhee_shell",
+    "dhee_inbox",
+    "dhee_read",
+    "dhee_grep",
+    "dhee_agent",
+    "dhee_expand_result",
+    "dhee_context_bootstrap",
+    "dhee_handoff",
+}
+
+for _tool in TOOLS:
+    if _tool.name in _READ_ONLY_TOOL_HINTS:
+        _tool.annotations = ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1246,6 +1322,240 @@ def _handle_dhee_context_pack(args: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
+def _repo_brain_goal(args: Dict[str, Any]) -> str:
+    return str(args.get("goal") or args.get("query") or args.get("task") or "").strip()
+
+
+def _handle_dhee_repo_brain_index(args: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee.repo_intelligence import build_repo_brain, localize_issue, repo_brain_summary
+
+    goal = _repo_brain_goal(args)
+    try:
+        file_limit = max(100, min(20_000, int(args.get("file_limit") or 4_000)))
+    except (TypeError, ValueError):
+        file_limit = 4_000
+    brain = build_repo_brain(
+        args.get("repo"),
+        goal=goal,
+        relevant_files=args.get("relevant_files") if isinstance(args.get("relevant_files"), list) else None,
+        must_run=args.get("must_run") if isinstance(args.get("must_run"), list) else None,
+        file_limit=file_limit,
+        persist=args.get("persist") is not False,
+    )
+    return {
+        "format": "dhee_repo_brain_index.v1",
+        "repo_intelligence": repo_brain_summary(brain),
+        "localization": localize_issue(goal, brain) if goal else None,
+    }
+
+
+def _handle_dhee_repo_brain_get(args: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee.repo_intelligence import load_repo_brain, repo_brain_summary
+
+    loaded = load_repo_brain(
+        args.get("repo"),
+        ref=args.get("ref"),
+        quarantine=bool(args.get("quarantine") or False),
+    )
+    brain = loaded.get("brain") if isinstance(loaded.get("brain"), dict) else None
+    if brain and not args.get("include_brain"):
+        loaded["repo_intelligence"] = repo_brain_summary(brain)
+        loaded["brain"] = None
+    return loaded
+
+
+def _handle_dhee_repo_brain_localize(args: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee.repo_intelligence import load_repo_brain, localize_issue, repo_brain_summary
+
+    goal = _repo_brain_goal(args)
+    if not goal:
+        return {"error": "goal, query, or task is required"}
+    loaded = load_repo_brain(
+        args.get("repo"),
+        ref=args.get("ref"),
+        quarantine=bool(args.get("quarantine") or False),
+    )
+    brain = loaded.get("brain") if isinstance(loaded.get("brain"), dict) else None
+    if not brain:
+        return {
+            "format": "dhee_repo_brain_localize.v1",
+            "ok": False,
+            "error": "repo brain not found; run dhee_repo_brain_index first",
+            "diagnostics": loaded.get("diagnostics") or [],
+        }
+    try:
+        limit = max(1, min(100, int(args.get("limit") or 12)))
+    except (TypeError, ValueError):
+        limit = 12
+    return {
+        "format": "dhee_repo_brain_localize.v1",
+        "ok": True,
+        "repo_intelligence": repo_brain_summary(brain),
+        "localization": localize_issue(goal, brain, limit=limit),
+    }
+
+
+def _handle_dhee_repo_graph_export(args: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee.repo_intelligence import build_repo_brain, load_repo_brain, repo_graph_from_brain
+
+    loaded = load_repo_brain(
+        args.get("repo"),
+        ref=args.get("ref"),
+        quarantine=bool(args.get("quarantine") or False),
+    )
+    brain = loaded.get("brain") if isinstance(loaded.get("brain"), dict) else None
+    if not brain:
+        goal = _repo_brain_goal(args) or "repo graph export"
+        brain = build_repo_brain(
+            args.get("repo"),
+            goal=goal,
+            relevant_files=args.get("relevant_files"),
+            must_run=args.get("must_run"),
+            persist=bool(args.get("persist", True)),
+        )
+    graph = repo_graph_from_brain(
+        brain,
+        node_limit=int(args.get("node_limit") or args.get("limit") or 4000),
+        edge_limit=int(args.get("edge_limit") or 12000),
+    )
+    compact = {
+        "schema_version": graph.get("schema_version"),
+        "artifact_id": graph.get("artifact_id"),
+        "node_count": len(graph.get("nodes") or []),
+        "edge_count": len(graph.get("edges") or []),
+        "node_types": graph.get("node_types"),
+        "edge_types": graph.get("edge_types"),
+    }
+    return {
+        "format": "dhee_repo_graph_export.v1",
+        "repo_graph": graph if bool(args.get("include_graph", True)) else compact,
+    }
+
+
+def _handle_dhee_context_graph_query(args: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee.repo_intelligence import build_repo_brain, context_graph_query, load_repo_brain
+
+    query = str(args.get("query") or args.get("goal") or args.get("task") or "").strip()
+    if not query:
+        return {"error": "query is required"}
+    loaded = load_repo_brain(
+        args.get("repo"),
+        ref=args.get("ref"),
+        quarantine=bool(args.get("quarantine") or False),
+    )
+    brain = loaded.get("brain") if isinstance(loaded.get("brain"), dict) else None
+    if not brain:
+        brain = build_repo_brain(
+            args.get("repo"),
+            goal=query,
+            relevant_files=args.get("relevant_files"),
+            must_run=args.get("must_run"),
+            persist=bool(args.get("persist", True)),
+        )
+    return {
+        "format": "dhee_context_graph_query.v1",
+        "context_graph": context_graph_query(
+            brain,
+            query,
+            limit=int(args.get("limit") or 500),
+            max_hops=int(args.get("max_hops") or 3),
+        ),
+    }
+
+
+def _temporal_fact_ledger(args: Dict[str, Any]):
+    from dhee.temporal_fact_ledger import open_default_ledger
+
+    return open_default_ledger(args.get("db_path"))
+
+
+def _handle_dhee_temporal_fact_assert(args: Dict[str, Any]) -> Dict[str, Any]:
+    ledger = _temporal_fact_ledger(args)
+    try:
+        return ledger.assert_fact(
+            fact_text=str(args.get("fact_text") or ""),
+            user_id=str(args.get("user_id") or "default"),
+            namespace=str(args.get("namespace") or "default"),
+            subject=str(args.get("subject") or ""),
+            predicate=str(args.get("predicate") or ""),
+            object=str(args.get("object") or ""),
+            valid_from=args.get("valid_from"),
+            valid_to=args.get("valid_to"),
+            observed_at=args.get("observed_at"),
+            confidence=float(args.get("confidence") or 0.75),
+            source_scene=str(args.get("source_scene") or ""),
+            source_event_ids=args.get("source_event_ids") or [],
+            source_memory_ids=args.get("source_memory_ids") or [],
+            evidence=args.get("evidence") or [],
+            privacy_scope=str(args.get("privacy_scope") or "personal"),
+            metadata=args.get("metadata") or {},
+            contradicts_fact_ids=args.get("contradicts_fact_ids") or [],
+            invalidate_conflicts=bool(args.get("invalidate_conflicts", True)),
+            actor_id=str(args.get("actor_id") or ""),
+        )
+    finally:
+        ledger.close()
+
+
+def _handle_dhee_temporal_fact_search(args: Dict[str, Any]) -> Dict[str, Any]:
+    ledger = _temporal_fact_ledger(args)
+    try:
+        return ledger.search(
+            str(args.get("query") or ""),
+            user_id=str(args.get("user_id") or "default"),
+            namespace=args.get("namespace"),
+            active_only=bool(args.get("active_only", True)),
+            as_of=args.get("as_of"),
+            include_invalidated=bool(args.get("include_invalidated") or False),
+            privacy_scope=args.get("privacy_scope"),
+            limit=int(args.get("limit") or 20),
+        )
+    finally:
+        ledger.close()
+
+
+def _handle_dhee_temporal_fact_get(args: Dict[str, Any]) -> Dict[str, Any]:
+    ledger = _temporal_fact_ledger(args)
+    try:
+        fact_id = str(args.get("fact_id") or args.get("id") or "")
+        if not fact_id:
+            return {"error": "fact_id is required"}
+        fact = ledger.get_fact(
+            fact_id,
+            user_id=str(args.get("user_id") or "default") if args.get("user_id") else None,
+            include_events=bool(args.get("include_events") or False),
+        )
+        return {"format": "dhee_temporal_fact_get.v1", "ok": bool(fact), "fact": fact}
+    finally:
+        ledger.close()
+
+
+def _handle_dhee_temporal_fact_invalidate(args: Dict[str, Any]) -> Dict[str, Any]:
+    ledger = _temporal_fact_ledger(args)
+    try:
+        fact_id = str(args.get("fact_id") or args.get("id") or "")
+        if not fact_id:
+            return {"error": "fact_id is required"}
+        return ledger.invalidate_fact(
+            fact_id,
+            user_id=str(args.get("user_id") or "default"),
+            reason=str(args.get("reason") or "invalidated"),
+            contradicted_by=args.get("contradicted_by"),
+            invalidated_at=args.get("invalidated_at"),
+            actor_id=str(args.get("actor_id") or ""),
+        )
+    finally:
+        ledger.close()
+
+
+def _handle_dhee_temporal_fact_stats(args: Dict[str, Any]) -> Dict[str, Any]:
+    ledger = _temporal_fact_ledger(args)
+    try:
+        return ledger.stats(user_id=str(args.get("user_id") or "default"), namespace=args.get("namespace"))
+    finally:
+        ledger.close()
+
+
 def _handle_dhee_task_contract_compile(args: Dict[str, Any]) -> Dict[str, Any]:
     from dhee.task_contracts import compile_task_contract
 
@@ -1384,6 +1694,26 @@ def _handle_dhee_contract_proof_bundle(args: Dict[str, Any]) -> Dict[str, Any]:
     return build_proof_bundle(
         task_contract,
         repo=args.get("repo"),
+        strict=bool(args.get("strict") or False),
+        persist=True if persist is None else bool(persist),
+    )
+
+
+def _handle_dhee_contract_run_verification(args: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee.verification_runner import run_verification
+
+    task_contract = _contract_ref_from_args(args)
+    if not task_contract:
+        return {"error": "contract, path, or task_id is required"}
+    persist = args.get("persist")
+    return run_verification(
+        task_contract,
+        repo=args.get("repo"),
+        timeout_sec=int(args.get("timeout_sec") or 120),
+        max_commands=int(args.get("max_commands") or 24),
+        include_pass_to_pass=True if args.get("include_pass_to_pass") is None else bool(args.get("include_pass_to_pass")),
+        include_static=True if args.get("include_static") is None else bool(args.get("include_static")),
+        include_security=True if args.get("include_security") is None else bool(args.get("include_security")),
         strict=bool(args.get("strict") or False),
         persist=True if persist is None else bool(persist),
     )
@@ -1686,6 +2016,17 @@ def _handle_dhee_handoff(args: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
+def _handle_dhee_context_bootstrap(args: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee.core.context_bootstrap import build_context_bootstrap
+
+    return build_context_bootstrap(
+        _get_db(),
+        args,
+        default_user_id=str(args.get("user_id") or os.environ.get("DHEE_USER_ID") or "default"),
+        default_agent_id=_default_agent_id(args),
+    )
+
+
 HANDLERS = {
     "remember": _handle_remember,
     "recall": _handle_recall,
@@ -1702,6 +2043,16 @@ HANDLERS = {
     "dhee_scene_compile": _handle_dhee_scene_compile,
     "dhee_scene_search": _handle_dhee_scene_search,
     "dhee_context_pack": _handle_dhee_context_pack,
+    "dhee_repo_brain_index": _handle_dhee_repo_brain_index,
+    "dhee_repo_brain_get": _handle_dhee_repo_brain_get,
+    "dhee_repo_brain_localize": _handle_dhee_repo_brain_localize,
+    "dhee_repo_graph_export": _handle_dhee_repo_graph_export,
+    "dhee_context_graph_query": _handle_dhee_context_graph_query,
+    "dhee_temporal_fact_assert": _handle_dhee_temporal_fact_assert,
+    "dhee_temporal_fact_search": _handle_dhee_temporal_fact_search,
+    "dhee_temporal_fact_get": _handle_dhee_temporal_fact_get,
+    "dhee_temporal_fact_invalidate": _handle_dhee_temporal_fact_invalidate,
+    "dhee_temporal_fact_stats": _handle_dhee_temporal_fact_stats,
     "dhee_task_contract_compile": _handle_dhee_task_contract_compile,
     "dhee_task_contract_create": _handle_dhee_task_contract_create,
     "dhee_task_contract_list": _handle_dhee_task_contract_list,
@@ -1710,6 +2061,7 @@ HANDLERS = {
     "dhee_task_contract_interpret": _handle_dhee_task_contract_interpret,
     "dhee_contract_supervise_action": _handle_dhee_contract_supervise_action,
     "dhee_contract_record_observation": _handle_dhee_contract_record_observation,
+    "dhee_contract_run_verification": _handle_dhee_contract_run_verification,
     "dhee_contract_proof_bundle": _handle_dhee_contract_proof_bundle,
     "dhee_contract_runtime_activate": _handle_dhee_contract_runtime_activate,
     "dhee_contract_runtime_status": _handle_dhee_contract_runtime_status,
@@ -1732,6 +2084,7 @@ HANDLERS = {
     "dhee_grep": _handle_dhee_grep,
     "dhee_agent": _handle_dhee_agent,
     "dhee_expand_result": _handle_dhee_expand_result,
+    "dhee_context_bootstrap": _handle_dhee_context_bootstrap,
     "dhee_handoff": _handle_dhee_handoff,
 }
 

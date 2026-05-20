@@ -27,16 +27,20 @@ def test_install_codex_writes_native_config_and_instructions(tmp_path, monkeypat
     assert 'DHEE_CODEX_NATIVE = "1"' in config_text
     assert 'DHEE_CODEX_NATIVE_LEVEL = "closest_available"' in config_text
     assert 'DHEE_CODEX_NATIVE_SURFACES = "codex_mcp_config,codex_global_agents_md,mcp_server_instructions,codex_session_stream_auto_sync"' in config_text
-    assert 'DHEE_CONTEXT_FIRST_TOOLS = "dhee_handoff,dhee_shared_task,dhee_shared_task_results,dhee_inbox,dhee_search_learnings"' in config_text
+    assert 'DHEE_CONTEXT_FIRST_TOOLS = "dhee_context_bootstrap,dhee_inbox,dhee_search_learnings"' in config_text
     assert 'DHEE_SHARED_CONTEXT_FIRST = "1"' in config_text
     assert 'DHEE_ROUTER_TOOLS = "dhee_read,dhee_grep,dhee_bash,dhee_expand_result"' in config_text
+    assert "[mcp_servers.dhee.tools.dhee_context_bootstrap]" in config_text
+    assert "[mcp_servers.dhee.tools.dhee_read]" in config_text
+    assert 'approval_mode = "auto"' in config_text
+    assert 'approval_mode = "never"' not in config_text
     assert agents_path.exists()
     instructions = agents_path.read_text(encoding="utf-8")
     assert "primary memory, context-router" in instructions
     assert "Codex-native surfaces" in instructions
     assert "Dhee syncs Codex session logs opportunistically" in instructions
-    assert "call `dhee_handoff`" in instructions
-    assert "call `dhee_inbox`" in instructions
+    assert "call `dhee_context_bootstrap`" in instructions
+    assert "`dhee_inbox`" in instructions
     assert "call `dhee_broadcast`" in instructions
     assert "Search promoted learnings with `dhee_search_learnings`" in instructions
 
@@ -52,7 +56,10 @@ def test_install_codex_writes_native_config_and_instructions(tmp_path, monkeypat
     assert status["context_first"] == "1"
     assert status["shared_context_first"] == "1"
     assert status["auto_sync"] == "1"
+    assert "dhee_context_bootstrap" in status["context_first_tools"]
     assert "dhee_search_learnings" in status["context_first_tools"]
+    assert "dhee_context_bootstrap" in status["trusted_read_only_tools"]
+    assert "dhee_read" in status["trusted_read_only_tools"]
     assert status["router_contract"] == "context_first"
     assert "dhee_grep" in status["router_tools"]
     assert status["instructions_present"] is True

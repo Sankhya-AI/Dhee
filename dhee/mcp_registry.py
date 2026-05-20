@@ -18,6 +18,7 @@ TASK_CONTRACT_TOOL_NAMES = (
 CONTRACT_RUNTIME_TOOL_NAMES = (
     "dhee_contract_supervise_action",
     "dhee_contract_record_observation",
+    "dhee_contract_run_verification",
     "dhee_contract_proof_bundle",
     "dhee_contract_runtime_activate",
     "dhee_contract_runtime_status",
@@ -35,7 +36,25 @@ UPDATE_CAPSULE_TOOL_NAMES = (
     "dhee_update_capsule_interpret",
 )
 
+REPO_INTELLIGENCE_TOOL_NAMES = (
+    "dhee_repo_brain_index",
+    "dhee_repo_brain_get",
+    "dhee_repo_brain_localize",
+    "dhee_repo_graph_export",
+    "dhee_context_graph_query",
+)
+
+TEMPORAL_FACT_TOOL_NAMES = (
+    "dhee_temporal_fact_assert",
+    "dhee_temporal_fact_search",
+    "dhee_temporal_fact_get",
+    "dhee_temporal_fact_invalidate",
+    "dhee_temporal_fact_stats",
+)
+
 CONTEXT_COMPILER_TOOL_NAMES = (
+    *REPO_INTELLIGENCE_TOOL_NAMES,
+    *TEMPORAL_FACT_TOOL_NAMES,
     *TASK_CONTRACT_TOOL_NAMES,
     *CONTRACT_RUNTIME_TOOL_NAMES,
     *UPDATE_CAPSULE_TOOL_NAMES,
@@ -73,8 +92,121 @@ _CAPSULE_REF_PROPERTIES = {
     "capsule": {"type": "object"},
 }
 
+_REPO_BRAIN_PROPERTIES = {
+    "repo": {"type": "string"},
+    "goal": {"type": "string"},
+    "query": {"type": "string"},
+    "ref": {"type": "string"},
+    "relevant_files": {"type": "array", "items": {"type": "string"}},
+    "must_run": {"type": "array", "items": {"type": "string"}},
+    "file_limit": {"type": "integer"},
+    "persist": {"type": "boolean"},
+    "include_brain": {"type": "boolean"},
+    "include_graph": {"type": "boolean"},
+    "quarantine": {"type": "boolean"},
+    "limit": {"type": "integer"},
+    "node_limit": {"type": "integer"},
+    "edge_limit": {"type": "integer"},
+}
+
+_TEMPORAL_FACT_PROPERTIES = {
+    "db_path": {"type": "string"},
+    "user_id": {"type": "string"},
+    "namespace": {"type": "string"},
+    "fact_id": {"type": "string"},
+    "id": {"type": "string"},
+    "fact_text": {"type": "string"},
+    "query": {"type": "string"},
+    "subject": {"type": "string"},
+    "predicate": {"type": "string"},
+    "object": {"type": "string"},
+    "valid_from": {"type": "string"},
+    "valid_to": {"type": "string"},
+    "observed_at": {"type": "string"},
+    "confidence": {"type": "number"},
+    "source_scene": {"type": "string"},
+    "source_event_ids": {"type": "array", "items": {"type": "string"}},
+    "source_memory_ids": {"type": "array", "items": {"type": "string"}},
+    "evidence": {"type": "array", "items": {"type": "object"}},
+    "privacy_scope": {"type": "string"},
+    "metadata": {"type": "object"},
+    "contradicts_fact_ids": {"type": "array", "items": {"type": "string"}},
+    "invalidate_conflicts": {"type": "boolean"},
+    "actor_id": {"type": "string"},
+    "reason": {"type": "string"},
+    "contradicted_by": {"type": "string"},
+    "invalidated_at": {"type": "string"},
+    "active_only": {"type": "boolean"},
+    "as_of": {"type": "string"},
+    "include_invalidated": {"type": "boolean"},
+    "include_events": {"type": "boolean"},
+    "limit": {"type": "integer"},
+}
+
 
 TOOL_SPECS: Dict[str, Dict[str, Any]] = {
+    "dhee_repo_brain_index": {
+        "name": "dhee_repo_brain_index",
+        "description": "Build and persist a git-SHA scoped SWE repo brain with files, symbols, imports, calls, tests, dependencies, and failure signatures.",
+        "inputSchema": {"type": "object", "properties": deepcopy(_REPO_BRAIN_PROPERTIES)},
+    },
+    "dhee_repo_brain_get": {
+        "name": "dhee_repo_brain_get",
+        "description": "Load the latest or referenced repo brain. Returns a compact summary unless include_brain=true.",
+        "inputSchema": {"type": "object", "properties": deepcopy(_REPO_BRAIN_PROPERTIES)},
+    },
+    "dhee_repo_brain_localize": {
+        "name": "dhee_repo_brain_localize",
+        "description": "Run deterministic multi-signal localization against the latest or referenced repo brain.",
+        "inputSchema": {"type": "object", "properties": deepcopy(_REPO_BRAIN_PROPERTIES)},
+    },
+    "dhee_repo_graph_export": {
+        "name": "dhee_repo_graph_export",
+        "description": "Export the latest repo brain as a durable provenance-rich repo graph artifact: files, symbols, tests, configs, errors, owners, imports, calls, tested_by, failed_with.",
+        "inputSchema": {"type": "object", "properties": deepcopy(_REPO_BRAIN_PROPERTIES)},
+    },
+    "dhee_context_graph_query": {
+        "name": "dhee_context_graph_query",
+        "description": "Return a rich multi-hop context graph query proving why files, tests, symbols, failures, and ownership evidence matter for a task.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {**deepcopy(_REPO_BRAIN_PROPERTIES), "max_hops": {"type": "integer"}},
+            "required": ["query"],
+        },
+    },
+    "dhee_temporal_fact_assert": {
+        "name": "dhee_temporal_fact_assert",
+        "description": "Assert a temporal fact with validity windows, provenance, confidence, and optional contradiction/invalidation of prior facts.",
+        "inputSchema": {
+            "type": "object",
+            "properties": deepcopy(_TEMPORAL_FACT_PROPERTIES),
+            "required": ["fact_text"],
+        },
+    },
+    "dhee_temporal_fact_search": {
+        "name": "dhee_temporal_fact_search",
+        "description": "Search temporal facts with active-at-time semantics. Invalidated facts can still answer historical as_of queries.",
+        "inputSchema": {"type": "object", "properties": deepcopy(_TEMPORAL_FACT_PROPERTIES)},
+    },
+    "dhee_temporal_fact_get": {
+        "name": "dhee_temporal_fact_get",
+        "description": "Get a temporal fact by id, optionally including its assertion/invalidation event trail.",
+        "inputSchema": {"type": "object", "properties": deepcopy(_TEMPORAL_FACT_PROPERTIES)},
+    },
+    "dhee_temporal_fact_invalidate": {
+        "name": "dhee_temporal_fact_invalidate",
+        "description": "Invalidate a temporal fact without deleting it, setting valid_to, contradicted_by, and an audit event.",
+        "inputSchema": {
+            "type": "object",
+            "properties": deepcopy(_TEMPORAL_FACT_PROPERTIES),
+            "required": ["fact_id"],
+        },
+    },
+    "dhee_temporal_fact_stats": {
+        "name": "dhee_temporal_fact_stats",
+        "description": "Return temporal fact ledger counts by status and active flag for a user/namespace.",
+        "inputSchema": {"type": "object", "properties": deepcopy(_TEMPORAL_FACT_PROPERTIES)},
+    },
     "dhee_task_contract_compile": {
         "name": "dhee_task_contract_compile",
         "description": "Compile a messy user task plus repo state into a deterministic TaskContract and typed ChotuAction plan.",
@@ -152,6 +284,23 @@ TOOL_SPECS: Dict[str, Dict[str, Any]] = {
         "inputSchema": {
             "type": "object",
             "properties": {**deepcopy(_CONTRACT_REF_PROPERTIES), "strict": {"type": "boolean"}, "persist": {"type": "boolean"}},
+        },
+    },
+    "dhee_contract_run_verification": {
+        "name": "dhee_contract_run_verification",
+        "description": "Execute a task contract verification card with safe bounded commands, record supervised test observations, and persist an auditable verification run.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **deepcopy(_CONTRACT_REF_PROPERTIES),
+                "timeout_sec": {"type": "integer"},
+                "max_commands": {"type": "integer"},
+                "include_pass_to_pass": {"type": "boolean"},
+                "include_static": {"type": "boolean"},
+                "include_security": {"type": "boolean"},
+                "strict": {"type": "boolean"},
+                "persist": {"type": "boolean"},
+            },
         },
     },
     "dhee_contract_runtime_activate": {
