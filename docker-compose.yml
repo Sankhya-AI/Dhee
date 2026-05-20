@@ -6,12 +6,15 @@ services:
       - dhee-data:/data/dhee
     environment:
       - DHEE_DATA_DIR=/data/dhee
-      # Set ONE of these:
+      # Optional provider credentials. NVIDIA-compatible OpenAI is the
+      # recommended high-quality semantic memory path.
+      - NVIDIA_API_KEY=${NVIDIA_API_KEY:-}
+      - NVIDIA_BASE_URL=${NVIDIA_BASE_URL:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "from dhee import Dhee; print('ok')"]
+      test: ["CMD", "python", "-c", "import dhee; print(dhee.__version__)"]
       interval: 30s
       timeout: 10s
       retries: 3

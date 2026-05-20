@@ -2,14 +2,16 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Copy project files
-COPY pyproject.toml README.md ./
+# Copy only the package sources needed for an installable Dhee image.
+COPY pyproject.toml README.md LICENSE MANIFEST.in ./
 COPY dhee/ ./dhee/
-COPY dhee/ ./dhee/
+COPY dhee_shared/ ./dhee_shared/
+COPY engram/ ./engram/
+COPY engram-bus/ ./engram-bus/
 
-# Install package — slim by default (no llama.cpp, no local models)
-# Use: docker build --build-arg EXTRAS="openai,mcp" .
-ARG EXTRAS="openai,mcp"
+# Install a slim MCP server by default. For semantic memory use:
+# docker build --build-arg EXTRAS="nvidia,zvec,mcp" .
+ARG EXTRAS="mcp"
 RUN pip install --no-cache-dir -e ".[$EXTRAS]"
 
 # Create data directory
@@ -21,7 +23,7 @@ ENV PYTHONUNBUFFERED=1
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
-    CMD python -c "from dhee.core.buddhi import Buddhi; Buddhi(); print('ok')" || exit 1
+    CMD python -c "import dhee; print(dhee.__version__)" || exit 1
 
 VOLUME /data
 

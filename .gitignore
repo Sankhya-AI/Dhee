@@ -113,8 +113,6 @@ logs/
 # Research papers
 *.pdf
 
-# Specification (keep original)
-
 # Temporary Python files
 *.bak
 *.swp
@@ -178,6 +176,7 @@ start-bridge.sh
 # Agent-specific config (not needed publicly)
 CLAUDE.md
 CURSOR.md
+.mcp.json
 .claude-plugin/
 .cursor/
 
