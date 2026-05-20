@@ -81,6 +81,34 @@ logger = logging.getLogger(__name__)
 # Inline helpers (formerly in deleted core/acceptance and core/policy modules)
 # ---------------------------------------------------------------------------
 
+def _metadata_dict(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        current = dict(value)
+        for _ in range(4):
+            raw = current.get("legacy_metadata_raw")
+            if not isinstance(raw, str):
+                break
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                break
+            if not isinstance(parsed, dict):
+                break
+            overlay = {
+                key: item
+                for key, item in current.items()
+                if key not in {"legacy_metadata_raw", "legacy_metadata_type"}
+            }
+            current = {**parsed, **overlay}
+        return current
+    if value not in (None, "", [], {}):
+        return {
+            "legacy_metadata_raw": value,
+            "legacy_metadata_type": type(value).__name__,
+        }
+    return {}
+
+
 @dataclass
 class ExplicitIntent:
     action: Optional[str]
@@ -1265,7 +1293,7 @@ class FullMemory(SmartMemory, SceneProfileMixin):
         if content is None and metadata_updates is None and categories_updates is None:
             return {"id": memory_id, "memory": memory.get("memory", ""), "event": "ERROR"}
 
-        metadata = dict(memory.get("metadata", {}) or {})
+        metadata = _metadata_dict(memory.get("metadata"))
         categories = list(memory.get("categories", []) or [])
         existing_content = memory.get("memory", "")
         echo_result = None
@@ -1552,9 +1580,13 @@ class FullMemory(SmartMemory, SceneProfileMixin):
                 new_strength,
                 self.fade_config,
             ):
-                self.db.update_memory(memory["id"], {"layer": "lml"})
-                self.db.log_event(memory["id"], "PROMOTE", old_layer="sml", new_layer="lml")
-                promoted += 1
+                from dhee.memory.quality import memory_quality_from_record
+
+                quality = memory_quality_from_record(memory)
+                if quality.layer == "lml" and not quality.suppress_from_default_recall:
+                    self.db.update_memory(memory["id"], {"layer": "lml"})
+                    self.db.log_event(memory["id"], "PROMOTE", old_layer="sml", new_layer="lml")
+                    promoted += 1
 
         if self.fade_config.use_tombstone_deletion:
             self.db.purge_tombstoned()
@@ -1856,12 +1888,85 @@ class FullMemory(SmartMemory, SceneProfileMixin):
         except Exception as e:
             logger.debug("Failed to store prospective scene: %s", e)
 
+    def _get_quality_health_memories(
+        self,
+        *,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        min_strength: float = 0.0,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return rows that make up an agent's effective memory-health view.
+
+        Agent-specific passive observations should stay scoped to that agent,
+        but canonical personal/project knowledge is deliberately user-scoped so
+        every assistant for that user can rely on the same durable facts. Health
+        checks therefore combine exact agent rows with shared canonical/project
+        rows instead of reporting a passive-only slice for agents such as Chotu.
+        """
+        memories = self.db.get_all_memories(
+            user_id=user_id,
+            agent_id=agent_id,
+            min_strength=min_strength,
+            limit=limit,
+        )
+        if not (user_id and agent_id):
+            return memories
+
+        from dhee.memory.quality import memory_quality_from_record
+
+        seen = {str(memory.get("id")) for memory in memories if memory.get("id")}
+        shared_candidates = self.db.get_all_memories(
+            user_id=user_id,
+            min_strength=min_strength,
+            limit=limit,
+        )
+        for memory in shared_candidates:
+            memory_id = str(memory.get("id") or "")
+            if not memory_id or memory_id in seen:
+                continue
+            if memory.get("agent_id") not in (None, ""):
+                continue
+            quality = memory_quality_from_record(memory)
+            if quality.memory_class not in {"canonical_personal", "project_context"}:
+                continue
+            memories.append(memory)
+            seen.add(memory_id)
+            if limit and len(memories) >= limit:
+                break
+        return memories
+
     def get_stats(self, user_id: Optional[str] = None, agent_id: Optional[str] = None) -> Dict[str, Any]:
-        memories = self.db.get_all_memories(user_id=user_id, agent_id=agent_id)
+        memories = self._get_quality_health_memories(user_id=user_id, agent_id=agent_id)
         sml_count = sum(1 for m in memories if m.get("layer") == "sml")
         lml_count = sum(1 for m in memories if m.get("layer") == "lml")
         strengths = [m.get("strength", 1.0) for m in memories]
         avg_strength = sum(strengths) / len(strengths) if strengths else 0.0
+        from dhee.memory.quality import memory_quality_from_record
+
+        by_memory_class: Dict[str, int] = {}
+        by_namespace: Dict[str, int] = {}
+        by_memory_type: Dict[str, int] = {}
+        durable_count = 0
+        degraded_or_queued_count = 0
+        superseded_count = 0
+        shared_personal_count = 0
+        for m in memories:
+            metadata = m.get("metadata", {}) or {}
+            quality = memory_quality_from_record(m)
+            by_memory_class[quality.memory_class] = by_memory_class.get(quality.memory_class, 0) + 1
+            namespace = str(m.get("namespace") or metadata.get("namespace") or "default")
+            by_namespace[namespace] = by_namespace.get(namespace, 0) + 1
+            mem_type = str(m.get("memory_type") or metadata.get("memory_type") or "semantic")
+            by_memory_type[mem_type] = by_memory_type.get(mem_type, 0) + 1
+            if agent_id and m.get("agent_id") in (None, "") and quality.memory_class in {"canonical_personal", "project_context"}:
+                shared_personal_count += 1
+            if str(metadata.get("retention_policy") or "").lower() == "durable":
+                durable_count += 1
+            if metadata.get("degraded") or metadata.get("queued") or str(m.get("enrichment_status") or "").lower() in {"queued", "degraded", "failed"}:
+                degraded_or_queued_count += 1
+            if metadata.get("superseded"):
+                superseded_count += 1
 
         # EchoMem stats
         echo_stats = {"shallow": 0, "medium": 0, "deep": 0, "none": 0}
@@ -1873,20 +1978,704 @@ class FullMemory(SmartMemory, SceneProfileMixin):
             else:
                 echo_stats["none"] += 1
 
-        write_cost = self.db.aggregate_cost_counters(phase="write", user_id=user_id)
-        query_cost = self.db.aggregate_cost_counters(phase="query", user_id=user_id)
+        try:
+            write_cost = self.db.aggregate_cost_counters(phase="write", user_id=user_id)
+        except Exception as exc:
+            write_cost = {"phase": "write", "samples": 0, "error": f"{type(exc).__name__}: {exc}"}
+        try:
+            query_cost = self.db.aggregate_cost_counters(phase="query", user_id=user_id)
+        except Exception as exc:
+            query_cost = {"phase": "query", "samples": 0, "error": f"{type(exc).__name__}: {exc}"}
 
         return {
             "total": len(memories),
             "sml_count": sml_count,
             "lml_count": lml_count,
             "avg_strength": round(avg_strength, 3),
+            "quality": {
+                "by_memory_class": by_memory_class,
+                "by_namespace": by_namespace,
+                "by_memory_type": by_memory_type,
+                "canonical_personal_count": by_memory_class.get("canonical_personal", 0),
+                "passive_screen_count": by_memory_class.get("passive_screen", 0),
+                "test_fixture_count": by_memory_class.get("test_fixture", 0),
+                "operational_event_count": by_memory_class.get("operational_event", 0),
+                "durable_count": durable_count,
+                "degraded_or_queued_count": degraded_or_queued_count,
+                "superseded_count": superseded_count,
+                "shared_personal_count": shared_personal_count,
+                "warnings": [
+                    warning
+                    for warning in (
+                        "canonical_personal_count is zero" if by_memory_class.get("canonical_personal", 0) == 0 else "",
+                        "degraded_or_queued writes need repair" if degraded_or_queued_count else "",
+                        "test_fixture memories are present but isolated" if by_memory_class.get("test_fixture", 0) else "",
+                    )
+                    if warning
+                ],
+            },
             "echo_stats": echo_stats,
             "echo_enabled": self.echo_config.enable_echo if self.echo_config else False,
             "cost_counters": {
                 "write": write_cost,
                 "query": query_cost,
             },
+        }
+
+    def audit_memory_quality(
+        self,
+        *,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        limit: int = 10_000,
+        profile_keyword: Optional[str] = None,
+        require_personal_model: bool = True,
+    ) -> Dict[str, Any]:
+        """Return an operator-grade readiness report for the memory vault.
+
+        The audit is read-only and intentionally deterministic. It answers the
+        Chotu-class question directly: can Dhee carry a dependable personal
+        model, or are canonical facts, repair queues, or noise still broken?
+        """
+        from dhee.memory.quality import (
+            apply_memory_quality_contract,
+            enforce_quality_layer,
+            enforce_quality_strength,
+            memory_quality_from_record,
+        )
+
+        memories = self._get_quality_health_memories(
+            user_id=user_id,
+            agent_id=agent_id,
+            min_strength=0.0,
+            limit=limit,
+        )
+        profile_l = (profile_keyword or "").strip().lower()
+        by_memory_class: Dict[str, int] = {}
+        by_namespace: Dict[str, int] = {}
+        by_memory_type: Dict[str, int] = {}
+        counts = {
+            "total": len(memories),
+            "canonical_personal": 0,
+            "canonical_profile_matches": 0,
+            "project_context": 0,
+            "passive_screen": 0,
+            "test_fixture": 0,
+            "operational_event": 0,
+            "evidence_artifact": 0,
+            "lml": 0,
+            "durable": 0,
+            "degraded_or_queued": 0,
+            "superseded": 0,
+            "unresolved_test_noise": 0,
+            "unresolved_passive_noise": 0,
+            "unresolved_operational_noise": 0,
+            "unapproved_lml": 0,
+            "unpromoted_canonical": 0,
+            "damaged_canonical": 0,
+            "evidence_without_distillation": 0,
+            "contract_repairs_available": 0,
+        }
+        samples: Dict[str, List[Dict[str, Any]]] = {
+            "unresolved_test_noise": [],
+            "unresolved_passive_noise": [],
+            "unresolved_operational_noise": [],
+            "unapproved_lml": [],
+            "unpromoted_canonical": [],
+            "damaged_canonical": [],
+            "evidence_without_distillation": [],
+        }
+
+        def _sample(memory: Dict[str, Any], issue: str, updates: List[str]) -> None:
+            bucket = samples.setdefault(issue, [])
+            if len(bucket) >= 8:
+                return
+            text = " ".join(str(memory.get("memory") or "").split())
+            bucket.append(
+                {
+                    "id": memory.get("id"),
+                    "agent_id": memory.get("agent_id"),
+                    "namespace": memory.get("namespace"),
+                    "memory_type": memory.get("memory_type"),
+                    "layer": memory.get("layer"),
+                    "strength": round(float(memory.get("strength") or 0.0), 3),
+                    "preview": text[:160],
+                    "updates_needed": updates,
+                }
+            )
+
+        for memory in memories:
+            raw_metadata = memory.get("metadata")
+            if isinstance(raw_metadata, dict):
+                metadata = raw_metadata
+            elif raw_metadata not in (None, {}, []):
+                metadata = {
+                    "legacy_metadata_raw": raw_metadata,
+                    "legacy_metadata_type": type(raw_metadata).__name__,
+                }
+            else:
+                metadata = {}
+            categories = memory.get("categories") if isinstance(memory.get("categories"), list) else []
+            quality = memory_quality_from_record(memory)
+            by_memory_class[quality.memory_class] = by_memory_class.get(quality.memory_class, 0) + 1
+            namespace = str(memory.get("namespace") or metadata.get("namespace") or "default")
+            by_namespace[namespace] = by_namespace.get(namespace, 0) + 1
+            memory_type = str(memory.get("memory_type") or metadata.get("memory_type") or "semantic")
+            by_memory_type[memory_type] = by_memory_type.get(memory_type, 0) + 1
+
+            if quality.memory_class in counts:
+                counts[quality.memory_class] += 1
+            if memory.get("layer") == "lml":
+                counts["lml"] += 1
+            if str(metadata.get("retention_policy") or "").lower() == "durable":
+                counts["durable"] += 1
+            enrichment_status = str(memory.get("enrichment_status") or "").lower()
+            if metadata.get("degraded") or metadata.get("queued") or enrichment_status in {"queued", "degraded", "failed"}:
+                counts["degraded_or_queued"] += 1
+            if metadata.get("superseded"):
+                counts["superseded"] += 1
+
+            content_l = str(memory.get("memory") or "").lower()
+            metadata_l = json.dumps(metadata, sort_keys=True, default=str).lower()
+            if quality.memory_class == "canonical_personal" and profile_l and (profile_l in content_l or profile_l in metadata_l):
+                counts["canonical_profile_matches"] += 1
+
+            updated_metadata, target_quality = apply_memory_quality_contract(
+                str(memory.get("memory") or ""),
+                metadata,
+                categories,
+                explicit_remember=bool(metadata.get("policy_explicit") or metadata.get("explicit_remember")),
+            )
+            updates_needed: List[str] = []
+            if updated_metadata != metadata:
+                updates_needed.append("metadata")
+            if str(memory.get("namespace") or "default") != target_quality.namespace:
+                updates_needed.append("namespace")
+            if str(memory.get("memory_type") or "semantic") != target_quality.memory_type:
+                updates_needed.append("memory_type")
+            target_layer = enforce_quality_layer(str(memory.get("layer") or "sml"), target_quality)
+            if target_layer != memory.get("layer"):
+                updates_needed.append("layer")
+            target_strength = enforce_quality_strength(float(memory.get("strength") or 0.0), target_quality)
+            if abs(target_strength - float(memory.get("strength") or 0.0)) > 1e-9:
+                updates_needed.append("strength")
+            if enrichment_status in {"queued", "degraded", "failed"}:
+                updates_needed.append("enrichment_status")
+
+            if updates_needed:
+                counts["contract_repairs_available"] += 1
+
+            if target_quality.memory_class == "test_fixture" and updates_needed:
+                counts["unresolved_test_noise"] += 1
+                _sample(memory, "unresolved_test_noise", updates_needed)
+            if target_quality.memory_class == "passive_screen" and updates_needed:
+                counts["unresolved_passive_noise"] += 1
+                _sample(memory, "unresolved_passive_noise", updates_needed)
+            if target_quality.memory_class == "operational_event" and updates_needed:
+                counts["unresolved_operational_noise"] += 1
+                _sample(memory, "unresolved_operational_noise", updates_needed)
+            if memory.get("layer") == "lml" and target_quality.layer != "lml":
+                counts["unapproved_lml"] += 1
+                _sample(memory, "unapproved_lml", updates_needed or ["layer"])
+            if target_quality.memory_class == "canonical_personal" and updates_needed:
+                counts["unpromoted_canonical"] += 1
+                _sample(memory, "unpromoted_canonical", updates_needed)
+            if target_quality.memory_class in {"evidence_artifact", "passive_screen"} and not metadata.get("evidence_distillation"):
+                counts["evidence_without_distillation"] += 1
+                _sample(memory, "evidence_without_distillation", updates_needed or ["evidence_distillation"])
+
+            looks_canonical = (
+                quality.memory_class == "canonical_personal"
+                or target_quality.memory_class == "canonical_personal"
+                or namespace == "canonical_personal"
+                or bool(metadata.get("canonical_personal"))
+            )
+            if looks_canonical and (
+                metadata.get("superseded")
+                or float(memory.get("strength") or 0.0) < 0.2
+                or memory.get("layer") != "lml"
+                or enrichment_status in {"queued", "degraded", "failed"}
+            ):
+                counts["damaged_canonical"] += 1
+                _sample(memory, "damaged_canonical", updates_needed or ["canonical_integrity"])
+
+        checks: List[Dict[str, Any]] = []
+
+        def _check(name: str, passed: bool, severity: str, detail: str) -> None:
+            checks.append(
+                {
+                    "name": name,
+                    "passed": bool(passed),
+                    "severity": severity,
+                    "detail": detail,
+                }
+            )
+
+        _check("stats_available", True, "critical", f"Scanned {len(memories)} active memories.")
+        if require_personal_model:
+            _check(
+                "canonical_personal_present",
+                counts["canonical_personal"] > 0,
+                "critical",
+                f"{counts['canonical_personal']} canonical personal memories found.",
+            )
+            if profile_l:
+                _check(
+                    "profile_keyword_grounded",
+                    counts["canonical_profile_matches"] > 0,
+                    "critical",
+                    f"{counts['canonical_profile_matches']} canonical memories mention {profile_keyword!r}.",
+                )
+            _check(
+                "lml_personal_layer_present",
+                counts["lml"] > 0,
+                "critical",
+                f"{counts['lml']} long-memory-layer records found.",
+            )
+        _check(
+            "no_unresolved_test_noise",
+            counts["unresolved_test_noise"] == 0,
+            "critical",
+            f"{counts['unresolved_test_noise']} test-like memories still need isolation.",
+        )
+        _check(
+            "no_unresolved_passive_noise",
+            counts["unresolved_passive_noise"] == 0,
+            "critical",
+            f"{counts['unresolved_passive_noise']} passive observations still need isolation.",
+        )
+        _check(
+            "no_unresolved_operational_noise",
+            counts["unresolved_operational_noise"] == 0,
+            "critical",
+            f"{counts['unresolved_operational_noise']} tool/session transport memories still need isolation.",
+        )
+        _check(
+            "no_unapproved_lml",
+            counts["unapproved_lml"] == 0,
+            "critical",
+            f"{counts['unapproved_lml']} non-canonical memories are still in the long-memory layer.",
+        )
+        _check(
+            "canonical_integrity",
+            counts["damaged_canonical"] == 0,
+            "critical",
+            f"{counts['damaged_canonical']} canonical-looking memories are superseded, weak, or queued.",
+        )
+        _check(
+            "repair_queue_clear",
+            counts["degraded_or_queued"] == 0,
+            "critical",
+            f"{counts['degraded_or_queued']} memories are degraded, queued, or failed.",
+        )
+        _check(
+            "evidence_distilled",
+            counts["evidence_without_distillation"] == 0,
+            "warning",
+            f"{counts['evidence_without_distillation']} evidence/passive records lack structured distillation.",
+        )
+
+        failed_critical = [check for check in checks if check["severity"] == "critical" and not check["passed"]]
+        failed_warnings = [check for check in checks if check["severity"] == "warning" and not check["passed"]]
+        penalty = len(failed_critical) * 18 + len(failed_warnings) * 6
+        penalty += min(20, counts["contract_repairs_available"] // 25)
+        score = max(0, min(100, 100 - penalty))
+
+        recommended_actions: List[str] = []
+        if counts["contract_repairs_available"]:
+            recommended_actions.append("Run repair_memory_quality with dry_run=false, then rerun this audit.")
+        if counts["degraded_or_queued"]:
+            recommended_actions.append("Run enrich_pending after repair to reconcile queued/degraded rows.")
+        if require_personal_model and counts["canonical_personal"] == 0:
+            recommended_actions.append("Ingest explicit goals, preferences, decisions, style, and product philosophy as canonical personal memories.")
+        if profile_l and counts["canonical_profile_matches"] == 0:
+            recommended_actions.append(f"Ingest or promote canonical memories grounded to {profile_keyword!r}.")
+
+        status = "ready" if not failed_critical else "needs_repair"
+        if require_personal_model and counts["canonical_personal"] == 0:
+            status = "needs_canonical_intake"
+
+        return {
+            "status": status,
+            "ready": not failed_critical,
+            "score": score,
+            "scope": {
+                "user_id": user_id,
+                "agent_id": agent_id,
+                "limit": limit,
+                "profile_keyword": profile_keyword,
+                "require_personal_model": require_personal_model,
+            },
+            "counts": counts,
+            "by_memory_class": by_memory_class,
+            "by_namespace": by_namespace,
+            "by_memory_type": by_memory_type,
+            "readiness_checks": checks,
+            "sample_issues": {key: value for key, value in samples.items() if value},
+            "recommended_actions": recommended_actions,
+        }
+
+    def repair_memory_quality(
+        self,
+        *,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        limit: int = 10_000,
+        dry_run: bool = True,
+        reindex_vectors: bool = False,
+    ) -> Dict[str, Any]:
+        """Reconcile existing memories with the current quality contract.
+
+        This is the production repair path for old Chotu/Dhee vaults: it
+        promotes canonical personal truths, isolates passive/test noise, and
+        reopens degraded queued enrichment rows without rewriting memory text.
+        Set ``reindex_vectors`` when repairing a vault that may contain DB-only
+        rows from previous vector-write failures.
+        """
+        from dhee.memory.quality import (
+            apply_memory_quality_contract,
+            enforce_quality_layer,
+            enforce_quality_strength,
+        )
+
+        memories = self.db.get_all_memories(
+            user_id=user_id,
+            agent_id=agent_id,
+            min_strength=0.0,
+            limit=limit,
+        )
+        repaired: List[Dict[str, Any]] = []
+        counts = {
+            "canonical_promoted": 0,
+            "passive_isolated": 0,
+            "test_isolated": 0,
+            "operational_isolated": 0,
+            "ordinary_demoted_from_lml": 0,
+            "queued_reopened": 0,
+            "malformed_metadata_normalized": 0,
+        }
+        for memory in memories:
+            raw_metadata = memory.get("metadata")
+            if isinstance(raw_metadata, dict):
+                metadata = dict(raw_metadata)
+                if "legacy_metadata_raw" in metadata and "legacy_metadata_type" in metadata:
+                    counts["malformed_metadata_normalized"] += 1
+            elif raw_metadata not in (None, {}, []):
+                metadata = {
+                    "legacy_metadata_raw": raw_metadata,
+                    "legacy_metadata_type": type(raw_metadata).__name__,
+                }
+                counts["malformed_metadata_normalized"] += 1
+            else:
+                metadata = {}
+            categories = memory.get("categories") if isinstance(memory.get("categories"), list) else []
+            updated_metadata, quality = apply_memory_quality_contract(
+                str(memory.get("memory") or ""),
+                metadata,
+                categories,
+                explicit_remember=bool(metadata.get("policy_explicit") or metadata.get("explicit_remember")),
+            )
+            updates: Dict[str, Any] = {}
+            if updated_metadata != metadata:
+                updates["metadata"] = updated_metadata
+            if str(memory.get("namespace") or "default") != quality.namespace:
+                updates["namespace"] = quality.namespace
+            if str(memory.get("memory_type") or "semantic") != quality.memory_type:
+                updates["memory_type"] = quality.memory_type
+            repaired_layer = enforce_quality_layer(str(memory.get("layer") or "sml"), quality)
+            if repaired_layer != memory.get("layer"):
+                updates["layer"] = repaired_layer
+            repaired_strength = enforce_quality_strength(float(memory.get("strength") or 0.0), quality)
+            if abs(repaired_strength - float(memory.get("strength") or 0.0)) > 1e-9:
+                updates["strength"] = repaired_strength
+            current_enrichment = str(memory.get("enrichment_status") or "").lower()
+            if current_enrichment in {"queued", "degraded", "failed"}:
+                updates["enrichment_status"] = "pending"
+                counts["queued_reopened"] += 1
+
+            if not updates:
+                continue
+            if quality.memory_class == "canonical_personal":
+                counts["canonical_promoted"] += 1
+            elif quality.memory_class == "passive_screen":
+                counts["passive_isolated"] += 1
+            elif quality.memory_class == "test_fixture":
+                counts["test_isolated"] += 1
+            elif quality.memory_class == "operational_event":
+                counts["operational_isolated"] += 1
+            elif quality.memory_class == "ordinary" and "layer" in updates:
+                counts["ordinary_demoted_from_lml"] += 1
+
+            item = {
+                "id": memory.get("id"),
+                "memory_class": quality.memory_class,
+                "updates": sorted(updates.keys()),
+            }
+            repaired.append(item)
+            if not dry_run:
+                self.db.update_memory(str(memory["id"]), updates)
+                payload_updates: Dict[str, Any] = {}
+                if "metadata" in updates:
+                    payload_updates.update(updates["metadata"])
+                for key in ("namespace", "memory_type", "layer", "strength"):
+                    if key in updates:
+                        payload_updates[key] = updates[key]
+                if payload_updates:
+                    self._update_vectors_for_memory(str(memory["id"]), payload_updates)
+
+        result = {
+            "dry_run": dry_run,
+            "scanned_count": len(memories),
+            "repair_count": len(repaired),
+            **counts,
+            "repairs": repaired[:200],
+            "truncated_repairs": max(0, len(repaired) - 200),
+        }
+        if reindex_vectors:
+            result["vector_repair"] = self.repair_memory_vectors(
+                user_id=user_id,
+                agent_id=agent_id,
+                limit=limit,
+                dry_run=dry_run,
+            )
+        return result
+
+    def _primary_vector_payload_for_memory(self, memory: Dict[str, Any]) -> Dict[str, Any]:
+        metadata = _metadata_dict(memory.get("metadata"))
+        categories = list(memory.get("categories") or [])
+        content = str(memory.get("memory") or "")
+        payload = dict(metadata)
+        payload.update(
+            {
+                "memory_id": memory.get("id"),
+                "user_id": memory.get("user_id"),
+                "agent_id": memory.get("agent_id"),
+                "run_id": memory.get("run_id"),
+                "app_id": memory.get("app_id"),
+                "categories": categories,
+                "text": content,
+                "type": "primary",
+                "memory": content,
+                "layer": memory.get("layer", "sml"),
+                "strength": memory.get("strength", 1.0),
+                "namespace": memory.get("namespace") or metadata.get("namespace") or "default",
+                "memory_type": memory.get("memory_type") or metadata.get("memory_type") or "semantic",
+                "confidentiality_scope": memory.get("confidentiality_scope", "work"),
+                "source_type": memory.get("source_type"),
+                "source_app": memory.get("source_app"),
+                "source_event_id": memory.get("source_event_id"),
+            }
+        )
+        return payload
+
+    @staticmethod
+    def _vector_payload_is_current(payload: Dict[str, Any], expected: Dict[str, Any]) -> bool:
+        keys = (
+            "memory_id",
+            "user_id",
+            "agent_id",
+            "run_id",
+            "app_id",
+            "categories",
+            "text",
+            "type",
+            "memory",
+            "layer",
+            "strength",
+            "namespace",
+            "memory_type",
+            "confidentiality_scope",
+            "source_type",
+            "source_app",
+            "source_event_id",
+            "dhee_memory_class",
+            "canonical_kind",
+            "retention_policy",
+        )
+        for key in keys:
+            if payload.get(key) != expected.get(key):
+                return False
+        return True
+
+    @staticmethod
+    def _merge_vector_payload(
+        current: Dict[str, Any],
+        expected: Dict[str, Any],
+        *,
+        primary: bool,
+    ) -> Dict[str, Any]:
+        """Merge authoritative DB metadata without flattening echo-node text."""
+        if primary:
+            return dict(expected)
+        node_specific = {"text", "type", "subtype", "memory", "category", "fact_text", "fact_index", "is_fact"}
+        merged = dict(current or {})
+        for key, value in expected.items():
+            if key in node_specific and key in merged:
+                continue
+            merged[key] = value
+        return merged
+
+    def repair_memory_vectors(
+        self,
+        *,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        limit: int = 10_000,
+        dry_run: bool = True,
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        """Reconcile the vector index with authoritative DB memory rows.
+
+        This is intentionally model-free for existing rows: it uses the stored
+        DB embedding and rebuilds the primary vector payload. That makes it safe
+        for production repair queues where API keys or provider extras may be
+        unavailable, while restoring semantic recall for DB-only memories.
+        """
+        memories = self.db.get_all_memories(
+            user_id=user_id,
+            agent_id=agent_id,
+            min_strength=0.0,
+            limit=limit,
+        )
+        try:
+            vector_info = self.vector_store.col_info() if self.vector_store else {}
+        except Exception:
+            vector_info = {}
+        vector_backend = getattr(self.vector_store, "__class__", type("", (), {})).__name__ if self.vector_store else None
+        expected_dims = vector_info.get("vector_size") or vector_info.get("dimension")
+
+        repaired: List[Dict[str, Any]] = []
+        errors: List[Dict[str, Any]] = []
+        counts = {
+            "missing_vector": 0,
+            "payload_stale": 0,
+            "forced_reindex": 0,
+            "missing_embedding": 0,
+            "dimension_mismatch": 0,
+            "vector_errors": 0,
+        }
+
+        for memory in memories:
+            memory_id = str(memory.get("id") or "")
+            if not memory_id:
+                continue
+            embedding = memory.get("embedding")
+            if not isinstance(embedding, list) or not embedding:
+                counts["missing_embedding"] += 1
+                continue
+            if expected_dims:
+                try:
+                    if len(embedding) != int(expected_dims):
+                        counts["dimension_mismatch"] += 1
+                        errors.append(
+                            {
+                                "id": memory_id,
+                                "error": "embedding_dimension_mismatch",
+                                "embedding_dims": len(embedding),
+                                "vector_store_dims": int(expected_dims),
+                            }
+                        )
+                        continue
+                except (TypeError, ValueError):
+                    pass
+
+            payload = self._primary_vector_payload_for_memory(memory)
+            try:
+                vectors = self.vector_store.list(filters={"memory_id": memory_id}) if self.vector_store else []
+            except Exception as exc:
+                counts["vector_errors"] += 1
+                errors.append({"id": memory_id, "error": f"list_failed: {exc}"})
+                continue
+
+            primary = None
+            try:
+                primary = self.vector_store.get(memory_id) if self.vector_store else None
+            except Exception:
+                primary = None
+            primary_payload = getattr(primary, "payload", None) or {}
+            has_primary = primary is not None
+            has_linked_vectors = bool(vectors)
+            payload_current = (
+                has_primary
+                and self._vector_payload_is_current(primary_payload, payload)
+                and all(
+                    self._vector_payload_is_current(getattr(vec, "payload", None) or {}, payload)
+                    for vec in vectors
+                    if getattr(vec, "id", None) == memory_id
+                )
+            )
+
+            action = None
+            if force:
+                counts["forced_reindex"] += 1
+                action = "force_reindex"
+            elif not has_primary and not has_linked_vectors:
+                counts["missing_vector"] += 1
+                action = "insert_primary"
+            elif not has_primary:
+                counts["missing_vector"] += 1
+                action = "insert_primary"
+            elif not payload_current:
+                counts["payload_stale"] += 1
+                action = "update_payload"
+
+            if not action:
+                continue
+
+            repaired.append(
+                {
+                    "id": memory_id,
+                    "action": action,
+                    "vector_count": len(vectors) + (1 if has_primary and not has_linked_vectors else 0),
+                }
+            )
+            if dry_run:
+                continue
+
+            try:
+                if force:
+                    self._delete_vectors_for_memory(memory_id)
+                    self.vector_store.insert(vectors=[embedding], payloads=[payload], ids=[memory_id])
+                elif action == "insert_primary":
+                    self.vector_store.insert(vectors=[embedding], payloads=[payload], ids=[memory_id])
+                    for vec in vectors:
+                        vec_payload = getattr(vec, "payload", None) or {}
+                        merged_payload = self._merge_vector_payload(
+                            vec_payload,
+                            payload,
+                            primary=getattr(vec, "id", None) == memory_id,
+                        )
+                        self.vector_store.update(vec.id, payload=merged_payload)
+                else:
+                    targets = vectors or ([primary] if primary else [])
+                    if primary and all(getattr(vec, "id", None) != memory_id for vec in targets):
+                        targets.append(primary)
+                    for vec in targets:
+                        vec_payload = getattr(vec, "payload", None) or {}
+                        merged_payload = self._merge_vector_payload(
+                            vec_payload,
+                            payload,
+                            primary=getattr(vec, "id", None) == memory_id,
+                        )
+                        self.vector_store.update(vec.id, payload=merged_payload)
+            except Exception as exc:
+                counts["vector_errors"] += 1
+                errors.append({"id": memory_id, "error": str(exc)})
+
+        return {
+            "dry_run": dry_run,
+            "force": force,
+            "scanned_count": len(memories),
+            "repair_count": len(repaired),
+            "vector_store": {
+                "backend": vector_backend,
+                "info": vector_info,
+            },
+            **counts,
+            "repairs": repaired[:200],
+            "truncated_repairs": max(0, len(repaired) - 200),
+            "errors": errors[:50],
+            "truncated_errors": max(0, len(errors) - 50),
         }
 
     def snapshot_cost_baseline(self, *, output_path: str, user_id: Optional[str] = None) -> Dict[str, Any]:
@@ -2134,7 +2923,7 @@ class FullMemory(SmartMemory, SceneProfileMixin):
         if demote:
             self._demote_existing(memory, reason=f"manual:{resolution}")
             memory = self.db.get_memory(memory_id) or memory
-        metadata = dict(memory.get("metadata", {}) or {})
+        metadata = _metadata_dict(memory.get("metadata"))
         metadata["manual_conflict_resolution"] = {
             "conflict_id": conflict_id,
             "resolution": resolution,
@@ -2315,16 +3104,37 @@ class FullMemory(SmartMemory, SceneProfileMixin):
             "merged_memory_id": merged_memory_id,
         }
 
-    def _demote_existing(self, memory: Dict[str, Any], reason: str) -> None:
+    def _demote_existing(
+        self,
+        memory: Dict[str, Any],
+        reason: str,
+        *,
+        superseded_by: Optional[str] = None,
+        force: bool = False,
+    ) -> None:
         if not memory:
+            return
+        from dhee.memory.quality import is_protected_canonical_memory
+
+        if is_protected_canonical_memory(memory) and not force:
+            self.db.log_event(
+                memory["id"],
+                "DEMOTE_BLOCKED_CANONICAL",
+                old_strength=memory.get("strength"),
+                new_strength=memory.get("strength"),
+                old_layer=memory.get("layer"),
+                new_layer=memory.get("layer"),
+            )
             return
         old_strength = float(memory.get("strength", 1.0))
         old_layer = memory.get("layer", "sml")
         new_strength = min(old_strength, 0.05)
-        metadata = dict(memory.get("metadata", {}))
+        metadata = _metadata_dict(memory.get("metadata"))
         metadata["superseded"] = True
         metadata["superseded_reason"] = reason
         metadata["superseded_at"] = datetime.now(timezone.utc).isoformat()
+        if superseded_by:
+            metadata["superseded_by_id"] = superseded_by
 
         self.db.update_memory(
             memory["id"],
@@ -2382,6 +3192,13 @@ class FullMemory(SmartMemory, SceneProfileMixin):
 
     def _check_promotion(self, memory_id: str) -> None:
         memory = self.db.get_memory(memory_id)
+        if not memory:
+            return
+        from dhee.memory.quality import memory_quality_from_record
+
+        quality = memory_quality_from_record(memory)
+        if quality.layer != "lml" or quality.suppress_from_default_recall:
+            return
         if memory and should_promote(
             memory.get("layer", "sml"),
             memory.get("access_count", 0),

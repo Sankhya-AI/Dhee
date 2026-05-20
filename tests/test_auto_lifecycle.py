@@ -16,6 +16,7 @@ from dhee.simple import Dhee, Engram
 def dhee(tmp_path):
     """Create a Dhee instance with in-memory storage and short timeout."""
     d = Dhee(
+        provider="mock",
         in_memory=True,
         data_dir=str(tmp_path),
         session_timeout=1.0,  # 1 second for testing
@@ -113,7 +114,7 @@ class TestAutoInference:
 
     def test_checkpoint_surfaces_session_and_enrichment_errors(self, tmp_path, monkeypatch):
         """checkpoint() should report degraded lifecycle work instead of hiding it."""
-        d = Dhee(in_memory=True, data_dir=str(tmp_path))
+        d = Dhee(provider="mock", in_memory=True, data_dir=str(tmp_path))
 
         def fail_digest(**_kwargs):
             raise RuntimeError("handoff store offline")
@@ -153,13 +154,13 @@ class TestDisableAuto:
     """Verify auto features can be disabled."""
 
     def test_disable_auto_context(self, tmp_path):
-        d = Dhee(in_memory=True, data_dir=str(tmp_path), auto_context=False)
+        d = Dhee(provider="mock", in_memory=True, data_dir=str(tmp_path), auto_context=False)
         d.remember("hello")
         assert d._tracker.context_loaded is False
 
     def test_disable_auto_checkpoint(self, tmp_path):
         d = Dhee(
-            in_memory=True, data_dir=str(tmp_path),
+            provider="mock", in_memory=True, data_dir=str(tmp_path),
             auto_checkpoint=False, session_timeout=1.0,
         )
         d.remember("session 1")

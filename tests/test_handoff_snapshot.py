@@ -107,4 +107,94 @@ def test_handoff_filters_fixture_memories_from_recent_context(tmp_path, monkeypa
 
     assert [row["id"] for row in snapshot["recent_memories"]] == ["real-memory"]
     assert snapshot["continuity_hygiene"]["filtered_recent_memory_count"] == 1
-    assert "test fixture source" in snapshot["continuity_hygiene"]["filtered_recent_memory_reasons"]
+    assert snapshot["continuity_hygiene"]["filtered_recent_memory_reasons"]["suppressed:test_fixture"] == 1
+
+
+def test_handoff_filters_legacy_placeholder_memories_from_recent_context(tmp_path, monkeypatch):
+    monkeypatch.setenv("DHEE_DATA_DIR", str(tmp_path / "dhee-data"))
+    db = SQLiteManager(str(tmp_path / "history.db"))
+    for memory_id, text in (
+        ("memory-one", "Memory one"),
+        ("default-user-memory", "Default user memory"),
+        ("hashed-python", "I like Python 14cdcdeb"),
+    ):
+        db.add_memory(
+            {
+                "id": memory_id,
+                "memory": text,
+                "user_id": "default",
+                "content_hash": f"{memory_id}-hash",
+            }
+        )
+    db.add_memory(
+        {
+            "id": "real-memory",
+            "memory": "Chotu assistant decisions must be recalled with evidence.",
+            "user_id": "default",
+            "metadata": {"source_type": "agent"},
+            "content_hash": "real-memory-hash",
+        }
+    )
+    monkeypatch.setattr("dhee.core.thread_state.get_last_session", lambda **_: None)
+
+    snapshot = build_handoff_snapshot(db, user_id="default", repo=str(tmp_path), memory_limit=5)
+
+    assert [row["id"] for row in snapshot["recent_memories"]] == ["real-memory"]
+    assert snapshot["continuity_hygiene"]["filtered_recent_memory_count"] == 3
+
+
+def test_handoff_filters_operational_transport_memories(tmp_path, monkeypatch):
+    monkeypatch.setenv("DHEE_DATA_DIR", str(tmp_path / "dhee-data"))
+    db = SQLiteManager(str(tmp_path / "history.db"))
+    db.add_memory(
+        {
+            "id": "edit-event",
+            "memory": "edited /src/auth.py",
+            "user_id": "default",
+            "metadata": {"kind": "file_touched", "tool": "Edit", "success": True},
+            "content_hash": "edit-event-hash",
+        }
+    )
+    db.add_memory(
+        {
+            "id": "real-memory",
+            "memory": "Chotu assistant decisions must be recalled with evidence.",
+            "user_id": "default",
+            "metadata": {"source_type": "agent"},
+            "content_hash": "real-memory-hash",
+        }
+    )
+    monkeypatch.setattr("dhee.core.thread_state.get_last_session", lambda **_: None)
+
+    snapshot = build_handoff_snapshot(db, user_id="default", repo=str(tmp_path), memory_limit=5)
+
+    assert [row["id"] for row in snapshot["recent_memories"]] == ["real-memory"]
+    assert snapshot["continuity_hygiene"]["filtered_recent_memory_reasons"]["suppressed:operational_event"] == 1
+
+
+def test_handoff_survives_legacy_scalar_metadata(tmp_path, monkeypatch):
+    monkeypatch.setenv("DHEE_DATA_DIR", str(tmp_path / "dhee-data"))
+    db = SQLiteManager(str(tmp_path / "history.db"))
+    db.add_memory(
+        {
+            "id": "legacy-scalar",
+            "memory": "Chotu should preserve user goals as canonical context.",
+            "user_id": "default",
+            "metadata": {"source_type": "agent"},
+            "content_hash": "legacy-scalar-hash",
+        }
+    )
+    with db._get_connection() as conn:
+        conn.execute(
+            "UPDATE memories SET metadata = ? WHERE id = ?",
+            (json.dumps("legacy metadata string"), "legacy-scalar"),
+        )
+    monkeypatch.setattr("dhee.core.thread_state.get_last_session", lambda **_: None)
+
+    memory = db.get_memory("legacy-scalar")
+    assert memory["metadata"]["legacy_metadata_raw"] == "legacy metadata string"
+
+    snapshot = build_handoff_snapshot(db, user_id="default", repo=str(tmp_path), memory_limit=5)
+
+    assert snapshot["format"] == "dhee_handoff"
+    assert snapshot["recent_memories"][0]["id"] == "legacy-scalar"

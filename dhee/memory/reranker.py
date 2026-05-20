@@ -20,19 +20,20 @@ class NvidiaReranker:
 
     _DEFAULT_URL = (
         "https://ai.api.nvidia.com/v1/retrieval/"
-        "nvidia/llama-3_2-nv-rerankqa-1b-v2/reranking"
+        "nvidia/llama-nemotron-rerank-vl-1b-v2/reranking"
     )
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         config = config or {}
-        self.model = config.get("model", "nvidia/llama-3.2-nv-rerankqa-1b-v2")
+        self.model = config.get("model", "nvidia/llama-nemotron-rerank-vl-1b-v2")
         api_key_env = config.get("api_key_env", "NVIDIA_API_KEY")
         self.api_key = config.get("api_key") or os.getenv(api_key_env)
         if not self.api_key:
             raise ValueError(
                 f"NVIDIA API key required for reranker. Set config['api_key'] or {api_key_env} env var."
             )
-        # Build URL from model name: replace / with _ and dots with _
+        # Build URL from model name: dots become underscores for legacy
+        # llama-3.2 model endpoints; slashes remain path separators.
         # e.g. nvidia/llama-3.2-nv-rerankqa-1b-v2 -> nvidia/llama-3_2-nv-rerankqa-1b-v2
         model_path = self.model.replace(".", "_")
         self.url = config.get(

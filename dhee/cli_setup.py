@@ -4,12 +4,13 @@ import logging
 import os
 
 from dhee.cli_config import (
-    CONFIG_DIR,
     PROVIDER_DEFAULTS,
+    get_config_path,
     load_config,
     save_config,
 )
 from dhee.harness.install import install_harnesses
+from dhee.provider_defaults import DEFAULT_COLLECTION, provider_defaults
 from dhee.utils.factory import _detect_provider
 
 logger = logging.getLogger(__name__)
@@ -25,10 +26,21 @@ def run_setup() -> None:
 
     # Auto-detect provider
     embedder_provider, llm_provider = _detect_provider()
+    defaults = provider_defaults(embedder_provider)
     config["provider"] = embedder_provider
+    config["llm_model"] = defaults["llm_model"]
+    config["embedder_model"] = defaults["embedder_model"]
+    config["embedding_dims"] = defaults["embedding_dims"]
+    config["vector_store"] = {
+        "provider": "zvec",
+        "config": {
+            "collection_name": DEFAULT_COLLECTION,
+            "embedding_model_dims": defaults["embedding_dims"],
+        },
+    }
     config["auto_configured"] = True
 
-    if embedder_provider in ("gemini", "openai"):
+    if embedder_provider in ("nvidia", "gemini", "openai"):
         defaults = PROVIDER_DEFAULTS.get(embedder_provider, {})
         env_var = defaults.get("env_var", f"{embedder_provider.upper()}_API_KEY")
         key = os.environ.get(env_var, "")
@@ -50,7 +62,7 @@ def run_setup() -> None:
 
     # Save config
     save_config(config)
-    print(f"\n  Config saved to {os.path.join(CONFIG_DIR, 'config.json')}")
+    print(f"\n  Config saved to {get_config_path()}")
 
     # Auto-configure native harnesses
     print("\n  Configuring native harness integrations...")

@@ -389,6 +389,114 @@ class ContextWorkspace:
             agent_id=self.agent_id,
         )
 
+    def infer_current_goal(self) -> str:
+        """Best-effort goal for /state when compiled state has not seen a prompt."""
+        try:
+            shared = self.shared_snapshot()
+            task = shared.get("task") if isinstance(shared, dict) else None
+            if isinstance(task, dict):
+                for key in ("current_goal", "title", "summary", "task_summary", "prompt"):
+                    value = str(task.get(key) or "").strip()
+                    if value:
+                        return value[:320]
+        except Exception:
+            pass
+
+        if not self.db or not hasattr(self.db, "get_all_memories"):
+            return ""
+
+        try:
+            from dhee.memory.quality import memory_quality_from_record
+
+            memories = self.db.get_all_memories(
+                user_id=self.user_id,
+                min_strength=0.0,
+                limit=300,
+            )
+            candidates: List[Tuple[float, str]] = []
+            for memory in memories:
+                text = str(memory.get("memory") or "").strip()
+                if not text:
+                    continue
+                quality = memory_quality_from_record(memory)
+                metadata = memory.get("metadata") if isinstance(memory.get("metadata"), dict) else {}
+                kind = str(quality.canonical_kind or metadata.get("canonical_kind") or "").lower()
+                if quality.memory_class not in {"canonical_personal", "project_context"}:
+                    continue
+                if kind not in {"goal", "project", "product", "product_philosophy", "decision"}:
+                    continue
+                strength = float(memory.get("strength") or 0.0)
+                score = strength + (0.5 if quality.memory_class == "canonical_personal" else 0.0)
+                candidates.append((score, text))
+            if candidates:
+                return sorted(candidates, key=lambda item: item[0], reverse=True)[0][1][:320]
+        except Exception:
+            return ""
+        return ""
+
+    def memory_source_rows(self, *, view: str = "recent", query: str = "", limit: int = 50) -> List[Dict[str, Any]]:
+        """Return bounded memory rows for the built-in /sources/memory mount."""
+        if not self.db or not hasattr(self.db, "get_all_memories"):
+            return []
+        try:
+            from dhee.memory.quality import memory_quality_from_record
+
+            memories = self.db.get_all_memories(
+                user_id=self.user_id,
+                min_strength=0.0,
+                limit=max(100, min(max(limit * 5, 100), 500)),
+            )
+            query_terms = {
+                token
+                for token in re.findall(r"\b[a-z0-9][a-z0-9_-]{2,}\b", query.lower())
+                if len(token) > 2
+            }
+            rows: List[Dict[str, Any]] = []
+            for memory in memories:
+                text = str(memory.get("memory") or "")
+                metadata = memory.get("metadata") if isinstance(memory.get("metadata"), dict) else {}
+                quality = memory_quality_from_record(memory)
+                if view == "canonical" and quality.memory_class not in {"canonical_personal", "project_context"}:
+                    continue
+                if view == "passive-screen" and quality.memory_class != "passive_screen":
+                    continue
+                if view == "test" and quality.memory_class != "test_fixture":
+                    continue
+                if query_terms:
+                    haystack = " ".join(
+                        [
+                            text,
+                            str(memory.get("namespace") or ""),
+                            str(memory.get("source_app") or ""),
+                            str(metadata.get("canonical_kind") or ""),
+                            str(metadata.get("source") or ""),
+                        ]
+                    ).lower()
+                    if not all(term in haystack for term in query_terms):
+                        continue
+                rows.append(
+                    {
+                        "id": memory.get("id"),
+                        "title": text.splitlines()[0][:120],
+                        "memory": text[:500],
+                        "memory_class": quality.memory_class,
+                        "canonical_kind": quality.canonical_kind,
+                        "namespace": memory.get("namespace") or metadata.get("namespace") or "default",
+                        "memory_type": memory.get("memory_type") or metadata.get("memory_type"),
+                        "source_app": memory.get("source_app") or metadata.get("source_app"),
+                        "source_type": memory.get("source_type") or metadata.get("source_type"),
+                        "source_event_id": memory.get("source_event_id") or metadata.get("source_event_id"),
+                        "confidence": metadata.get("confidence"),
+                        "strength": memory.get("strength"),
+                        "created_at": memory.get("created_at"),
+                    }
+                )
+                if len(rows) >= limit:
+                    break
+            return rows
+        except Exception:
+            return []
+
     def context_status(self) -> Dict[str, Any]:
         return self.context_state_store().status()
 

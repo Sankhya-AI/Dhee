@@ -5,6 +5,17 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 
+def _metadata_dict(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if value not in (None, "", [], {}):
+        return {
+            "legacy_metadata_raw": value,
+            "legacy_metadata_type": type(value).__name__,
+        }
+    return {}
+
+
 def _artifact_summary(db: Any, artifact_id: str) -> Optional[Dict[str, Any]]:
     artifact = db.get_artifact(artifact_id)
     if artifact is None:
@@ -45,7 +56,7 @@ def explain_memory(
     if memory is None:
         return {"error": "Memory not found", "memory_id": memory_id}
 
-    metadata = dict(memory.get("metadata") or {})
+    metadata = _metadata_dict(memory.get("metadata"))
     history = db.get_history(memory_id)[: max(1, history_limit)]
     artifact_id = str(metadata.get("artifact_id") or "").strip()
     artifact = _artifact_summary(db, artifact_id) if artifact_id else None

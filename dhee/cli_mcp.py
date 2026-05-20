@@ -6,6 +6,7 @@ import sys
 from typing import Any, Dict, List, Tuple
 
 from dhee.cli_config import PROVIDER_DEFAULTS
+from dhee.provider_defaults import DEFAULT_PROVIDER
 
 
 def _dhee_mcp_entry() -> str:
@@ -23,7 +24,7 @@ def _dhee_mcp_entry() -> str:
 
 def _build_env_block(config: Dict[str, Any]) -> Dict[str, str]:
     """Build env vars to inject into MCP config."""
-    provider = config.get("provider", "gemini")
+    provider = config.get("provider", DEFAULT_PROVIDER)
     defaults = PROVIDER_DEFAULTS.get(provider, {})
     env_var = defaults.get("env_var")
     env = {}

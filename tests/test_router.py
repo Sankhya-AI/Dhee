@@ -348,6 +348,49 @@ class TestHandlersRoundTrip:
         assert "focus:" in res["digest"]
         assert res["focus_count"] >= 1
 
+    def test_bounded_read_returns_inline_source_window_without_expansion(self, router_tmp, tmp_path):
+        from dhee.router import handlers, ptr_store
+
+        src = tmp_path / "mod.py"
+        src.write_text("".join(f"line_{i} = {i}\n" for i in range(1, 80)))
+
+        res = handlers.handle_dhee_read({"file_path": str(src), "offset": 20, "limit": 6})
+
+        assert res["ptr"]
+        assert res["bounded_source_included"] is True
+        assert res["source_window"]["start_line"] == 20
+        assert res["source_window"]["end_line"] == 25
+        assert "  20 | line_20 = 20" in res["source_window"]["numbered_source"]
+        assert res["pointer_recovery"]["if_expand_unavailable"].startswith("call dhee_read again")
+        meta = ptr_store.load_meta(res["ptr"])
+        assert meta["source_window_included"] is True
+
+    def test_unbounded_read_keeps_raw_behind_pointer_but_explains_recovery(self, router_tmp, tmp_path):
+        from dhee.router import handlers
+
+        src = tmp_path / "mod.py"
+        src.write_text("".join(f"line_{i} = {i}\n" for i in range(1, 260)))
+
+        res = handlers.handle_dhee_read({"file_path": str(src)})
+
+        assert "source_window" not in res
+        assert "pointer_recovery" in res
+        assert "offset+limit" in res["pointer_recovery"]["if_expand_unavailable"]
+        assert "explicit bounded reads include source_window inline" in res["digest"]
+
+    def test_include_source_returns_capped_window_not_full_file(self, router_tmp, tmp_path):
+        from dhee.router import handlers
+
+        src = tmp_path / "mod.py"
+        src.write_text("".join(f"line_{i} = {i}\n" for i in range(1, 220)))
+
+        res = handlers.handle_dhee_read({"file_path": str(src), "include_source": True})
+
+        assert res["source_window"]["start_line"] == 1
+        assert res["source_window"]["line_count"] == 120
+        assert res["source_window"]["truncated"] is True
+        assert "line_219" not in res["source_window"]["numbered_source"]
+
     def test_read_infers_task_schema_from_compiled_state(self, router_tmp, tmp_path):
         from dhee.context_state import ContextStateStore
         from dhee.router import handlers, ptr_store

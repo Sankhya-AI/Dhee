@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -15,11 +16,55 @@ from dhee.core.thread_state import resolve_continuity
 
 _NOISE_KINDS = {"artifact_chunk", "doc_chunk"}
 _NOISE_SOURCE_APPS = {"test", "test_app", "pytest", "unit_test", "unit-tests"}
-_PLACEHOLDER_MEMORY_RE = re.compile(r"^(?:test memory|content|memory item \d+|content [0-9a-f]{6,})$", re.IGNORECASE)
+_PLACEHOLDER_MEMORY_RE = re.compile(
+    r"^(?:"
+    r"test memory|"
+    r"(?:exact|norm|boost|first|second|shared|preserve|dedup)_[a-f0-9]{6,}|"
+    r"history test [a-f0-9]{6,}|"
+    r"(?:boost|cache) test|"
+    r"unique content [a-z0-9_-]{3,}|"
+    r"(?:some data to search|data for eviction test)|"
+    r"(?:caching is good|hello world|to be deleted|original content|updated content)|"
+    r"content(?: [a-z0-9_-]{3,})?|"
+    r"memory (?:\d+|one|two|three|four|five|item \d+)|"
+    r"(?:default user|persistent) memory|"
+    r"i like python(?: [a-f0-9]{6,})?|"
+    r"user [a-z] memory"
+    r")$",
+    re.IGNORECASE,
+)
 
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _metadata_dict(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        current = dict(value)
+        for _ in range(4):
+            raw = current.get("legacy_metadata_raw")
+            if not isinstance(raw, str):
+                break
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                break
+            if not isinstance(parsed, dict):
+                break
+            overlay = {
+                key: item
+                for key, item in current.items()
+                if key not in {"legacy_metadata_raw", "legacy_metadata_type"}
+            }
+            current = {**parsed, **overlay}
+        return current
+    if value not in (None, "", [], {}):
+        return {
+            "legacy_metadata_raw": value,
+            "legacy_metadata_type": type(value).__name__,
+        }
+    return {}
 
 
 def _store_dir(name: str) -> str:
@@ -27,6 +72,15 @@ def _store_dir(name: str) -> str:
 
 
 def _is_handoff_noise_memory(parsed: Dict[str, Any], metadata: Dict[str, Any]) -> Tuple[bool, str]:
+    try:
+        from dhee.memory.quality import memory_quality_from_record
+
+        quality = memory_quality_from_record({**parsed, "metadata": metadata})
+        if quality.suppress_from_default_recall:
+            return True, f"suppressed:{quality.memory_class}"
+    except Exception:
+        pass
+
     kind = str(metadata.get("kind") or "").strip()
     if kind in _NOISE_KINDS:
         return True, f"metadata.kind={kind}"
@@ -63,7 +117,7 @@ def _recent_memories(db: Any, *, user_id: str, limit: int) -> Tuple[List[Dict[st
         ).fetchall()
         for row in raw_rows:
             parsed = db._row_to_dict(row)
-            metadata = dict(parsed.get("metadata") or {})
+            metadata = _metadata_dict(parsed.get("metadata"))
             is_noise, reason = _is_handoff_noise_memory(parsed, metadata)
             if is_noise:
                 hygiene["filtered_recent_memory_count"] += 1

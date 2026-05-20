@@ -26,6 +26,7 @@ from dhee.cli_config import (
     load_config,
     save_config,
 )
+from dhee.provider_defaults import DEFAULT_PROVIDER
 
 MANAGED_MARKER_START = "<!-- DHEE:START -->"
 MANAGED_MARKER_END = "<!-- DHEE:END -->"
@@ -194,7 +195,7 @@ def _shared_user_id(config: Dict[str, Any]) -> str:
 
 
 def _provider_env(config: Dict[str, Any]) -> Dict[str, str]:
-    provider = str(config.get("provider") or "gemini")
+    provider = str(config.get("provider") or DEFAULT_PROVIDER)
     defaults = PROVIDER_DEFAULTS.get(provider, {})
     env: Dict[str, str] = {}
     for key in [defaults.get("env_var"), *(defaults.get("alt_env_vars") or [])]:

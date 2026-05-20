@@ -1,98 +1,84 @@
-<svg width="1600" height="640" viewBox="0 0 1600 640" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
-  <title id="title">Dhee hero banner</title>
-  <desc id="desc">Dhee turns noisy agent context into protected action context.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 640" role="img" aria-labelledby="title desc">
+  <title id="title">Dhee local developer brain</title>
+  <desc id="desc">Excalidraw style diagram showing Dhee between coding agents, repo cognition, memory, and verification.</desc>
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1600" y2="640" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#111111"/>
-      <stop offset="0.52" stop-color="#1F1B16"/>
-      <stop offset="1" stop-color="#0D2425"/>
-    </linearGradient>
-    <linearGradient id="card" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#FFF7EB"/>
-      <stop offset="1" stop-color="#F6D8B3"/>
-    </linearGradient>
-    <linearGradient id="line" x1="260" y1="320" x2="1340" y2="320" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#F27A3D"/>
-      <stop offset="0.5" stop-color="#F5C15C"/>
-      <stop offset="1" stop-color="#4DC6B7"/>
-    </linearGradient>
-    <filter id="shadow" x="-40%" y="-40%" width="180%" height="180%">
-      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#000000" flood-opacity="0.32"/>
-    </filter>
-    <pattern id="grid" width="44" height="44" patternUnits="userSpaceOnUse">
-      <path d="M44 0H0V44" stroke="#FFFFFF" stroke-opacity="0.045" stroke-width="1"/>
-    </pattern>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2 2 L10 6 L2 10" fill="none" stroke="#1f2328" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <style>
+      .paper { fill: #fff9ed; }
+      .ink { stroke: #1f2328; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; fill: none; }
+      .thin { stroke: #1f2328; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; fill: none; }
+      .dash { stroke-dasharray: 8 9; }
+      .arrow { marker-end: url(#arrow); }
+      .title { font: 700 76px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #1f2328; }
+      .subtitle { font: 500 28px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #3f454c; }
+      .label { font: 700 27px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #1f2328; }
+      .small { font: 500 20px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #3f454c; }
+      .tiny { font: 600 17px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #4d535b; }
+    </style>
   </defs>
 
-  <rect width="1600" height="640" rx="36" fill="url(#bg)"/>
-  <rect width="1600" height="640" rx="36" fill="url(#grid)"/>
+  <rect class="paper" width="1600" height="640"/>
+  <path class="thin" opacity=".16" d="M54 565 C278 526 422 604 629 555 C827 508 1008 590 1218 539 C1367 503 1455 531 1548 504"/>
+  <path class="thin" opacity=".12" d="M81 92 C249 48 408 69 565 99 C808 145 1001 34 1223 88 C1364 122 1460 105 1533 78"/>
 
-  <g opacity="0.32">
-    <path d="M112 500H1488" stroke="#FFFFFF" stroke-opacity="0.22"/>
-    <path d="M128 418H1472" stroke="#FFFFFF" stroke-opacity="0.12"/>
-    <path d="M210 112V528" stroke="#FFFFFF" stroke-opacity="0.1"/>
-    <path d="M1390 116V528" stroke="#FFFFFF" stroke-opacity="0.1"/>
+  <text class="title" x="86" y="116">Dhee</text>
+  <text class="subtitle" x="91" y="160">local developer brain for coding agents</text>
+
+  <g transform="translate(82 224)">
+    <path d="M8 8 C84 -5 195 4 279 9 C302 11 316 27 316 50 L316 151 C317 177 295 190 269 188 C183 182 101 198 25 187 C5 184 -5 164 2 141 C11 103 -3 59 8 8 Z" fill="#d8ecff"/>
+    <path class="ink" d="M8 8 C84 -5 195 4 279 9 C302 11 316 27 316 50 L316 151 C317 177 295 190 269 188 C183 182 101 198 25 187 C5 184 -5 164 2 141 C11 103 -3 59 8 8 Z"/>
+    <path class="thin" opacity=".55" d="M18 15 C95 7 198 10 286 16"/>
+    <text class="label" x="34" y="64">Coding agent</text>
+    <text class="small" x="34" y="102">Codex / Claude / Cursor</text>
+    <text class="small" x="34" y="134">needs grounded context</text>
   </g>
 
-  <g transform="translate(112 120)">
-    <rect x="0" y="0" width="356" height="384" rx="28" fill="#FFFFFF" fill-opacity="0.07" stroke="#FFFFFF" stroke-opacity="0.11"/>
-    <text x="32" y="56" fill="#FFF7EB" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="18" font-weight="700" letter-spacing="2">NOISY REALITY</text>
-    <g fill="#FFFFFF" fill-opacity="0.16">
-      <rect x="32" y="96" width="244" height="12" rx="6"/>
-      <rect x="32" y="126" width="180" height="12" rx="6"/>
-      <rect x="32" y="156" width="260" height="12" rx="6"/>
-      <rect x="32" y="206" width="210" height="12" rx="6"/>
-      <rect x="32" y="236" width="286" height="12" rx="6"/>
-      <rect x="32" y="266" width="148" height="12" rx="6"/>
-      <rect x="32" y="316" width="250" height="12" rx="6"/>
-    </g>
-    <g fill="#F27A3D">
-      <circle cx="300" cy="102" r="5"/>
-      <circle cx="262" cy="212" r="5"/>
-      <circle cx="206" cy="320" r="5"/>
-    </g>
+  <g transform="translate(612 188)">
+    <path d="M18 16 C105 -4 285 0 390 19 C428 26 448 56 441 96 C431 155 453 221 418 254 C380 291 85 280 35 259 C5 246 -6 209 5 164 C17 115 -11 49 18 16 Z" fill="#fff0b6"/>
+    <path class="ink" d="M18 16 C105 -4 285 0 390 19 C428 26 448 56 441 96 C431 155 453 221 418 254 C380 291 85 280 35 259 C5 246 -6 209 5 164 C17 115 -11 49 18 16 Z"/>
+    <path class="thin" opacity=".5" d="M37 39 C130 25 273 24 400 43"/>
+    <text class="label" x="55" y="78">Dhee developer brain</text>
+    <text class="small" x="55" y="116">memory quality contract</text>
+    <text class="small" x="55" y="150">repo graph + impact map</text>
+    <text class="small" x="55" y="184">handoff + task contracts</text>
+    <text class="small" x="55" y="218">proof before release</text>
   </g>
 
-  <g transform="translate(1244 120)">
-    <rect x="0" y="0" width="244" height="384" rx="28" fill="#FFFFFF" fill-opacity="0.07" stroke="#FFFFFF" stroke-opacity="0.11"/>
-    <text x="30" y="56" fill="#FFF7EB" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="18" font-weight="700" letter-spacing="2">PROOF</text>
-    <g fill="#4DC6B7">
-      <path d="M64 130L100 166L178 92" stroke="#4DC6B7" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
-      <circle cx="86" cy="250" r="8"/>
-      <circle cx="122" cy="250" r="8"/>
-      <circle cx="158" cy="250" r="8"/>
-    </g>
-    <g fill="#FFFFFF" fill-opacity="0.18">
-      <rect x="44" y="302" width="148" height="12" rx="6"/>
-      <rect x="66" y="330" width="104" height="12" rx="6"/>
-    </g>
+  <g transform="translate(1190 220)">
+    <path d="M18 10 C90 -4 217 4 307 14 C334 17 354 39 351 69 C347 113 361 158 333 182 C296 214 78 202 31 188 C4 180 -4 151 3 117 C13 73 -11 29 18 10 Z" fill="#d9f1cf"/>
+    <path class="ink" d="M18 10 C90 -4 217 4 307 14 C334 17 354 39 351 69 C347 113 361 158 333 182 C296 214 78 202 31 188 C4 180 -4 151 3 117 C13 73 -11 29 18 10 Z"/>
+    <text class="label" x="42" y="67">Verified patch</text>
+    <text class="small" x="42" y="105">tests, diffs, risks</text>
+    <text class="small" x="42" y="136">durable lessons only</text>
   </g>
 
-  <path d="M466 316C566 244 654 244 754 316C854 388 948 388 1050 316C1120 266 1184 250 1246 268" stroke="url(#line)" stroke-width="7" stroke-linecap="round"/>
-  <path d="M1218 244L1248 268L1210 278" stroke="#4DC6B7" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
-
-  <g filter="url(#shadow)">
-    <rect x="548" y="92" width="504" height="456" rx="34" fill="url(#card)"/>
-    <rect x="572" y="116" width="456" height="408" rx="24" fill="#1A1714"/>
-    <rect x="572" y="116" width="456" height="408" rx="24" stroke="#FFFFFF" stroke-opacity="0.12"/>
-    <text x="800" y="188" text-anchor="middle" fill="#F8EBD9" font-family="Georgia, 'Times New Roman', serif" font-size="92" font-weight="700">Dhee</text>
-    <text x="800" y="240" text-anchor="middle" fill="#F3B26E" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="18" font-weight="800" letter-spacing="3">CONTEXT COMPILER</text>
-    <text x="800" y="300" text-anchor="middle" fill="#FFF7EB" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="34" font-weight="750">Messy work in.</text>
-    <text x="800" y="344" text-anchor="middle" fill="#FFF7EB" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="34" font-weight="750">Deterministic action out.</text>
-    <g transform="translate(626 394)">
-      <rect x="0" y="0" width="348" height="56" rx="18" fill="#FFFFFF" fill-opacity="0.08" stroke="#FFFFFF" stroke-opacity="0.12"/>
-      <text x="174" y="35" text-anchor="middle" fill="#F8EBD9" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="17" font-weight="700">compile - supervise - verify - remember</text>
-    </g>
+  <g transform="translate(441 458)">
+    <path d="M11 7 C81 -6 183 0 253 9 C276 12 290 27 288 54 C284 93 293 129 268 147 C234 171 62 161 25 149 C4 142 -4 118 3 89 C10 58 -9 22 11 7 Z" fill="#ffdccc"/>
+    <path class="ink" d="M11 7 C81 -6 183 0 253 9 C276 12 290 27 288 54 C284 93 293 129 268 147 C234 171 62 161 25 149 C4 142 -4 118 3 89 C10 58 -9 22 11 7 Z"/>
+    <text class="label" x="33" y="58">Repo cognition</text>
+    <text class="tiny" x="33" y="91">symbols, routes, tests, owners</text>
   </g>
 
-  <g font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="17" font-weight="800" letter-spacing="1">
-    <rect x="352" y="510" width="190" height="48" rx="24" fill="#F27A3D"/>
-    <text x="447" y="540" text-anchor="middle" fill="#171310">LOCAL FIRST</text>
-    <rect x="574" y="510" width="222" height="48" rx="24" fill="#F5C15C"/>
-    <text x="685" y="540" text-anchor="middle" fill="#171310">PROOF BUNDLES</text>
-    <rect x="828" y="510" width="220" height="48" rx="24" fill="#FFF7EB"/>
-    <text x="938" y="540" text-anchor="middle" fill="#171310">UPDATE CAPSULES</text>
-    <rect x="1080" y="510" width="180" height="48" rx="24" fill="#4DC6B7"/>
-    <text x="1170" y="540" text-anchor="middle" fill="#171310">GIT SHARED</text>
+  <g transform="translate(856 463)">
+    <path d="M10 9 C86 -6 190 1 275 9 C301 11 315 29 312 55 C308 100 322 133 292 151 C249 177 72 164 27 151 C4 144 -4 119 3 88 C11 54 -11 25 10 9 Z" fill="#efe0ff"/>
+    <path class="ink" d="M10 9 C86 -6 190 1 275 9 C301 11 315 29 312 55 C308 100 322 133 292 151 C249 177 72 164 27 151 C4 144 -4 119 3 88 C11 54 -11 25 10 9 Z"/>
+    <text class="label" x="35" y="58">Clean memory</text>
+    <text class="tiny" x="35" y="91">facts, evidence, fixtures split</text>
+  </g>
+
+  <path class="ink arrow" d="M401 317 C472 300 530 298 601 308"/>
+  <path class="ink arrow" d="M1063 315 C1110 307 1146 306 1181 310"/>
+  <path class="thin dash arrow" d="M587 468 C609 438 624 413 650 383"/>
+  <path class="thin dash arrow" d="M1006 459 C991 424 967 401 938 380"/>
+
+  <g transform="translate(93 512)">
+    <path class="thin" d="M0 0 C32 17 81 18 119 3"/>
+    <text class="tiny" x="135" y="9">less prompt sludge</text>
+  </g>
+  <g transform="translate(1238 496)">
+    <path class="thin" d="M0 24 C42 1 105 1 150 21"/>
+    <text class="tiny" x="168" y="28">fewer repeated mistakes</text>
   </g>
 </svg>

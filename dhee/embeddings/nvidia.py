@@ -3,12 +3,13 @@ import os
 from typing import List, Optional
 
 from dhee.embeddings.base import BaseEmbedder
+from dhee.provider_defaults import DEFAULT_NVIDIA_EMBEDDER_MODEL
 
 logger = logging.getLogger(__name__)
 
 
 class NvidiaEmbedder(BaseEmbedder):
-    """Embedding provider for NVIDIA API (OpenAI-compatible). Default model: nv-embed-v1."""
+    """Embedding provider for NVIDIA API (OpenAI-compatible)."""
 
     def __init__(self, config: Optional[dict] = None):
         super().__init__(config)
@@ -32,7 +33,13 @@ class NvidiaEmbedder(BaseEmbedder):
         base_url = self.config.get("base_url", "https://integrate.api.nvidia.com/v1")
         timeout = self.config.get("timeout", 60)
         self.client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
-        self.model = self.config.get("model", "nvidia/nv-embed-v1")
+        self.model = self.config.get("model", DEFAULT_NVIDIA_EMBEDDER_MODEL)
+        configured_dims = (
+            self.config.get("dimensions")
+            or self.config.get("embedding_dims")
+            or self.config.get("embedding_model_dims")
+        )
+        self.dimensions = int(configured_dims) if configured_dims else None
         default_truncate = "NONE" if "nemotron-embed" in self.model else "END"
         self.truncate = str(self.config.get("truncate", default_truncate)).upper()
 
@@ -56,8 +63,8 @@ class NvidiaEmbedder(BaseEmbedder):
         """Truncate text to stay within model token limits.
 
         Model-aware defaults (conservative ~3.5 chars/token):
-        - nv-embed-v1: 4096 tokens → 14000 chars
-        - nemotron-embed: 8192 tokens → 26000 chars (use 24000 for safety)
+        - nv-embed-v1: 4096 tokens -> 14000 chars
+        - nemotron-embed: 8192 tokens -> 26000 chars (use 24000 for safety)
         """
         if "nemotron-embed" in self.model:
             default_max = 24000
@@ -77,11 +84,14 @@ class NvidiaEmbedder(BaseEmbedder):
         for attempt in range(max_retries + 1):
             try:
                 extra_body = self._extra_body(memory_action)
+                kwargs = {"extra_body": extra_body} if extra_body else {}
+                if self.dimensions:
+                    kwargs["dimensions"] = self.dimensions
                 response = self.client.embeddings.create(
                     input=[text],
                     model=self.model,
                     encoding_format="float",
-                    **({"extra_body": extra_body} if extra_body else {}),
+                    **kwargs,
                 )
                 return response.data[0].embedding
             except Exception as exc:
@@ -107,11 +117,14 @@ class NvidiaEmbedder(BaseEmbedder):
             return [self.embed(texts[0], memory_action=memory_action)]
         try:
             extra_body = self._extra_body(memory_action, count=len(texts))
+            kwargs = {"extra_body": extra_body} if extra_body else {}
+            if self.dimensions:
+                kwargs["dimensions"] = self.dimensions
             response = self.client.embeddings.create(
                 input=texts,
                 model=self.model,
                 encoding_format="float",
-                **({"extra_body": extra_body} if extra_body else {}),
+                **kwargs,
             )
             sorted_data = sorted(response.data, key=lambda d: d.index)
             return [d.embedding for d in sorted_data]

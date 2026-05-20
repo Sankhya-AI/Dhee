@@ -279,6 +279,22 @@ HISTORY_HEADER = "User Transcript:"
 DEFAULT_NVIDIA_LLM_MODEL = "meta/llama-3.1-8b-instruct"
 DEFAULT_NVIDIA_EMBEDDER_MODEL = "nvidia/llama-nemotron-embed-vl-1b-v2"
 DEFAULT_NVIDIA_RERANK_MODEL = "nvidia/llama-nemotron-rerank-vl-1b-v2"
+DEFAULT_NVIDIA_EMBEDDING_DIMS = 2048
+NVIDIA_NEMOTRON_EMBEDDING_DIMS = {384, 512, 768, 1024, 2048}
+
+
+def _validate_embedding_dims(embedder_provider: str, embedder_model: Optional[str], embedding_dims: int) -> None:
+    if embedder_provider != "nvidia":
+        return
+    model = embedder_model or DEFAULT_NVIDIA_EMBEDDER_MODEL
+    if "nemotron-embed" not in model:
+        return
+    if embedding_dims not in NVIDIA_NEMOTRON_EMBEDDING_DIMS:
+        valid = ", ".join(str(dim) for dim in sorted(NVIDIA_NEMOTRON_EMBEDDING_DIMS))
+        raise ValueError(
+            f"{model} supports embedding dimensions {{{valid}}}; got {embedding_dims}. "
+            f"Use {DEFAULT_NVIDIA_EMBEDDING_DIMS} to reproduce the published NVIDIA LongMemEval run."
+        )
 
 
 def extract_user_only_text(session_turns: Sequence[Dict[str, Any]]) -> str:
@@ -1150,6 +1166,8 @@ def build_memory(
     When defer_enrichment=True, ingestion uses 0 LLM calls (store fast), and
     enrichment is done in batch after all sessions are loaded.
     """
+    _validate_embedding_dims(embedder_provider, embedder_model, embedding_dims)
+
     vector_cfg: Dict[str, Any] = {
         "collection_name": "engram_longmemeval",
         "embedding_model_dims": embedding_dims,
@@ -2050,7 +2068,15 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=f"Optional embedder model override (NVIDIA default: {DEFAULT_NVIDIA_EMBEDDER_MODEL}).",
     )
-    parser.add_argument("--embedding-dims", type=int, default=1536, help="Embedding dimensions for simple/memory configs.")
+    parser.add_argument(
+        "--embedding-dims",
+        type=int,
+        default=DEFAULT_NVIDIA_EMBEDDING_DIMS,
+        help=(
+            "Embedding dimensions. NVIDIA Nemotron defaults to 2048; supported "
+            "Nemotron sizes are 384, 512, 768, 1024, and 2048."
+        ),
+    )
     parser.add_argument("--vector-store-provider", choices=["memory", "sqlite_vec"], default="memory")
     parser.add_argument("--history-db-path", default="/tmp/engram-longmemeval.db", help="SQLite db path.")
     parser.add_argument("--defer-enrichment", action="store_true", default=False, help="Use deferred enrichment (0 LLM calls at ingestion, batch enrich after).")
@@ -2203,6 +2229,10 @@ def parse_args() -> argparse.Namespace:
     args.enable_episodic_index = not args.disable_episodic_index
     args.enable_hierarchical_retrieval = not args.disable_hierarchical_retrieval
     args.enable_orchestrated_search = not args.disable_orchestrated_search
+    try:
+        _validate_embedding_dims(args.embedder_provider, args.embedder_model, args.embedding_dims)
+    except ValueError as exc:
+        parser.error(str(exc))
     return args
 
 

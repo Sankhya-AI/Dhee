@@ -4,6 +4,8 @@ import logging
 import os
 from typing import Any, Dict, Optional, Tuple
 
+from dhee.provider_defaults import DEFAULT_PROVIDER, embedding_dims_for
+
 logger = logging.getLogger(__name__)
 
 
@@ -46,52 +48,24 @@ def _detect_provider() -> Tuple[str, str]:
 
     Returns (embedder_provider, llm_provider) tuple.
 
-    Detection order:
-    1. Local DheeModel GGUF available → (qwen, dhee) — zero API cost
-    2. OPENAI_API_KEY set → openai (recommended)
-    3. GEMINI_API_KEY / GOOGLE_API_KEY set → gemini
-    4. Ollama running on localhost:11434 → ollama
-    5. NVIDIA_API_KEY set → nvidia (internal)
-    6. Fall back to simple embedder + mock LLM (zero-config, no API key)
+    NVIDIA is the default provider across Dhee. Other providers remain
+    available when explicitly configured, but auto-detection prefers NVIDIA.
     """
-    # Prioritize local model — zero API cost
-    if _dhee_model_available():
-        embedder = "qwen" if _qwen_embedder_available() else "simple"
-        return (embedder, "dhee")
-
     try:
         from dhee.cli_config import get_api_key
     except Exception:
         get_api_key = None  # type: ignore[assignment]
 
-    if os.environ.get("OPENAI_API_KEY") or (get_api_key and get_api_key("openai")):
-        return ("openai", "openai")
-    if (
-        os.environ.get("GEMINI_API_KEY")
-        or os.environ.get("GOOGLE_API_KEY")
-        or (get_api_key and get_api_key("gemini"))
-    ):
-        return ("gemini", "gemini")
-
-    # Try Ollama
-    try:
-        import requests
-        resp = requests.get("http://localhost:11434/api/tags", timeout=1)
-        if resp.status_code == 200:
-            return ("ollama", "ollama")
-    except Exception:
-        pass
-
-    # NVIDIA (internal — not customer-documented)
     if (
         os.environ.get("NVIDIA_API_KEY")
         or os.environ.get("NVIDIA_QWEN_API_KEY")
+        or os.environ.get("NVIDIA_EMBEDDING_API_KEY")
+        or os.environ.get("NVIDIA_EMBED_API_KEY")
+        or os.environ.get("NVIDIA_LLAMA_4_MAV_API_KEY")
         or (get_api_key and get_api_key("nvidia"))
     ):
         return ("nvidia", "nvidia")
-
-    # Zero-config fallback: hash embedder + mock LLM
-    return ("simple", "mock")
+    return (DEFAULT_PROVIDER, DEFAULT_PROVIDER)
 
 
 class EmbedderFactory:
@@ -125,13 +99,10 @@ class EmbedderFactory:
 
     @classmethod
     def create_auto(cls, config: Optional[Dict[str, Any]] = None):
-        """Auto-detect best available embedder. No API key required."""
+        """Auto-detect best available embedder. NVIDIA is the default."""
         embedder_provider, _ = _detect_provider()
         cfg = dict(config or {})
-        if embedder_provider == "simple":
-            cfg.setdefault("embedding_dims", 384)
-        elif embedder_provider == "qwen":
-            cfg.setdefault("embedding_dims", 1024)
+        cfg.setdefault("embedding_dims", embedding_dims_for(embedder_provider))
         return cls.create(embedder_provider, cfg)
 
 
@@ -166,7 +137,7 @@ class LLMFactory:
 
     @classmethod
     def create_auto(cls, config: Optional[Dict[str, Any]] = None):
-        """Auto-detect best available LLM. Falls back to mock."""
+        """Auto-detect best available LLM. NVIDIA is the default."""
         _, llm_provider = _detect_provider()
         return cls.create(llm_provider, dict(config or {}))
 

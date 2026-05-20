@@ -83,11 +83,11 @@ def _core_section() -> dict[str, Any]:
     except Exception:
         __version__ = "unknown"
     try:
-        from dhee.cli_config import CONFIG_DIR, CONFIG_PATH, load_config
+        from dhee.cli_config import get_config_dir, get_config_path, load_config
 
         cfg = load_config()
-        config_dir = str(CONFIG_DIR)
-        config_path = str(CONFIG_PATH)
+        config_dir = str(get_config_dir())
+        config_path = str(get_config_path())
         provider = cfg.get("provider", "not configured")
         packages = cfg.get("packages", [])
     except Exception as exc:
@@ -240,9 +240,9 @@ def _cognition_section() -> dict[str, Any]:
     # Native today: propose + conservative threshold gating; replay-based
     # assessment + auto-rollback closes in Movement 4.
     try:
-        from dhee.cli_config import CONFIG_DIR
+        from dhee.cli_config import get_config_dir
 
-        attempts_path = Path(CONFIG_DIR) / "meta_buddhi" / "attempts.jsonl"
+        attempts_path = Path(get_config_dir()) / "meta_buddhi" / "attempts.jsonl"
         counts = {"proposed": 0, "promoted": 0, "rolled_back": 0, "abandoned": 0}
         total = 0
         if attempts_path.exists():
@@ -273,9 +273,9 @@ def _cognition_section() -> dict[str, Any]:
 
     # Contrastive — pair count if the store has persisted anything.
     try:
-        from dhee.cli_config import CONFIG_DIR
+        from dhee.cli_config import get_config_dir
 
-        contrastive_dir = Path(CONFIG_DIR) / "contrastive"
+        contrastive_dir = Path(get_config_dir()) / "contrastive"
         pair_count = 0
         if contrastive_dir.exists():
             for f in contrastive_dir.glob("*.jsonl"):
@@ -296,9 +296,9 @@ def _cognition_section() -> dict[str, Any]:
     # training cycle stays gated until the training-infrastructure
     # relocation (dhee.training.*, dhee.mini.progressive_trainer) lands.
     try:
-        from dhee.cli_config import CONFIG_DIR
+        from dhee.cli_config import get_config_dir
 
-        gate_path = Path(CONFIG_DIR) / "nididhyasana" / "session_gates.jsonl"
+        gate_path = Path(get_config_dir()) / "nididhyasana" / "session_gates.jsonl"
         gate_total = 0
         last_gate: dict[str, Any] | None = None
         gate_fired_count = 0
@@ -336,11 +336,11 @@ def _cognition_section() -> dict[str, Any]:
 
 def _memory_section() -> dict[str, Any]:
     try:
-        from dhee.cli_config import CONFIG_DIR
+        from dhee.cli_config import get_config_dir
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}"}
 
-    db_path = os.path.join(CONFIG_DIR, "sqlite_vec.db")
+    db_path = os.path.join(get_config_dir(), "sqlite_vec.db")
     if not os.path.exists(db_path):
         return {
             "db_path": db_path,

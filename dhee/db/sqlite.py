@@ -99,9 +99,58 @@ class _SQLiteBase:
         if isinstance(value, (dict, list)):
             return value
         try:
-            return json.loads(value)
+            parsed = json.loads(value)
         except Exception:
             return default
+        if isinstance(default, dict) and not isinstance(parsed, dict):
+            return dict(default)
+        if isinstance(default, list) and not isinstance(parsed, list):
+            return list(default)
+        return parsed
+
+    @staticmethod
+    def _parse_json_dict(value: Any, *, preserve_legacy: bool = False) -> Dict[str, Any]:
+        """Decode a JSON object field without allowing scalar poison through.
+
+        Some early Dhee and downstream integrations stored metadata as JSON
+        strings/lists. Returning those raw scalars makes callers that expect a
+        mapping fail much later in unrelated context tools. Keep the boundary
+        strict here so every row leaves the DB with mapping-shaped metadata.
+        """
+        if value in (None, "", {}, []):
+            return {}
+        if isinstance(value, dict):
+            return dict(value)
+        parsed: Any = value
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except Exception:
+                parsed = value
+        if isinstance(parsed, dict):
+            return dict(parsed)
+        if preserve_legacy:
+            return {
+                "legacy_metadata_raw": parsed,
+                "legacy_metadata_type": type(parsed).__name__,
+            }
+        return {}
+
+    @staticmethod
+    def _parse_json_list(value: Any) -> List[Any]:
+        if value in (None, "", []):
+            return []
+        if isinstance(value, list):
+            return list(value)
+        if isinstance(value, tuple):
+            return list(value)
+        parsed: Any = value
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except Exception:
+                return []
+        return list(parsed) if isinstance(parsed, list) else []
 
 
 class CoreSQLiteManager(_SQLiteBase):
@@ -199,7 +248,11 @@ class CoreSQLiteManager(_SQLiteBase):
     def add_memory(self, memory_data: Dict[str, Any], *, log_history: bool = True) -> str:
         memory_id = memory_data.get("id", str(uuid.uuid4()))
         now = _utcnow_iso()
-        metadata = memory_data.get("metadata", {}) or {}
+        metadata = self._parse_json_dict(memory_data.get("metadata"), preserve_legacy=True)
+        categories = self._parse_json_list(memory_data.get("categories"))
+        embedding = self._parse_json_list(memory_data.get("embedding"))
+        related_memories = self._parse_json_list(memory_data.get("related_memories"))
+        source_memories = self._parse_json_list(memory_data.get("source_memories"))
 
         with self._get_connection() as conn:
             conn.execute(
@@ -219,8 +272,8 @@ class CoreSQLiteManager(_SQLiteBase):
                     memory_data.get("agent_id"),
                     memory_data.get("run_id"),
                     memory_data.get("app_id"),
-                    json.dumps(memory_data.get("metadata", {})),
-                    json.dumps(memory_data.get("categories", [])),
+                    json.dumps(metadata),
+                    json.dumps(categories),
                     1 if memory_data.get("immutable", False) else 0,
                     memory_data.get("expiration_date"),
                     memory_data.get("created_at", now),
@@ -229,9 +282,9 @@ class CoreSQLiteManager(_SQLiteBase):
                     memory_data.get("strength", 1.0),
                     memory_data.get("access_count", 0),
                     memory_data.get("last_accessed", now),
-                    json.dumps(memory_data.get("embedding", [])),
-                    json.dumps(memory_data.get("related_memories", [])),
-                    json.dumps(memory_data.get("source_memories", [])),
+                    json.dumps(embedding),
+                    json.dumps(related_memories),
+                    json.dumps(source_memories),
                     1 if memory_data.get("tombstone", False) else 0,
                     memory_data.get("content_hash"),
                 ),
@@ -324,8 +377,10 @@ class CoreSQLiteManager(_SQLiteBase):
         for key, value in updates.items():
             if key not in VALID_MEMORY_COLUMNS:
                 raise ValueError(f"Invalid memory column: {key!r}")
-            if key in {"metadata", "categories", "embedding", "related_memories", "source_memories"}:
-                value = json.dumps(value)
+            if key == "metadata":
+                value = json.dumps(self._parse_json_dict(value, preserve_legacy=True))
+            elif key in {"categories", "embedding", "related_memories", "source_memories"}:
+                value = json.dumps(self._parse_json_list(value))
             set_clauses.append(f"{key} = ?")
             params.append(value)
 
@@ -440,14 +495,16 @@ class CoreSQLiteManager(_SQLiteBase):
 
     def _row_to_dict(self, row: sqlite3.Row, *, skip_embedding: bool = False) -> Dict[str, Any]:
         data = dict(row)
-        for key in self._MEMORY_JSON_FIELDS:
-            if key in data and data[key]:
-                data[key] = json.loads(data[key])
+        if "metadata" in data:
+            data["metadata"] = self._parse_json_dict(data.get("metadata"), preserve_legacy=True)
+        for key in ("categories", "related_memories", "source_memories"):
+            if key in data:
+                data[key] = self._parse_json_list(data.get(key))
         # Embedding is the largest JSON field (~30-50KB for 3072-dim vectors).
         if skip_embedding:
             data.pop("embedding", None)
-        elif "embedding" in data and data["embedding"]:
-            data["embedding"] = json.loads(data["embedding"])
+        elif "embedding" in data:
+            data["embedding"] = self._parse_json_list(data.get("embedding"))
         data["immutable"] = bool(data.get("immutable", 0))
         data["tombstone"] = bool(data.get("tombstone", 0))
         return data
@@ -1361,7 +1418,11 @@ class FullSQLiteManager(
     def add_memory(self, memory_data: Dict[str, Any], *, log_history: bool = True) -> str:
         memory_id = memory_data.get("id", str(uuid.uuid4()))
         now = _utcnow_iso()
-        metadata = memory_data.get("metadata", {}) or {}
+        metadata = self._parse_json_dict(memory_data.get("metadata"), preserve_legacy=True)
+        categories = self._parse_json_list(memory_data.get("categories"))
+        embedding = self._parse_json_list(memory_data.get("embedding"))
+        related_memories = self._parse_json_list(memory_data.get("related_memories"))
+        source_memories = self._parse_json_list(memory_data.get("source_memories"))
         source_app = memory_data.get("source_app") or memory_data.get("app_id") or metadata.get("source_app")
 
         with self._get_connection() as conn:
@@ -1385,8 +1446,8 @@ class FullSQLiteManager(
                     memory_data.get("agent_id"),
                     memory_data.get("run_id"),
                     memory_data.get("app_id"),
-                    json.dumps(memory_data.get("metadata", {})),
-                    json.dumps(memory_data.get("categories", [])),
+                    json.dumps(metadata),
+                    json.dumps(categories),
                     1 if memory_data.get("immutable", False) else 0,
                     memory_data.get("expiration_date"),
                     memory_data.get("created_at", now),
@@ -1395,9 +1456,9 @@ class FullSQLiteManager(
                     memory_data.get("strength", 1.0),
                     memory_data.get("access_count", 0),
                     memory_data.get("last_accessed", now),
-                    json.dumps(memory_data.get("embedding", [])),
-                    json.dumps(memory_data.get("related_memories", [])),
-                    json.dumps(memory_data.get("source_memories", [])),
+                    json.dumps(embedding),
+                    json.dumps(related_memories),
+                    json.dumps(source_memories),
                     1 if memory_data.get("tombstone", False) else 0,
                     memory_data.get("confidentiality_scope", "work"),
                     memory_data.get("namespace", metadata.get("namespace", "default")),
@@ -1447,7 +1508,11 @@ class FullSQLiteManager(
         for memory_data in memories:
             memory_id = memory_data.get("id", str(uuid.uuid4()))
             ids.append(memory_id)
-            metadata = memory_data.get("metadata", {}) or {}
+            metadata = self._parse_json_dict(memory_data.get("metadata"), preserve_legacy=True)
+            categories = self._parse_json_list(memory_data.get("categories"))
+            embedding = self._parse_json_list(memory_data.get("embedding"))
+            related_memories = self._parse_json_list(memory_data.get("related_memories"))
+            source_memories = self._parse_json_list(memory_data.get("source_memories"))
             source_app = memory_data.get("source_app") or memory_data.get("app_id") or metadata.get("source_app")
 
             insert_rows.append((
@@ -1457,8 +1522,8 @@ class FullSQLiteManager(
                 memory_data.get("agent_id"),
                 memory_data.get("run_id"),
                 memory_data.get("app_id"),
-                json.dumps(memory_data.get("metadata", {})),
-                json.dumps(memory_data.get("categories", [])),
+                json.dumps(metadata),
+                json.dumps(categories),
                 1 if memory_data.get("immutable", False) else 0,
                 memory_data.get("expiration_date"),
                 memory_data.get("created_at", now),
@@ -1467,9 +1532,9 @@ class FullSQLiteManager(
                 memory_data.get("strength", 1.0),
                 memory_data.get("access_count", 0),
                 memory_data.get("last_accessed", now),
-                json.dumps(memory_data.get("embedding", [])),
-                json.dumps(memory_data.get("related_memories", [])),
-                json.dumps(memory_data.get("source_memories", [])),
+                json.dumps(embedding),
+                json.dumps(related_memories),
+                json.dumps(source_memories),
                 1 if memory_data.get("tombstone", False) else 0,
                 memory_data.get("confidentiality_scope", "work"),
                 memory_data.get("namespace", metadata.get("namespace", "default")),
@@ -1645,8 +1710,10 @@ class FullSQLiteManager(
         for key, value in updates.items():
             if key not in VALID_MEMORY_COLUMNS:
                 raise ValueError(f"Invalid memory column: {key!r}")
-            if key in {"metadata", "categories", "embedding", "related_memories", "source_memories"}:
-                value = json.dumps(value)
+            if key == "metadata":
+                value = json.dumps(self._parse_json_dict(value, preserve_legacy=True))
+            elif key in {"categories", "embedding", "related_memories", "source_memories"}:
+                value = json.dumps(self._parse_json_list(value))
             set_clauses.append(f"{key} = ?")
             params.append(value)
 
@@ -1838,10 +1905,10 @@ class FullSQLiteManager(
                 params: list = [now]
                 if "metadata" in upd:
                     sets.append("metadata = ?")
-                    params.append(json.dumps(upd["metadata"]))
+                    params.append(json.dumps(self._parse_json_dict(upd["metadata"], preserve_legacy=True)))
                 if "categories" in upd:
                     sets.append("categories = ?")
-                    params.append(json.dumps(upd["categories"]))
+                    params.append(json.dumps(self._parse_json_list(upd["categories"])))
                 if "enrichment_status" in upd:
                     sets.append("enrichment_status = ?")
                     params.append(upd["enrichment_status"])
@@ -1855,15 +1922,17 @@ class FullSQLiteManager(
 
     def _row_to_dict(self, row: sqlite3.Row, *, skip_embedding: bool = False) -> Dict[str, Any]:
         data = dict(row)
-        for key in self._MEMORY_JSON_FIELDS:
-            if key in data and data[key]:
-                data[key] = json.loads(data[key])
+        if "metadata" in data:
+            data["metadata"] = self._parse_json_dict(data.get("metadata"), preserve_legacy=True)
+        for key in ("categories", "related_memories", "source_memories"):
+            if key in data:
+                data[key] = self._parse_json_list(data.get(key))
         # Embedding is the largest JSON field (~30-50KB for 3072-dim vectors).
         # Skip deserialization when the caller doesn't need it.
         if skip_embedding:
             data.pop("embedding", None)
-        elif "embedding" in data and data["embedding"]:
-            data["embedding"] = json.loads(data["embedding"])
+        elif "embedding" in data:
+            data["embedding"] = self._parse_json_list(data.get("embedding"))
         data["immutable"] = bool(data.get("immutable", 0))
         data["tombstone"] = bool(data.get("tombstone", 0))
         return data

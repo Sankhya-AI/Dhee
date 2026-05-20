@@ -2,51 +2,66 @@
 
 import json
 import os
+import sqlite3
 from typing import Any, Dict, Optional
 
+from dhee.configs.base import VectorStoreConfig
 from dhee.configs.base import _dhee_data_dir
+from dhee.provider_defaults import (
+    DEFAULT_COLLECTION,
+    DEFAULT_PROVIDER,
+    PROVIDER_DEFAULTS,
+    provider_defaults,
+)
 
-CONFIG_DIR = _dhee_data_dir()
-CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 
-# Provider → default models and env var
-PROVIDER_DEFAULTS = {
-    "gemini": {
-        "llm_model": "gemini-2.0-flash",
-        "embedder_model": "gemini-embedding-001",
-        "embedding_dims": 3072,
-        "env_var": "GOOGLE_API_KEY",
-        "alt_env_vars": ["GEMINI_API_KEY"],
-    },
-    "openai": {
-        "llm_model": "gpt-4o-mini",
-        "embedder_model": "text-embedding-3-small",
-        "embedding_dims": 1536,
-        "env_var": "OPENAI_API_KEY",
-        "alt_env_vars": [],
-    },
-    "nvidia": {
-        "llm_model": "moonshotai/kimi-k2.5",
-        "embedder_model": "nvidia/nv-embedqa-e5-v5",
-        "embedding_dims": 1024,
-        "env_var": "NVIDIA_API_KEY",
-        "alt_env_vars": [],
-    },
-    "ollama": {
-        "llm_model": "llama3.1",
-        "embedder_model": "nomic-embed-text",
-        "embedding_dims": 768,
-        "env_var": None,
-        "alt_env_vars": [],
-    },
-}
+class _DynamicPath:
+    def __init__(self, resolver):
+        self._resolver = resolver
 
+    def __fspath__(self) -> str:
+        return str(self._resolver())
+
+    def __str__(self) -> str:
+        return self.__fspath__()
+
+    def __repr__(self) -> str:
+        return repr(self.__fspath__())
+
+
+def get_config_dir() -> str:
+    """Return Dhee's current config/data directory.
+
+    Keep this dynamic so tests, embedded runtimes, and harness installers that
+    set ``HOME`` or ``DHEE_DATA_DIR`` after import do not accidentally write to
+    the real user profile.
+    """
+    return _dhee_data_dir()
+
+
+def get_config_path() -> str:
+    return os.path.join(get_config_dir(), "config.json")
+
+
+CONFIG_DIR = _DynamicPath(get_config_dir)
+CONFIG_PATH = _DynamicPath(get_config_path)
 
 def get_default_config() -> Dict[str, Any]:
     """Return default config structure."""
+    defaults = provider_defaults(DEFAULT_PROVIDER)
     return {
         "version": "1",
-        "provider": "gemini",
+        "provider": DEFAULT_PROVIDER,
+        "llm_model": defaults["llm_model"],
+        "embedder_model": defaults["embedder_model"],
+        "embedding_dims": defaults["embedding_dims"],
+        "vector_store": {
+            "provider": "zvec",
+            "config": {
+                "collection_name": DEFAULT_COLLECTION,
+                "embedding_model_dims": defaults["embedding_dims"],
+            },
+        },
         "packages": ["engram-memory"],
         "identity": {
             "user_id": "default",
@@ -79,16 +94,18 @@ def _merge_defaults(config: Dict[str, Any], defaults: Dict[str, Any]) -> Dict[st
 def load_config() -> Dict[str, Any]:
     """Load config from ~/.dhee/config.json or return defaults."""
     defaults = get_default_config()
-    if os.path.exists(CONFIG_PATH):
-        with open(CONFIG_PATH, "r") as f:
+    config_path = get_config_path()
+    if os.path.exists(config_path):
+        with open(config_path, "r") as f:
             return _merge_defaults(json.load(f), defaults)
     return defaults
 
 
 def save_config(config: Dict[str, Any]) -> None:
     """Write config to ~/.dhee/config.json."""
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    with open(CONFIG_PATH, "w") as f:
+    config_dir = get_config_dir()
+    os.makedirs(config_dir, exist_ok=True)
+    with open(os.path.join(config_dir, "config.json"), "w") as f:
         json.dump(config, f, indent=2)
         f.write("\n")
 
@@ -99,7 +116,7 @@ def get_api_key(provider: str) -> Optional[str]:
     Environment variables win for backward compatibility. If none are
     set, fall back to Dhee's encrypted local secret store.
     """
-    defaults = PROVIDER_DEFAULTS.get(provider, {})
+    defaults = provider_defaults(provider)
     env_var = defaults.get("env_var")
     if env_var:
         key = os.environ.get(env_var)
@@ -110,11 +127,95 @@ def get_api_key(provider: str) -> Optional[str]:
         if key:
             return key
     try:
-        from dhee.secret_store import get_stored_api_key
+        from dhee.secret_store import get_api_key as get_secret_api_key
 
-        return get_stored_api_key(provider)
+        key, _source, _env_var = get_secret_api_key(provider)
+        return key
     except Exception:
         return None
+
+
+def _history_embedding_dims(config_dir: str) -> Optional[int]:
+    """Return the dominant stored embedding dimension from history.db."""
+    history_path = os.path.join(config_dir, "history.db")
+    if not os.path.exists(history_path):
+        return None
+    try:
+        conn = sqlite3.connect(history_path)
+        try:
+            rows = conn.execute(
+                """
+                SELECT embedding
+                FROM memories
+                WHERE tombstone = 0
+                  AND embedding IS NOT NULL
+                  AND embedding != ''
+                LIMIT 200
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+
+    counts: Dict[int, int] = {}
+    for (raw_embedding,) in rows:
+        try:
+            parsed = json.loads(raw_embedding) if isinstance(raw_embedding, str) else raw_embedding
+        except Exception:
+            continue
+        if isinstance(parsed, list) and parsed:
+            counts[len(parsed)] = counts.get(len(parsed), 0) + 1
+    if not counts:
+        return None
+    return max(counts.items(), key=lambda item: item[1])[0]
+
+
+def _resolve_vector_store_config(
+    config: Dict[str, Any],
+    config_dir: str,
+    embedding_dims: int,
+) -> VectorStoreConfig:
+    """Resolve the persistent vector store from config, defaulting to zvec."""
+    configured_vector = config.get("vector_store")
+    if isinstance(configured_vector, dict):
+        provider = str(configured_vector.get("provider") or "").strip()
+        vector_config = dict(configured_vector.get("config") or {})
+    else:
+        provider = str(
+            config.get("vector_store_provider")
+            or config.get("vector_provider")
+            or ""
+        ).strip()
+        vector_config = dict(config.get("vector_store_config") or {})
+
+    provider = provider.lower()
+    if not provider:
+        provider = "zvec"
+
+    collection_name = str(
+        vector_config.get("collection_name")
+        or config.get("collection_name")
+        or DEFAULT_COLLECTION
+    )
+    vector_config["collection_name"] = collection_name
+    vector_config["embedding_model_dims"] = int(
+        vector_config.get("embedding_model_dims")
+        or vector_config.get("vector_size")
+        or vector_config.get("embedding_dims")
+        or embedding_dims
+    )
+
+    if provider == "zvec":
+        vector_config["path"] = str(vector_config.get("path") or os.path.join(config_dir, "zvec"))
+    elif provider == "sqlite_vec":
+        vector_config["path"] = str(
+            vector_config.get("path") or os.path.join(config_dir, "sqlite_vec.db")
+        )
+    else:
+        raise RuntimeError(f"Unsupported persistent vector store provider: {provider}")
+
+    return VectorStoreConfig(provider=provider, config=vector_config)
 
 
 def get_memory_instance(config: Optional[Dict[str, Any]] = None):
@@ -131,41 +232,66 @@ def get_memory_instance(config: Optional[Dict[str, Any]] = None):
     if config is None:
         config = load_config()
 
-    provider = config.get("provider", "gemini")
-    defaults = PROVIDER_DEFAULTS.get(provider, PROVIDER_DEFAULTS["gemini"])
+    provider = config.get("provider", DEFAULT_PROVIDER)
+    defaults = provider_defaults(provider)
+    config_dir = get_config_dir()
+    existing_embedding_dims = _history_embedding_dims(config_dir)
+    preserve_existing_dims = bool(config.get("preserve_existing_embedding_dims", False))
 
     api_key = get_api_key(provider)
     if not api_key and provider != "ollama":
-        env_var = defaults["env_var"]
-        raise RuntimeError(
-            f"No API key found. Set {env_var} environment variable.\n"
-            f"  export {env_var}=your-key-here"
-        )
+        if existing_embedding_dims:
+            runtime_provider = "mock"
+        else:
+            env_var = defaults["env_var"]
+            raise RuntimeError(
+                f"No API key found. Set {env_var} environment variable.\n"
+                f"  export {env_var}=your-key-here"
+            )
+    else:
+        runtime_provider = provider
 
     llm_model = config.get("llm_model", defaults["llm_model"])
     embedder_model = config.get("embedder_model", defaults["embedder_model"])
-    embedding_dims = config.get("embedding_dims", defaults["embedding_dims"])
+    configured_embedding_dims = int(config.get("embedding_dims", defaults["embedding_dims"]))
 
-    llm_cfg = {"model": llm_model, "temperature": 0.1, "max_tokens": 1024}
-    embedder_cfg = {"model": embedder_model}
+    embedding_dims = int(
+        existing_embedding_dims
+        if preserve_existing_dims and existing_embedding_dims
+        else configured_embedding_dims
+    )
+    embedder_provider = provider
+    if (
+        runtime_provider == "mock"
+        or (
+            preserve_existing_dims
+            and existing_embedding_dims
+            and existing_embedding_dims != configured_embedding_dims
+        )
+    ):
+        embedder_provider = "simple"
+
+    llm_cfg = (
+        {}
+        if runtime_provider == "mock"
+        else {"model": llm_model, "temperature": 0.1, "max_tokens": 1024}
+    )
+    embedder_cfg = (
+        {"embedding_dims": embedding_dims}
+        if embedder_provider == "simple"
+        else {"model": embedder_model, "embedding_dims": embedding_dims}
+    )
     if api_key:
         llm_cfg["api_key"] = api_key
-        embedder_cfg["api_key"] = api_key
+        if embedder_provider != "simple":
+            embedder_cfg["api_key"] = api_key
 
-    vec_db_path = os.path.join(CONFIG_DIR, "sqlite_vec.db")
-    history_db_path = os.path.join(CONFIG_DIR, "history.db")
+    history_db_path = os.path.join(config_dir, "history.db")
 
     memory_config = MemoryConfig(
-        vector_store=VectorStoreConfig(
-            provider="sqlite_vec",
-            config={
-                "path": vec_db_path,
-                "collection_name": "dhee_memories",
-                "embedding_model_dims": embedding_dims,
-            },
-        ),
-        llm=LLMConfig(provider=provider, config=llm_cfg),
-        embedder=EmbedderConfig(provider=provider, config=embedder_cfg),
+        vector_store=_resolve_vector_store_config(config, config_dir, embedding_dims),
+        llm=LLMConfig(provider=runtime_provider, config=llm_cfg),
+        embedder=EmbedderConfig(provider=embedder_provider, config=embedder_cfg),
         history_db_path=history_db_path,
         embedding_model_dims=embedding_dims,
         fade=FadeMemConfig(enable_forgetting=True),

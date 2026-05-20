@@ -14,8 +14,8 @@ from types import SimpleNamespace
 
 def test_onboard_provider_default_and_key_paste(tmp_path, monkeypatch):
     monkeypatch.setenv("DHEE_DATA_DIR", str(tmp_path))
-    # Provider picker: empty line → default → openai.  Key: paste a real-looking key.
-    tty_in = io.StringIO("\nsk-test-OPENAI-key-0123456789\n")
+    # Provider picker: empty line -> default -> nvidia. Key: paste a real-looking key.
+    tty_in = io.StringIO("\nnvapi-fake-nvidia-token-0123456789\n")
     tty_out = io.StringIO()
     monkeypatch.setattr("dhee.cli_onboard._open_tty", lambda: (tty_in, tty_out))
     # Secret store + config write are exercised for real — not mocked.
@@ -28,12 +28,12 @@ def test_onboard_provider_default_and_key_paste(tmp_path, monkeypatch):
     from dhee.cli_config import CONFIG_PATH, load_config
 
     assert Path(CONFIG_PATH).exists()
-    assert load_config()["provider"] == "openai"
+    assert load_config()["provider"] == "nvidia"
 
     # The key must be retrievable through the normal lookup path.
     from dhee.secret_store import get_stored_api_key
 
-    assert get_stored_api_key("openai") == "sk-test-OPENAI-key-0123456789"
+    assert get_stored_api_key("nvidia") == "nvapi-fake-nvidia-token-0123456789"
 
     out = tty_out.getvalue()
     assert "Dhee setup" in out
@@ -44,7 +44,7 @@ def test_onboard_provider_default_and_key_paste(tmp_path, monkeypatch):
 
 def test_onboard_gemini_choice(tmp_path, monkeypatch):
     monkeypatch.setenv("DHEE_DATA_DIR", str(tmp_path))
-    tty_in = io.StringIO("2\nAIza-fake-gemini-key-12345\n")
+    tty_in = io.StringIO("3\nAIza-fake-gemini-key-12345\n")
     tty_out = io.StringIO()
     monkeypatch.setattr("dhee.cli_onboard._open_tty", lambda: (tty_in, tty_out))
     from dhee.cli_onboard import run_onboard
@@ -76,14 +76,14 @@ def test_onboard_ollama_skips_key_prompt(tmp_path, monkeypatch):
 def test_onboard_empty_key_does_not_explode(tmp_path, monkeypatch):
     """Users who hit enter through the key prompt must get a graceful skip."""
     monkeypatch.setenv("DHEE_DATA_DIR", str(tmp_path))
-    tty_in = io.StringIO("1\n\n")  # default provider + blank key
+    tty_in = io.StringIO("1\n\n")  # default NVIDIA provider + blank key
     tty_out = io.StringIO()
     monkeypatch.setattr("dhee.cli_onboard._open_tty", lambda: (tty_in, tty_out))
     from dhee.cli_onboard import run_onboard
     from dhee.secret_store import get_stored_api_key
 
     assert run_onboard(skip_ui_build=True) == 0
-    assert get_stored_api_key("openai") is None
+    assert get_stored_api_key("nvidia") is None
     assert "No key provided" in tty_out.getvalue()
 
 

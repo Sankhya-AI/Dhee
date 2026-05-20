@@ -44,11 +44,14 @@ def create_memory() -> Memory:
         ),
         embedder=EmbedderConfig(
             provider="nvidia",
-            config={"model": "nvidia/nv-embedqa-e5-v5"},
+            config={
+                "model": "nvidia/llama-nemotron-embed-vl-1b-v2",
+                "embedding_dims": 2048,
+            },
         ),
         vector_store=VectorStoreConfig(provider="memory", config={}),
         history_db_path=":memory:",
-        embedding_model_dims=1024,
+        embedding_model_dims=2048,
         echo=EchoMemConfig(enable_echo=False),
         category=CategoryMemConfig(use_llm_categorization=False),
         profile=ProfileConfig(enable_profiles=False),

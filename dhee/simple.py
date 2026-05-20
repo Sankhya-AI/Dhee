@@ -19,6 +19,7 @@ Environment Variables:
 from __future__ import annotations
 
 import logging
+import json
 import os
 import re
 import sqlite3
@@ -37,6 +38,12 @@ from dhee.configs.base import (
     VectorStoreConfig,
 )
 from dhee.memory.main import FullMemory
+from dhee.provider_defaults import (
+    DEFAULT_NVIDIA_EMBEDDER_MODEL,
+    DEFAULT_NVIDIA_LLM_MODEL,
+    DEFAULT_PROVIDER,
+    embedding_dims_for,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,14 +55,6 @@ def _detect_provider() -> str:
     except Exception:
         get_api_key = None  # type: ignore[assignment]
 
-    if os.environ.get("OPENAI_API_KEY") or (get_api_key and get_api_key("openai")):
-        return "openai"
-    if (
-        os.environ.get("GEMINI_API_KEY")
-        or os.environ.get("GOOGLE_API_KEY")
-        or (get_api_key and get_api_key("gemini"))
-    ):
-        return "gemini"
     if (
         os.environ.get("NVIDIA_API_KEY")
         or os.environ.get("NVIDIA_QWEN_API_KEY")
@@ -65,19 +64,12 @@ def _detect_provider() -> str:
         or (get_api_key and get_api_key("nvidia"))
     ):
         return "nvidia"
-    # Zero-config fallback: local simple embedder + mock LLM.
-    return "mock"
+    return DEFAULT_PROVIDER
 
 
 def _get_embedding_dims(provider: str) -> int:
     """Get embedding dimensions for provider."""
-    if provider == "gemini":
-        return 3072
-    if provider == "openai":
-        return 1536
-    if provider == "nvidia":
-        return 2048
-    return 384
+    return embedding_dims_for(provider)
 
 
 def _existing_sqlite_vec_dims(db_path: Path, collection_name: str) -> Optional[int]:
@@ -109,19 +101,55 @@ def _existing_sqlite_vec_dims(db_path: Path, collection_name: str) -> Optional[i
     return int(match.group(1))
 
 
+def _history_embedding_dims(data_dir: Path) -> Optional[int]:
+    """Return the dominant stored embedding dimension from history.db."""
+    history_path = data_dir / "history.db"
+    if not history_path.exists():
+        return None
+    try:
+        conn = sqlite3.connect(str(history_path))
+        try:
+            rows = conn.execute(
+                """
+                SELECT embedding
+                FROM memories
+                WHERE tombstone = 0
+                  AND embedding IS NOT NULL
+                  AND embedding != ''
+                LIMIT 200
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+
+    counts: Dict[int, int] = {}
+    for (raw_embedding,) in rows:
+        try:
+            parsed = json.loads(raw_embedding) if isinstance(raw_embedding, str) else raw_embedding
+        except Exception:
+            continue
+        if isinstance(parsed, list) and parsed:
+            counts[len(parsed)] = counts.get(len(parsed), 0) + 1
+    if not counts:
+        return None
+    return max(counts.items(), key=lambda item: item[1])[0]
+
+
 def _has_api_key() -> bool:
     try:
         from dhee.cli_config import get_api_key
     except Exception:
         get_api_key = None  # type: ignore[assignment]
     return bool(
-        os.environ.get("GEMINI_API_KEY")
-        or os.environ.get("OPENAI_API_KEY")
-        or (get_api_key and (get_api_key("gemini") or get_api_key("openai")))
+        os.environ.get("NVIDIA_API_KEY")
+        or os.environ.get("NVIDIA_EMBEDDING_API_KEY")
+        or os.environ.get("NVIDIA_EMBED_API_KEY")
+        or os.environ.get("NVIDIA_QWEN_API_KEY")
+        or os.environ.get("NVIDIA_LLAMA_4_MAV_API_KEY")
+        or (get_api_key and get_api_key("nvidia"))
 )
-
-DEFAULT_NVIDIA_LLM_MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
-DEFAULT_NVIDIA_EMBEDDER_MODEL = "nvidia/llama-nemotron-embed-vl-1b-v2"
 
 
 def _get_data_dir() -> Path:
@@ -166,49 +194,70 @@ class Engram:
     ):
         # Auto-detect provider
         self._provider = provider or _detect_provider()
-        if in_memory and provider is None and not _has_api_key():
+        if in_memory and provider is None:
             self._provider = "mock"
         if in_memory and data_dir is None:
             data_dir = tempfile.mkdtemp(prefix="dhee_")
         self._data_dir = Path(data_dir) if data_dir else _get_data_dir()
         self._data_dir.mkdir(parents=True, exist_ok=True)
 
-        # Build configuration. If a persistent sqlite-vec collection already
-        # exists, keep its dimension stable and use a compatible local embedder
-        # when the selected provider would produce a different vector size.
+        # Build configuration. The persistent default is zvec. If a live memory
+        # database already has embeddings, keep that dimension stable and avoid
+        # mixing embedding spaces.
         provider_embedding_dims = _get_embedding_dims(self._provider)
         existing_embedding_dims = None
         if not in_memory:
-            existing_embedding_dims = _existing_sqlite_vec_dims(
-                self._data_dir / "sqlite_vec.db",
-                collection_name,
-            )
-        embedding_dims = existing_embedding_dims or provider_embedding_dims
+            existing_embedding_dims = _history_embedding_dims(self._data_dir)
+            if existing_embedding_dims is None:
+                existing_embedding_dims = _existing_sqlite_vec_dims(
+                    self._data_dir / "sqlite_vec.db",
+                    collection_name,
+                )
+        preserve_existing_dims = os.environ.get(
+            "DHEE_PRESERVE_EXISTING_EMBEDDING_DIMS", ""
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        embedding_dims = (
+            existing_embedding_dims
+            if preserve_existing_dims and existing_embedding_dims
+            else provider_embedding_dims
+        )
+        vector_collection_name = collection_name
+        if (
+            existing_embedding_dims
+            and existing_embedding_dims != provider_embedding_dims
+            and not preserve_existing_dims
+            and not in_memory
+        ):
+            vector_collection_name = f"{collection_name}_nvidia_{provider_embedding_dims}"
 
         if in_memory:
             vector_config = VectorStoreConfig(
                 provider="memory",
                 config={
-                    "collection_name": collection_name,
+                    "collection_name": vector_collection_name,
                     "embedding_model_dims": embedding_dims,
                 },
             )
         else:
             vector_config = VectorStoreConfig(
-                provider="sqlite_vec",
+                provider="zvec",
                 config={
-                    "collection_name": collection_name,
-                    "path": str(self._data_dir / "sqlite_vec.db"),
+                    "collection_name": vector_collection_name,
+                    "path": str(self._data_dir / "zvec"),
                     "embedding_model_dims": embedding_dims,
                 },
             )
 
         llm_provider = "mock" if self._provider == "mock" else self._provider
         embedder_provider = "simple" if self._provider == "mock" else self._provider
-        if existing_embedding_dims and existing_embedding_dims != provider_embedding_dims:
+        if (
+            preserve_existing_dims
+            and existing_embedding_dims
+            and existing_embedding_dims != provider_embedding_dims
+        ):
             embedder_provider = "simple"
             logger.info(
-                "Using simple embedder with existing sqlite-vec dimension %s "
+                "Using simple embedder with existing memory dimension %s "
                 "instead of %s provider dimension %s",
                 existing_embedding_dims,
                 self._provider,
@@ -225,7 +274,10 @@ class Engram:
         if embedder_provider == "simple":
             embedder_kwargs["config"] = {"embedding_dims": embedding_dims}
         elif embedder_provider == "nvidia":
-            embedder_kwargs["config"] = {"model": DEFAULT_NVIDIA_EMBEDDER_MODEL}
+            embedder_kwargs["config"] = {
+                "model": DEFAULT_NVIDIA_EMBEDDER_MODEL,
+                "embedding_dims": embedding_dims,
+            }
 
         config = MemoryConfig(
             llm=LLMConfig(provider=llm_provider, **llm_kwargs),
@@ -490,6 +542,57 @@ class Engram:
         """
         return self._memory.get_stats(user_id=user_id, agent_id=agent_id)
 
+    def repair_memory_quality(
+        self,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        limit: int = 10_000,
+        dry_run: bool = True,
+        reindex_vectors: bool = False,
+    ) -> Dict[str, Any]:
+        """Reconcile existing memories with the current quality contract."""
+        return self._memory.repair_memory_quality(
+            user_id=user_id,
+            agent_id=agent_id,
+            limit=limit,
+            dry_run=dry_run,
+            reindex_vectors=reindex_vectors,
+        )
+
+    def repair_memory_vectors(
+        self,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        limit: int = 10_000,
+        dry_run: bool = True,
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        """Rebuild or reconcile vector entries from authoritative DB rows."""
+        return self._memory.repair_memory_vectors(
+            user_id=user_id,
+            agent_id=agent_id,
+            limit=limit,
+            dry_run=dry_run,
+            force=force,
+        )
+
+    def audit_memory_quality(
+        self,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        limit: int = 10_000,
+        profile_keyword: Optional[str] = None,
+        require_personal_model: bool = True,
+    ) -> Dict[str, Any]:
+        """Audit whether the memory vault is ready for personal-agent recall."""
+        return self._memory.audit_memory_quality(
+            user_id=user_id,
+            agent_id=agent_id,
+            limit=limit,
+            profile_keyword=profile_keyword,
+            require_personal_model=require_personal_model,
+        )
+
     def categories(self) -> List[Dict[str, Any]]:
         """Get all categories.
 
@@ -666,6 +769,57 @@ class Dhee:
             agent_id=agent_id,
             limit=limit,
             dry_run=dry_run,
+        )
+
+    def repair_memory_quality(
+        self,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        limit: int = 10_000,
+        dry_run: bool = True,
+        reindex_vectors: bool = False,
+    ) -> Dict[str, Any]:
+        """Promote canonical memories, isolate noise, and reopen degraded rows."""
+        return self._engram.repair_memory_quality(
+            user_id=user_id or self._user_id,
+            agent_id=agent_id,
+            limit=limit,
+            dry_run=dry_run,
+            reindex_vectors=reindex_vectors,
+        )
+
+    def repair_memory_vectors(
+        self,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        limit: int = 10_000,
+        dry_run: bool = True,
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        """Rebuild or reconcile vector entries from authoritative DB rows."""
+        return self._engram.repair_memory_vectors(
+            user_id=user_id or self._user_id,
+            agent_id=agent_id,
+            limit=limit,
+            dry_run=dry_run,
+            force=force,
+        )
+
+    def audit_memory_quality(
+        self,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        limit: int = 10_000,
+        profile_keyword: Optional[str] = None,
+        require_personal_model: bool = True,
+    ) -> Dict[str, Any]:
+        """Audit whether Dhee is carrying a dependable personal model."""
+        return self._engram.audit_memory_quality(
+            user_id=user_id or self._user_id,
+            agent_id=agent_id,
+            limit=limit,
+            profile_keyword=profile_keyword,
+            require_personal_model=require_personal_model,
         )
 
     # ------------------------------------------------------------------

@@ -23,6 +23,7 @@ exec "$PY" -u -m dhee.benchmarks.longmemeval \
     --end-index 500 \
     --top-k 10 \
     --embedder-provider nvidia \
+    --embedding-dims 2048 \
     --enable-rerank \
     --rerank-model nvidia/llama-3.2-nv-rerankqa-1b-v2 \
     --retrieval-only \

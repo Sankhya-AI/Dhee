@@ -4,12 +4,13 @@ import time
 from typing import Optional
 
 from dhee.llms.base import BaseLLM
+from dhee.provider_defaults import DEFAULT_NVIDIA_LLM_MODEL
 
 logger = logging.getLogger(__name__)
 
 
 class NvidiaLLM(BaseLLM):
-    """LLM provider for NVIDIA API (OpenAI-compatible). Default model: Qwen 3.5 397B."""
+    """LLM provider for NVIDIA API (OpenAI-compatible)."""
 
     def __init__(self, config: Optional[dict] = None):
         super().__init__(config)
@@ -42,7 +43,7 @@ class NvidiaLLM(BaseLLM):
         if max_retries is not None:
             client_kwargs["max_retries"] = int(max_retries)
         self.client = OpenAI(**client_kwargs)
-        self.model = self.config.get("model", "openai/gpt-oss-120b")
+        self.model = self.config.get("model", DEFAULT_NVIDIA_LLM_MODEL)
         self.temperature = self.config.get("temperature", 0.2)
         self.max_tokens = self.config.get("max_tokens", 4096)
         self.top_p = self.config.get("top_p", 0.7)

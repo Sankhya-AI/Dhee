@@ -71,7 +71,8 @@ def test_compile_task_contract_builds_deterministic_actionables(tmp_path):
     assert "tests/" in contract["allowed_write_paths"]
     assert ".env" in contract["forbidden_paths"]
     assert contract["context_budget"]["repo_context_tokens"] == 6000
-    assert contract["repo_intelligence"]["schema_version"] == "dhee.repo_intelligence.v1"
+    assert contract["repo_intelligence"]["schema_version"] == "dhee.repo_intelligence.v4"
+    assert contract["impact_analysis"]["schema_version"] == "dhee.repo_impact.v1"
     assert contract["compiled_context"]["schema_version"] == "dhee.context_ledger.v1"
     assert contract["compiled_context"]["items"][0]["why_included"]
     assert contract["verification_card"]["schema_version"] == "dhee.verification_card.v1"

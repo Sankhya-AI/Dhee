@@ -76,6 +76,7 @@ class GroundedFact:
     confidence: float = 0.0
     memory_ids: List[str] = field(default_factory=list)
     resolver_path: str = ""                # context->sql|vector->rerank|episodic
+    recall_explanations: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -85,6 +86,7 @@ class GroundedFact:
             "confidence": self.confidence,
             "memory_ids": self.memory_ids,
             "resolver_path": self.resolver_path,
+            "recall_explanations": self.recall_explanations,
         }
 
 
@@ -322,13 +324,21 @@ class CognitionEngine:
                 if results:
                     top = results[0]
                     memory_text = top.get("memory", "")
+                    score = top.get("composite_score", top.get("score", 0.5))
                     return GroundedFact(
                         question=sub_q.question,
                         answer=memory_text,
                         source="memory_search",
-                        confidence=min(1.0, top.get("score", 0.5)),
+                        confidence=min(1.0, score),
                         memory_ids=[top.get("id", "")],
                         resolver_path="vector->rerank",
+                        recall_explanations=[
+                            top.get("recall_explanation") or {
+                                "matched_memory_id": top.get("id", ""),
+                                "confidence": min(1.0, score),
+                                "why_now": "memory search result",
+                            }
+                        ],
                     )
             except Exception as e:
                 logger.debug("Search failed for '%s': %s", query, e)
@@ -363,15 +373,23 @@ class CognitionEngine:
                 limit=3,
             )
             results = search_result.get("results", [])
-            if results and results[0].get("score", 0) >= 0.85:
+            top_score = results[0].get("composite_score", results[0].get("score", 0)) if results else 0
+            if results and top_score >= 0.85:
                 top = results[0]
                 return GroundedFact(
                     question=question,
                     answer=top.get("memory", ""),
                     source="memory_search",
-                    confidence=top.get("score", 0.5),
+                    confidence=top_score,
                     memory_ids=[top.get("id", "")],
                     resolver_path="vector->direct",
+                    recall_explanations=[
+                        top.get("recall_explanation") or {
+                            "matched_memory_id": top.get("id", ""),
+                            "confidence": top_score,
+                            "why_now": "direct memory search result",
+                        }
+                    ],
                 )
         except Exception:
             pass

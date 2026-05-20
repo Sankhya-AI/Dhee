@@ -53,27 +53,187 @@ def _get_memory(config: Optional[Dict] = None):
 
 def _get_db():
     """Direct DB handle for commands that should not require model credentials."""
-    from dhee.cli_config import CONFIG_DIR
+    from dhee.cli_config import get_config_dir
     from dhee.db.sqlite import SQLiteManager
 
-    return SQLiteManager(os.path.join(CONFIG_DIR, "history.db"))
+    return SQLiteManager(os.path.join(get_config_dir(), "history.db"))
 
 
 def _get_vector_store():
     """Direct vector-store handle for commands that should not require model credentials."""
-    from dhee.cli_config import CONFIG_DIR, PROVIDER_DEFAULTS, load_config
-    from dhee.vector_stores.sqlite_vec import SqliteVecStore
+    from dhee.cli_config import (
+        DEFAULT_PROVIDER,
+        PROVIDER_DEFAULTS,
+        _history_embedding_dims,
+        _resolve_vector_store_config,
+        get_config_dir,
+        load_config,
+    )
+    from dhee.utils.factory import VectorStoreFactory
 
     config = load_config()
-    provider = config.get("provider", "gemini")
-    defaults = PROVIDER_DEFAULTS.get(provider, PROVIDER_DEFAULTS["gemini"])
-    embedding_dims = config.get("embedding_dims", defaults["embedding_dims"])
-    return SqliteVecStore(
-        {
-            "path": os.path.join(CONFIG_DIR, "sqlite_vec.db"),
-            "collection_name": "dhee_memories",
-            "embedding_model_dims": embedding_dims,
-        }
+    config_dir = get_config_dir()
+    provider = str(config.get("provider") or DEFAULT_PROVIDER).strip().lower()
+    defaults = PROVIDER_DEFAULTS.get(provider, PROVIDER_DEFAULTS[DEFAULT_PROVIDER])
+    existing_embedding_dims = _history_embedding_dims(config_dir)
+    preserve_existing_dims = bool(config.get("preserve_existing_embedding_dims", False))
+    configured_embedding_dims = int(config.get("embedding_dims", defaults["embedding_dims"]))
+    embedding_dims = int(
+        existing_embedding_dims
+        if preserve_existing_dims and existing_embedding_dims
+        else configured_embedding_dims
+    )
+    vector_config = _resolve_vector_store_config(config, config_dir, embedding_dims)
+    return VectorStoreFactory.create(vector_config.provider, vector_config.config)
+
+
+def _get_model_free_memory(*, persistent_vectors: bool = False):
+    """Local FullMemory runtime for read/repair commands that must never need API keys."""
+    from dhee.cli_config import get_config_dir
+    from dhee.cli_config import load_config
+    from dhee.configs.base import (
+        EmbedderConfig,
+        FadeMemConfig,
+        LLMConfig,
+        MemoryConfig,
+        VectorStoreConfig,
+    )
+    from dhee.memory.main import FullMemory
+
+    config_dir = get_config_dir()
+
+    def _history_embedding_dims() -> Optional[int]:
+        import sqlite3
+
+        history_path = os.path.join(config_dir, "history.db")
+        if not os.path.exists(history_path):
+            return None
+        try:
+            conn = sqlite3.connect(history_path)
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT embedding
+                    FROM memories
+                    WHERE tombstone = 0
+                      AND embedding IS NOT NULL
+                      AND embedding != ''
+                    LIMIT 200
+                    """
+                ).fetchall()
+            finally:
+                conn.close()
+        except Exception:
+            return None
+        counts: Dict[int, int] = {}
+        for (raw_embedding,) in rows:
+            try:
+                parsed = json.loads(raw_embedding) if isinstance(raw_embedding, str) else raw_embedding
+            except Exception:
+                continue
+            if isinstance(parsed, list) and parsed:
+                counts[len(parsed)] = counts.get(len(parsed), 0) + 1
+        if not counts:
+            return None
+        return max(counts.items(), key=lambda item: item[1])[0]
+
+    vector_config = VectorStoreConfig(provider="memory", config={"vector_size": 384})
+    embedding_dims = 384
+    if persistent_vectors:
+        from pathlib import Path
+        from dhee.provider_defaults import (
+            DEFAULT_COLLECTION,
+            DEFAULT_PROVIDER,
+            embedding_dims_for,
+        )
+        from dhee.simple import _existing_sqlite_vec_dims
+
+        config = load_config()
+        history_dims = _history_embedding_dims()
+        provider = str(config.get("provider") or DEFAULT_PROVIDER).strip().lower()
+        embedder_model = config.get("embedder_model")
+        preserve_existing_dims = bool(config.get("preserve_existing_embedding_dims", False))
+        configured_vector = config.get("vector_store")
+        if isinstance(configured_vector, dict):
+            vector_provider = str(configured_vector.get("provider") or "").strip().lower()
+            vector_provider_config = dict(configured_vector.get("config") or {})
+        else:
+            vector_provider = str(
+                config.get("vector_store_provider")
+                or config.get("vector_provider")
+                or ""
+            ).strip().lower()
+            vector_provider_config = dict(config.get("vector_store_config") or {})
+
+        zvec_path = Path(vector_provider_config.get("path") or Path(config_dir) / "zvec")
+        sqlite_path = Path(vector_provider_config.get("path") or Path(config_dir) / "sqlite_vec.db")
+        if not vector_provider:
+            if zvec_path.exists():
+                vector_provider = "zvec"
+            elif sqlite_path.exists():
+                vector_provider = "sqlite_vec"
+            else:
+                # Dhee's current production default is zvec; fall back to
+                # sqlite-vec only when an existing sqlite DB is discovered.
+                vector_provider = "zvec"
+
+        configured_embedding_dims = int(
+            vector_provider_config.get("embedding_model_dims")
+            or vector_provider_config.get("vector_size")
+            or vector_provider_config.get("embedding_dims")
+            or config.get("embedding_dims")
+            or embedding_dims_for(provider=provider, model=embedder_model)
+        )
+        embedding_dims = int(
+            history_dims
+            if preserve_existing_dims and history_dims
+            else configured_embedding_dims
+        )
+
+        if vector_provider == "zvec":
+            import zvec  # noqa: F401
+
+            collection_name = str(vector_provider_config.get("collection_name") or DEFAULT_COLLECTION)
+            vector_config = VectorStoreConfig(
+                provider="zvec",
+                config={
+                    "path": str(zvec_path),
+                    "collection_name": collection_name,
+                    "embedding_model_dims": embedding_dims,
+                },
+            )
+        elif vector_provider == "sqlite_vec":
+            import sqlite_vec  # noqa: F401
+
+            collection_name = str(vector_provider_config.get("collection_name") or DEFAULT_COLLECTION)
+            existing_dims = _existing_sqlite_vec_dims(sqlite_path, collection_name)
+            if existing_dims is None and collection_name != "dhee_memories":
+                fallback_dims = _existing_sqlite_vec_dims(sqlite_path, "dhee_memories")
+                if fallback_dims is not None:
+                    collection_name = "dhee_memories"
+                    existing_dims = fallback_dims
+            if preserve_existing_dims and not history_dims and existing_dims:
+                embedding_dims = int(existing_dims)
+            vector_config = VectorStoreConfig(
+                provider="sqlite_vec",
+                config={
+                    "path": str(sqlite_path),
+                    "collection_name": collection_name,
+                    "embedding_model_dims": embedding_dims,
+                },
+            )
+        else:
+            raise RuntimeError(f"Unsupported persistent vector store provider: {vector_provider}")
+
+    return FullMemory(
+        MemoryConfig(
+            vector_store=vector_config,
+            llm=LLMConfig(provider="mock", config={}),
+            embedder=EmbedderConfig(provider="simple", config={"embedding_dims": embedding_dims}),
+            history_db_path=os.path.join(config_dir, "history.db"),
+            embedding_model_dims=embedding_dims,
+            fade=FadeMemConfig(enable_forgetting=True),
+        )
     )
 
 
@@ -638,7 +798,7 @@ def cmd_context(args: argparse.Namespace) -> None:
 
         subaction = args.entry_id or "index"
         extra = list(getattr(args, "context_args", []) or [])
-        brain_actions = {"index", "show", "get", "localize", "graph", "query"}
+        brain_actions = {"index", "show", "get", "localize", "graph", "query", "search", "callers", "callees", "impact", "explore"}
         if subaction not in brain_actions:
             extra = [subaction, *extra]
             subaction = "localize"
@@ -749,6 +909,116 @@ def cmd_context(args: argparse.Namespace) -> None:
             print(f"Context graph: {summary.get('node_count')} nodes, {summary.get('edge_count')} edges")
             for item in graph.get("proof_items") or []:
                 print(f"  {item.get('kind')}: {item.get('id')} score={item.get('score')}")
+            return
+        if subaction == "search":
+            query = " ".join(str(item) for item in extra).strip()
+            if not query:
+                print("Pass a query: dhee context repo-brain search \"ContextFirewall allow_path\"")
+                sys.exit(1)
+            loaded = repo_intelligence.load_repo_brain(repo)
+            brain = loaded.get("brain") if isinstance(loaded.get("brain"), dict) else None
+            if not brain:
+                brain = repo_intelligence.build_repo_brain(repo, goal=query, persist=True)
+            result = repo_intelligence.repo_symbol_search(
+                brain,
+                query,
+                kind=getattr(args, "kind", None),
+                language=getattr(args, "language", None),
+                path=getattr(args, "path", None),
+                limit=int(getattr(args, "limit", None) or 20),
+                include_tests=bool(getattr(args, "include_tests", False)),
+            )
+            if args.json:
+                _json_out({"format": "dhee_repo_symbol_search.v1", "symbol_search": result})
+                return
+            print(f"Symbol search: {result.get('summary', {}).get('result_count')} results")
+            for item in result.get("results") or []:
+                span = item.get("span") or {}
+                print(f"  {item.get('score'):.2f} {item.get('qualified_name')}  {item.get('path')}:{span.get('start_line')}")
+            return
+        if subaction in {"callers", "callees"}:
+            symbol = " ".join(str(item) for item in extra).strip()
+            if not symbol:
+                print(f"Pass a symbol: dhee context repo-brain {subaction} ContextFirewall.allow_path")
+                sys.exit(1)
+            loaded = repo_intelligence.load_repo_brain(repo)
+            brain = loaded.get("brain") if isinstance(loaded.get("brain"), dict) else None
+            if not brain:
+                brain = repo_intelligence.build_repo_brain(repo, goal=symbol, persist=True)
+            result = (
+                repo_intelligence.repo_callers(
+                    brain,
+                    symbol,
+                    depth=int(getattr(args, "depth", None) or 1),
+                    limit=int(getattr(args, "limit", None) or 50),
+                )
+                if subaction == "callers"
+                else repo_intelligence.repo_callees(
+                    brain,
+                    symbol,
+                    depth=int(getattr(args, "depth", None) or 1),
+                    limit=int(getattr(args, "limit", None) or 50),
+                )
+            )
+            if args.json:
+                _json_out({"format": f"dhee_repo_{subaction}.v1", subaction: result})
+                return
+            summary = result.get("summary") or {}
+            print(f"{subaction.title()}: {summary.get('node_count')} nodes, {summary.get('edge_count')} edges")
+            for edge in result.get("edges") or []:
+                print(f"  {edge.get('source')} -> {edge.get('target')} confidence={edge.get('confidence')}")
+            return
+        if subaction == "impact":
+            target = " ".join(str(item) for item in extra).strip()
+            if not target:
+                print("Pass a symbol or path: dhee context repo-brain impact dhee/context_firewall.py")
+                sys.exit(1)
+            loaded = repo_intelligence.load_repo_brain(repo)
+            brain = loaded.get("brain") if isinstance(loaded.get("brain"), dict) else None
+            if not brain:
+                brain = repo_intelligence.build_repo_brain(repo, goal=target, persist=True)
+            result = repo_intelligence.repo_impact(
+                brain,
+                target,
+                depth=int(getattr(args, "depth", None) or 2),
+                limit=int(getattr(args, "limit", None) or 100),
+                include_tests=True,
+            )
+            if args.json:
+                _json_out({"format": "dhee_repo_impact.v1", "impact": result})
+                return
+            print(f"Impact: {result.get('summary', {}).get('impacted_file_count')} files")
+            for item in result.get("impacted_files") or []:
+                print(f"  {item.get('confidence'):.2f} {item.get('path')}  {', '.join(item.get('reasons') or [])}")
+            for item in result.get("candidate_tests") or []:
+                print(f"  test {item.get('command')}")
+            return
+        if subaction == "explore":
+            query = " ".join(str(item) for item in extra).strip()
+            if not query:
+                print("Pass a query: dhee context repo-brain explore \"Fix failing context firewall tests\"")
+                sys.exit(1)
+            loaded = repo_intelligence.load_repo_brain(repo)
+            brain = loaded.get("brain") if isinstance(loaded.get("brain"), dict) else None
+            if not brain:
+                brain = repo_intelligence.build_repo_brain(repo, goal=query, persist=True)
+            result = repo_intelligence.repo_explore(
+                brain,
+                query,
+                max_hops=int(getattr(args, "max_hops", None) or 3),
+                max_files=int(getattr(args, "max_files", None) or 8),
+                max_symbols=int(getattr(args, "max_symbols", None) or 40),
+                max_source_chars=int(getattr(args, "max_source_chars", None) or 18000),
+            )
+            if args.json:
+                _json_out({"format": "dhee_repo_explore.v1", "explore": result})
+                return
+            summary = result.get("summary") or {}
+            print(f"Explore: {summary.get('symbol_count')} symbols, {summary.get('file_count')} files, {summary.get('source_window_count')} windows")
+            for item in (result.get("impact") or {}).get("impacted_files") or []:
+                print(f"  file {item.get('path')} confidence={item.get('confidence')}")
+            for window in result.get("source_windows") or []:
+                print(f"  window {window.get('path')}:{window.get('start_line')}-{window.get('end_line')} chars={window.get('char_count')}")
             return
 
     if action == "task":
@@ -1412,13 +1682,140 @@ def cmd_list(args: argparse.Namespace) -> None:
 
 def cmd_stats(args: argparse.Namespace) -> None:
     """Show memory statistics."""
-    memory = _get_memory()
+    memory = _get_model_free_memory()
     result = memory.get_stats(user_id=args.user_id)
     if args.json:
         _json_out(result)
     else:
         for key, value in result.items():
             print(f"  {key}: {value}")
+
+
+def cmd_memory_quality(args: argparse.Namespace) -> None:
+    """Audit or repair Dhee's memory-quality contract."""
+    action = getattr(args, "quality_action", "audit")
+    needs_persistent_vectors = bool(action == "reindex-vectors" or getattr(args, "reindex_vectors", False))
+    try:
+        memory = _get_model_free_memory(persistent_vectors=needs_persistent_vectors)
+    except ModuleNotFoundError as exc:
+        if needs_persistent_vectors and exc.name in {"zvec", "sqlite_vec"}:
+            extra = "zvec" if exc.name == "zvec" else "sqlite_vec"
+            raise RuntimeError(
+                f"memory-quality vector repair requires the {exc.name} optional dependency. "
+                f"Install it with `pip install {exc.name}` or `pip install -e '.[{extra}]'`."
+            ) from exc
+        raise
+    try:
+        if action == "remember-canonical":
+            if not args.content:
+                raise RuntimeError("memory-quality remember-canonical requires content")
+            metadata = {
+                "explicit_remember": True,
+                "canonical": True,
+                "canonical_kind": args.kind,
+                "source": "memory_quality_cli",
+                "profile_keyword": args.profile_keyword,
+            }
+            result = memory.add(
+                args.content,
+                user_id=args.user_id,
+                agent_id=args.agent_id,
+                metadata=metadata,
+                infer=False,
+                initial_layer="lml",
+                initial_strength=1.0,
+            )
+            if args.json:
+                _json_out(result)
+            else:
+                rows = result.get("results", [])
+                memory_id = rows[0].get("id") if rows else None
+                print(f"  canonical memory stored: {memory_id}")
+            return
+
+        if action == "repair":
+            result = memory.repair_memory_quality(
+                user_id=args.user_id,
+                agent_id=args.agent_id,
+                limit=args.limit,
+                dry_run=not args.apply,
+                reindex_vectors=args.reindex_vectors,
+            )
+            if args.json:
+                _json_out(result)
+                return
+            mode = "applied" if args.apply else "dry-run"
+            print(f"  Memory-quality repair {mode}:")
+            print(f"  scanned: {result.get('scanned_count', 0)}")
+            print(f"  repairs: {result.get('repair_count', 0)}")
+            print(f"  canonical promoted: {result.get('canonical_promoted', 0)}")
+            print(f"  passive isolated: {result.get('passive_isolated', 0)}")
+            print(f"  test isolated: {result.get('test_isolated', 0)}")
+            print(f"  queued reopened: {result.get('queued_reopened', 0)}")
+            if result.get("vector_repair"):
+                vector_repair = result["vector_repair"]
+                print(f"  vector repairs: {vector_repair.get('repair_count', 0)}")
+                print(f"  vector errors: {vector_repair.get('vector_errors', 0)}")
+            if not args.apply and result.get("repair_count", 0):
+                print("  rerun with --apply to write these repairs")
+            return
+
+        if action == "reindex-vectors":
+            result = memory.repair_memory_vectors(
+                user_id=args.user_id,
+                agent_id=args.agent_id,
+                limit=args.limit,
+                dry_run=not args.apply,
+                force=args.force_reindex,
+            )
+            if args.json:
+                _json_out(result)
+                return
+            mode = "applied" if args.apply else "dry-run"
+            print(f"  Memory vector reindex {mode}:")
+            print(f"  scanned: {result.get('scanned_count', 0)}")
+            print(f"  repairs: {result.get('repair_count', 0)}")
+            print(f"  missing vectors: {result.get('missing_vector', 0)}")
+            print(f"  stale payloads: {result.get('payload_stale', 0)}")
+            print(f"  dimension mismatches: {result.get('dimension_mismatch', 0)}")
+            print(f"  vector errors: {result.get('vector_errors', 0)}")
+            if not args.apply and result.get("repair_count", 0):
+                print("  rerun with --apply to write these vector repairs")
+            return
+
+        result = memory.audit_memory_quality(
+            user_id=args.user_id,
+            agent_id=args.agent_id,
+            limit=args.limit,
+            profile_keyword=args.profile_keyword,
+            require_personal_model=not args.no_personal_model,
+        )
+        if args.json:
+            _json_out(result)
+            return
+        print(f"  status: {result.get('status')}  score: {result.get('score')}/100")
+        print(f"  ready: {result.get('ready')}")
+        counts = result.get("counts", {})
+        print(
+            "  counts: "
+            f"total={counts.get('total', 0)}, "
+            f"canonical={counts.get('canonical_personal', 0)}, "
+            f"lml={counts.get('lml', 0)}, "
+            f"passive={counts.get('passive_screen', 0)}, "
+            f"test={counts.get('test_fixture', 0)}, "
+            f"queued={counts.get('degraded_or_queued', 0)}, "
+            f"repairs={counts.get('contract_repairs_available', 0)}"
+        )
+        for check in result.get("readiness_checks", []):
+            mark = "ok" if check.get("passed") else "FAIL"
+            print(f"  [{mark}] {check.get('name')}: {check.get('detail')}")
+        actions = result.get("recommended_actions", [])
+        if actions:
+            print("  recommended actions:")
+            for action in actions:
+                print(f"  - {action}")
+    finally:
+        memory.close()
 
 
 def cmd_decay(args: argparse.Namespace) -> None:
@@ -1455,7 +1852,7 @@ def cmd_categories(args: argparse.Namespace) -> None:
 
 def cmd_export(args: argparse.Namespace) -> None:
     """Export all memories to JSON or `.dheemem`."""
-    from dhee.cli_config import CONFIG_DIR
+    from dhee.cli_config import get_config_dir
     from dhee.protocol import PACK_EXTENSION, export_pack
 
     output = args.output
@@ -1471,7 +1868,7 @@ def cmd_export(args: argparse.Namespace) -> None:
                 vector_store=vector_store,
                 output_path=output,
                 user_id=getattr(args, "user_id", "default"),
-                key_dir=CONFIG_DIR,
+                key_dir=get_config_dir(),
                 repo=getattr(args, "repo", None) or os.getcwd(),
             )
         finally:
@@ -2119,7 +2516,7 @@ def cmd_status(args: argparse.Namespace) -> None:
     thing actually doing anything?".
     """
     from dhee import __version__
-    from dhee.cli_config import CONFIG_DIR, CONFIG_PATH, load_config
+    from dhee.cli_config import get_config_dir, get_config_path, load_config
     from dhee.cli_mcp import detect_agents
     from dhee.harness.install import harness_status
     from dhee import repo_link
@@ -2128,8 +2525,10 @@ def cmd_status(args: argparse.Namespace) -> None:
     provider = config.get("provider", "not configured")
     packages = config.get("packages", [])
     native_harnesses = harness_status(harness="all")
-    vec_db = os.path.join(CONFIG_DIR, "sqlite_vec.db")
-    hist_db = os.path.join(CONFIG_DIR, "history.db")
+    config_dir = get_config_dir()
+    config_path = get_config_path()
+    vec_db = os.path.join(config_dir, "sqlite_vec.db")
+    hist_db = os.path.join(config_dir, "history.db")
     agents = detect_agents()
 
     db_sizes: Dict[str, Any] = {}
@@ -2176,7 +2575,7 @@ def cmd_status(args: argparse.Namespace) -> None:
             "version": __version__,
             "provider": provider,
             "packages": packages,
-            "config_path": CONFIG_PATH,
+            "config_path": config_path,
             "agents": agents,
             "native_harnesses": native_harnesses,
             "db_sizes": db_sizes,
@@ -2214,7 +2613,7 @@ def cmd_status(args: argparse.Namespace) -> None:
 
     print(f"  Provider: {provider}")
     print(f"  Packages: {', '.join(packages) if packages else 'none'}")
-    print(f"  Config:   {CONFIG_PATH}")
+    print(f"  Config:   {config_path}")
 
     # DB sizes
     for label, path in [("Vector DB", vec_db), ("History DB", hist_db)]:
@@ -2371,19 +2770,20 @@ def cmd_runtime(args: argparse.Namespace) -> None:
 
 def cmd_uninstall(args: argparse.Namespace) -> None:
     """Cleanly stop Dhee and remove managed install artifacts."""
-    from dhee.cli_config import CONFIG_DIR
+    from dhee.cli_config import get_config_dir
     from dhee.install_cleanup import cleanup_install_artifacts
     from dhee import runtime
 
     runtime_result = runtime.stop_daemon()
-    if not os.path.exists(CONFIG_DIR):
+    config_dir = get_config_dir()
+    if not os.path.exists(config_dir):
         harness_result = _disable_harnesses_for_uninstall()
-        artifact_result = cleanup_install_artifacts(CONFIG_DIR)
-        if os.path.exists(CONFIG_DIR):
-            shutil.rmtree(CONFIG_DIR)
+        artifact_result = cleanup_install_artifacts(config_dir)
+        if os.path.exists(config_dir):
+            shutil.rmtree(config_dir)
         result = {
             "removed": False,
-            "path": CONFIG_DIR,
+            "path": config_dir,
             "reason": "missing",
             "runtime": runtime_result,
             "harnesses": harness_result,
@@ -2400,15 +2800,15 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
             print("Removed leftover installer artifacts." if cleaned else "Nothing to remove.")
         return
 
-    confirm = "yes" if getattr(args, "yes", False) else input(f"Remove {CONFIG_DIR}? [y/N]: ").strip().lower()
+    confirm = "yes" if getattr(args, "yes", False) else input(f"Remove {config_dir}? [y/N]: ").strip().lower()
     if confirm in ("y", "yes"):
         harness_result = _disable_harnesses_for_uninstall()
-        artifact_result = cleanup_install_artifacts(CONFIG_DIR)
-        if os.path.exists(CONFIG_DIR):
-            shutil.rmtree(CONFIG_DIR)
+        artifact_result = cleanup_install_artifacts(config_dir)
+        if os.path.exists(config_dir):
+            shutil.rmtree(config_dir)
         result = {
             "removed": True,
-            "path": CONFIG_DIR,
+            "path": config_dir,
             "runtime": runtime_result,
             "harnesses": harness_result,
             "install_artifacts": artifact_result,
@@ -2424,7 +2824,7 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
                 print(f"Removed managed symlinks: {len(removed_links)}")
             if changed_profiles:
                 print(f"Cleaned shell profiles: {len(changed_profiles)}")
-            print(f"Removed {CONFIG_DIR}")
+            print(f"Removed {config_dir}")
     else:
         if getattr(args, "json", False):
             _json_out({"removed": False, "reason": "cancelled", "runtime": runtime_result})
@@ -2824,7 +3224,7 @@ def cmd_portability_eval(args: argparse.Namespace) -> None:
     threshold (default 0.95) flags a portability regression.
     """
     from dhee.benchmarks.portability import run_portability_eval
-    from dhee.cli_config import CONFIG_DIR
+    from dhee.cli_config import get_config_dir
 
     db = _get_db()
     vector_store = _get_vector_store()
@@ -2833,7 +3233,7 @@ def cmd_portability_eval(args: argparse.Namespace) -> None:
             source_db=db,
             source_vector_store=vector_store,
             user_id=getattr(args, "user_id", "default"),
-            key_dir=CONFIG_DIR,
+            key_dir=get_config_dir(),
             output_dir=getattr(args, "out_dir", None),
             retention_threshold=getattr(args, "threshold", 0.95),
         )
@@ -3507,6 +3907,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_stats.add_argument("--user-id", default="default", help="User ID")
     p_stats.add_argument("--json", action="store_true", help="JSON output")
 
+    # memory-quality
+    p_quality = sub.add_parser("memory-quality", help="Audit or repair Dhee memory quality")
+    p_quality.add_argument(
+        "quality_action",
+        nargs="?",
+        choices=["audit", "repair", "reindex-vectors", "remember-canonical"],
+        default="audit",
+        help="Audit readiness, repair legacy rows, reindex vectors, or store an explicit canonical memory",
+    )
+    p_quality.add_argument("content", nargs="?", help="Canonical memory text for remember-canonical")
+    p_quality.add_argument("--user-id", default="default", help="User ID")
+    p_quality.add_argument("--agent-id", help="Optional agent scope")
+    p_quality.add_argument("--limit", type=int, default=10_000, help="Maximum memories to scan")
+    p_quality.add_argument("--profile-keyword", default="chotu", help="Canonical profile keyword to require")
+    p_quality.add_argument("--kind", default="goal", help="Canonical kind for remember-canonical")
+    p_quality.add_argument("--no-personal-model", action="store_true", help="Do not require personal-model readiness checks")
+    p_quality.add_argument("--apply", action="store_true", help="Apply repairs; default repair mode is dry-run")
+    p_quality.add_argument("--reindex-vectors", action="store_true", help="Also reconcile vector index entries during repair")
+    p_quality.add_argument("--force-reindex", action="store_true", help="Delete and rebuild primary vectors during reindex-vectors")
+    p_quality.add_argument("--json", action="store_true", help="JSON output")
+
     # decay
     p_decay = sub.add_parser("decay", help="Apply forgetting")
     p_decay.add_argument("--user-id", default="default", help="User ID")
@@ -3709,6 +4130,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_context.add_argument("--as-of", help="For `context fact search`, active-at timestamp")
     p_context.add_argument("--include-invalidated", action="store_true", help="For `context fact search`, include invalidated records")
     p_context.add_argument("--limit", type=int, help="For context subcommands that support a row limit")
+    p_context.add_argument("--kind", help="For `context repo-brain search`, filter symbol kind")
+    p_context.add_argument("--language", help="For `context repo-brain search`, filter language")
+    p_context.add_argument("--path", help="For `context repo-brain search`, filter path")
+    p_context.add_argument("--depth", type=int, help="For `context repo-brain callers|callees|impact`, graph depth")
+    p_context.add_argument("--include-tests", action="store_true", help="For `context repo-brain search|impact`, include test files")
+    p_context.add_argument("--max-hops", type=int, help="For `context repo-brain explore`, max graph hops")
+    p_context.add_argument("--max-files", type=int, help="For `context repo-brain explore`, max files")
+    p_context.add_argument("--max-symbols", type=int, help="For `context repo-brain explore`, max symbols")
+    p_context.add_argument("--max-source-chars", type=int, help="For `context repo-brain explore`, max source characters")
     p_context.add_argument("--quiet", action="store_true", help="No output on refresh (for git hooks)")
     p_context.add_argument("--json", action="store_true", help="JSON output")
 
@@ -4189,6 +4619,7 @@ COMMAND_MAP = {
     "ui": cmd_ui,
     "list": cmd_list,
     "stats": cmd_stats,
+    "memory-quality": cmd_memory_quality,
     "decay": cmd_decay,
     "categories": cmd_categories,
     "export": cmd_export,

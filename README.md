@@ -1,161 +1,60 @@
 <p align="center">
-  <img src="docs/dhee-hero.svg" alt="Dhee - context compiler for AI coding agents" width="100%">
+  <img src="https://raw.githubusercontent.com/Sankhya-AI/Dhee/main/docs/dhee-hero.svg" alt="Dhee turns messy coding-agent context into a grounded action loop" width="100%">
 </p>
 
 <h1 align="center">Dhee</h1>
 
 <p align="center">
-  <b>Local-first context compiler, supervisor, and proof layer for AI coding agents.</b>
+  <b>The local developer brain for AI coding agents.</b><br>
+  Persistent memory, repo cognition, handoff, routing, and proof for Codex, Claude Code, Cursor, Gemini CLI, Cline, and any MCP client.
 </p>
 
 <p align="center">
   <a href="https://pypi.org/project/dhee"><img src="https://img.shields.io/pypi/v/dhee?style=flat-square&color=orange" alt="PyPI"></a>
   <a href="https://pypi.org/project/dhee"><img src="https://img.shields.io/badge/python-3.9%2B-blue.svg?style=flat-square" alt="Python 3.9+"></a>
   <a href="https://github.com/Sankhya-AI/Dhee/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square" alt="MIT License"></a>
-  <a href="benchmarks/longmemeval/"><img src="https://img.shields.io/badge/LongMemEval-R%401%2094.8%25-brightgreen.svg?style=flat-square" alt="LongMemEval R@1 94.8%"></a>
-</p>
-
-<p align="center">
-  <a href="#why">Why</a> |
-  <a href="#quick-start">Quick Start</a> |
-  <a href="#how-it-works">How It Works</a> |
-  <a href="#protected-mode">Protected Mode</a> |
-  <a href="#update-capsules">Update Capsules</a>
+  <a href="benchmarks/longmemeval/"><img src="https://img.shields.io/badge/LongMemEval-R%405%2099.4%25-brightgreen.svg?style=flat-square" alt="LongMemEval R@5 99.4%"></a>
 </p>
 
 ---
 
-## Why
+## What Dhee Is
 
-AI coding agents do not fail only because the model is weak. They fail because
-the working context gets messy: stale decisions, huge logs, repeated file reads,
-lost handoffs, private memory mixed with repo context, and unverified edits.
+Dhee is a production-ready, local-first context and memory layer for coding agents.
 
-Dhee sits beside the agent and turns that mess into a compact, auditable
-working state.
+It is not a model, not an autocomplete tool, and not a hosted vector database. It sits beside your agent and keeps the work grounded:
 
-| Without Dhee | With Dhee |
-| --- | --- |
-| Raw files, logs, diffs, chats, and screenshots flood the prompt. | Dhee compiles ranked context cards with evidence pointers. |
-| The agent makes free-form plans and hopes they are safe. | Dhee emits task contracts, allowed actions, verifier cards, and proof bundles. |
-| Memory grows until it becomes noise. | Dhee admits, scores, decays, summarizes, and promotes only what survives. |
-| Team updates require copying code or long prompts. | Dhee packages reproducible change stories as update capsules. |
+- **Memory that does not rot into noise:** canonical facts, preferences, decisions, project rules, passive evidence, test fixtures, and operational events are separated.
+- **Repo cognition that survives sessions:** symbol graph, imports, calls, route/component map, test map, ownership, historical failures, and impact analysis.
+- **Context routing:** large files, grep output, logs, test runs, and agent handoffs become compact digests with evidence pointers.
+- **Action contracts:** before edits, Dhee can compile the task into files, constraints, tests, risk, and proof obligations.
+- **Handoff:** another agent can continue with the current repo state, decisions, blockers, and next action.
 
-The product promise is simple:
+The promise is simple: **less prompt sludge, fewer repeated mistakes, better grounded code edits.**
 
-> No untracked context. No unproven edit. No repeated preventable failure.
-
-## Quick Start
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Sankhya-AI/Dhee/main/install.sh | sh
-cd /path/to/repo
-dhee init
-dhee status
-```
-
-Or install from PyPI:
+## Install
 
 ```bash
 pip install dhee
 dhee install
 ```
 
-Open the local workspace:
+Or use the installer:
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/Sankhya-AI/Dhee/main/install.sh | sh
+```
+
+Then wire a repo:
+
+```bash
+cd /path/to/repo
+dhee init
+dhee status
 dhee ui
 ```
 
-Core Dhee supports Python 3.9+. MCP server dependencies require Python 3.10+:
-
-```bash
-python3.12 -m pip install "dhee[mcp]"
-```
-
-## How It Works
-
-<p align="center">
-  <img src="docs/dhee-flow.svg" alt="Dhee flow chart" width="100%">
-</p>
-
-Dhee compiles context like a software build:
-
-1. Read the current task, repo, branch state, tests, memories, agents, and tool output.
-2. Produce a deterministic task contract: goal, files, allowed writes, forbidden paths, tests, budget, rollback plan.
-3. Supervise every action against the contract.
-4. Verify the result with tests, diffs, proof bundles, and contamination checks.
-5. Store only compact lessons and scene cards. Raw evidence stays behind pointers.
-
-## Protected Mode
-
-Use protected mode when the agent is allowed to modify code:
-
-```bash
-dhee context task create "Fix failing context firewall tests" --repo .
-dhee context task enforce deny --repo .
-dhee context task activate <task_id> --repo .
-dhee doctor contract-runtime --repo .
-```
-
-In `deny` mode, Dhee fails closed:
-
-- no active contract, no coding action
-- supervisor unavailable, action blocked
-- corrupt runtime state, diagnostic surfaced
-- proof bundle required before submit
-
-Release gate:
-
-```bash
-dhee release check --repo .
-```
-
-This refuses release tagging unless `git status` is clean. Release intent can
-document scope, but it does not bypass the clean-tree rule.
-
-## Update Capsules
-
-Dhee can turn a completed repo change into a portable update recipe:
-
-```bash
-dhee context capsule create --repo . --since HEAD~1
-dhee context capsule list --repo .
-dhee context capsule show <capsule_id> --repo .
-```
-
-Each capsule stores:
-
-- `capsule.md`: before/after story, behavior, tests, reproduction guide
-- `capsule.json`: changed paths, hashes, compact hunks, commands, evidence refs
-
-Capsules are not raw memory dumps. Personal context is private by default and
-only sanitized lessons can be promoted into shareable repo context.
-
-## Memory Layer
-
-Dhee memory is designed for long-lived developer work:
-
-- temporal scenes from noisy evidence
-- hot, warm, and cold tiers
-- pointer-backed artifacts, transcripts, screenshots, media, and future wearable streams
-- provenance fields for user, agent, app, event, run, memory type, and privacy scope
-- context packs that fit a hard token budget
-
-For passive capture, Dhee rejects low-quality UI noise and stores searchable
-derivatives instead of raw prompt-heavy media.
-
-## Integrations
-
-| Surface | Support |
-| --- | --- |
-| Claude Code | hooks, MCP, handoff, shared tasks, router enforcement |
-| Codex | MCP config, `AGENTS.md`, server instructions, session-log sync |
-| Cursor, Cline, Gemini CLI, Goose | MCP-first integration |
-| Hermes | MemoryProvider, learning import, promotion, playbook exchange |
-| Git | repo context, update capsules, conflict checks |
-
-MCP config:
+MCP clients can use:
 
 ```json
 {
@@ -165,46 +64,103 @@ MCP config:
 }
 ```
 
+## How It Helps A Coding Agent
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Sankhya-AI/Dhee/main/docs/dhee-flow.svg" alt="Dhee coding agent flow" width="100%">
+</p>
+
+Without Dhee, every turn is a loose pile of files, logs, stale memory, and guesses.
+
+With Dhee, the agent gets a compact working packet:
+
+1. **Recall:** relevant user/project memory, current handoff, and repo facts.
+2. **Understand:** repo brain localizes likely files, symbols, routes, tests, and owners.
+3. **Act:** task contract controls allowed writes and risky paths.
+4. **Verify:** tests, diffs, proof bundles, and contamination checks.
+5. **Learn:** only durable lessons are promoted; junk stays suppressed.
+
+## Deep Repo Cognition
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Sankhya-AI/Dhee/main/docs/dhee-impact.svg" alt="Dhee repo impact map" width="100%">
+</p>
+
+Ask: **"If I touch this file, what breaks?"**
+
+Dhee's repo brain answers with grounded graph evidence:
+
+- impacted files and symbols
+- impacted routes and React components
+- likely tests to run
+- owners from git history
+- related failure signatures
+- source windows with line numbers, not raw file dumps
+
+The repo brain is git-SHA scoped and persisted under `.dhee/context/repo_brain/`, so agents do not rebuild understanding from scratch every session.
+
+## Memory Quality
+
+Dhee separates memory into classes instead of letting everything compete:
+
+| Memory kind | What happens |
+| --- | --- |
+| Canonical personal/project facts | Durable, high-confidence, slow decay |
+| Passive screen/context observations | Raw evidence, not personal truth |
+| Test fixtures and probes | Suppressed from normal recall |
+| Operational events | Useful for diagnostics, not identity |
+| Repo handoff/session state | Scoped to repo and current work |
+
+This is what keeps a Chotu/Codex/Claude-style agent from sounding clever one minute and strangely blind the next.
+
 ## Useful Commands
 
 ```bash
-dhee handoff
-dhee context state --card
-dhee context checkpoint --reason "before compaction"
-dhee context check --repo .
-dhee doctor
-dhee export --format dheemem --output backup.dheemem
-dhee import backup.dheemem --format dheemem --strategy dry-run
+dhee handoff --repo . --json
+dhee context task create "fix flaky auth tests" --repo .
+dhee context repo-brain index --repo .
+dhee context repo-brain impact dhee/auth.py --repo .
+dhee shell "cat /handoff/latest.md"
+dhee memory-quality audit --user-id default --json
+dhee release check --repo .
 ```
+
+## Provider Defaults
+
+Dhee can run model-free for repo tooling and handoff. For high-quality semantic memory, the default provider map points to the NVIDIA-compatible OpenAI API stack used in our LongMemEval runs:
+
+```bash
+dhee key set nvidia
+pip install "dhee[nvidia,zvec,mcp]"
+```
+
+Current high-quality stack:
+
+- Embedder: `nvidia/llama-nemotron-embed-vl-1b-v2`
+- Reranker: `nvidia/llama-3.2-nv-rerankqa-1b-v2`
+- Vector backend: `zvec` through `dhee-accel`
 
 ## Benchmarks
 
-Dhee reports LongMemEval retrieval results on the full 500-question set:
+On LongMemEval full 500-question recall:
 
-| System | R@1 | R@5 | R@10 |
-| --- | ---: | ---: | ---: |
-| Dhee | 94.8% | 99.4% | 99.8% |
-| agentmemory | - | 95.2% | 98.6% |
-| MemPalace hybrid v4 | - | 98.4% | - |
+| System | R@1 | R@3 | R@5 | R@10 |
+| --- | ---: | ---: | ---: | ---: |
+| Dhee | 94.8% | 99.0% | 99.4% | 99.8% |
 
-Proof and commands live in [`benchmarks/longmemeval/`](benchmarks/longmemeval/).
+Reproduction notes and outputs live in [`benchmarks/longmemeval/`](benchmarks/longmemeval/).
+
+## What Is In The Open Source Package
+
+You get the local developer brain: memory OS, repo brain, DheeFS, MCP server, CLI, UI, runtime daemon, handoff bus, update capsules, and release/proof tooling.
+
+Enterprise/team governance, hosted dashboards, org policy, and managed source connectors can build on top of these local primitives. The OSS package is useful by itself and does not require a hosted account.
 
 ## Develop
 
 ```bash
-git clone https://github.com/Sankhya-AI/Dhee.git
-cd Dhee
-pip install -e ".[dev]"
+pip install -e ".[dev,nvidia,zvec,mcp]"
 pytest
-```
-
-Full release check:
-
-```bash
-python3 -m compileall -q dhee tests
-python3 -m pytest -q
-python3 -m build
-dhee release check --repo .
 ```
 
 ## License

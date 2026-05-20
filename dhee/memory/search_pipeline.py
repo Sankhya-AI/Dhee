@@ -21,9 +21,15 @@ from dhee.memory.retrieval_helpers import (
     term_overlap_count,
     truncate_rerank_text,
 )
+from dhee.memory.quality import (
+    memory_quality_from_record,
+    query_allows_suppressed_class,
+    recall_explanation,
+)
 from dhee.memory.scoping import SCOPE_VALUES, DEFAULT_SCOPE_WEIGHTS, MemoryScope
 from dhee.memory.utils import build_filters_and_metadata, matches_filters
 from dhee.memory.vectors import collapse_vector_results, resolve_memory_id
+from dhee.vector_stores.base import MemoryResult
 
 logger = logging.getLogger(__name__)
 
@@ -182,13 +188,23 @@ class SearchPipeline:
         ):
             query_intent = classify_intent(query)
 
-        query_embedding = self._embedder.embed(query, memory_action="search")
-        vector_results = self._vector_store.search(
-            query=query,
-            vectors=query_embedding,
-            limit=limit * 2,
-            filters=effective_filters,
+        # Prepare query terms for echo-based re-ranking and DB fallback.
+        query_lower = query.lower()
+        query_terms = set(
+            re.sub(r"[^\w\s]", "", query_lower).split()
         )
+
+        query_embedding = self._embedder.embed(query, memory_action="search")
+        try:
+            vector_results = self._vector_store.search(
+                query=query,
+                vectors=query_embedding,
+                limit=limit * 2,
+                filters=effective_filters,
+            )
+        except Exception as exc:
+            logger.warning("Vector search failed; falling back to DB lexical recall: %s", exc)
+            vector_results = []
 
         if agent_id and user_id:
             connector_filters = {
@@ -197,12 +213,16 @@ class SearchPipeline:
                 if key not in {"agent_id", "run_id", "app_id"}
             }
             connector_filters["user_id"] = user_id
-            connector_results = self._vector_store.search(
-                query=query,
-                vectors=query_embedding,
-                limit=limit * 2,
-                filters=connector_filters,
-            )
+            try:
+                connector_results = self._vector_store.search(
+                    query=query,
+                    vectors=query_embedding,
+                    limit=limit * 2,
+                    filters=connector_filters,
+                )
+            except Exception as exc:
+                logger.debug("Connector vector search skipped: %s", exc)
+                connector_results = []
 
             merged = {result.id: result for result in vector_results}
             for result in connector_results:
@@ -213,11 +233,15 @@ class SearchPipeline:
 
         vector_results = collapse_vector_results(vector_results)
 
-        # Prepare query terms for echo-based re-ranking (strip punctuation)
-        query_lower = query.lower()
-        query_terms = set(
-            re.sub(r"[^\w\s]", "", query_lower).split()
-        )
+        if not vector_results:
+            vector_results = self._db_lexical_fallback(
+                query_terms=query_terms,
+                effective_filters=effective_filters,
+                user_id=user_id,
+                agent_id=agent_id,
+                limit=limit * 2,
+                min_strength=min_strength,
+            )
 
         # CategoryMem: Detect relevant categories for the query
         category_processor = self._category_processor_fn()
@@ -315,6 +339,10 @@ class SearchPipeline:
             ):
                 continue
 
+            quality = memory_quality_from_record(memory)
+            if quality.suppress_from_default_recall and not query_allows_suppressed_class(query, quality.memory_class):
+                continue
+
             vr = vr_by_id[memory_id]
             similarity = float(vr.score)
             strength = float(memory.get("strength", 1.0))
@@ -336,6 +364,8 @@ class SearchPipeline:
                 combined = composite_score(similarity, strength)
 
             combined *= self._scope_resolver.get_scope_weight(scope)
+            quality_multiplier = float(quality.search_multiplier or 1.0)
+            combined *= quality_multiplier
 
             # EchoMem: Apply echo-based re-ranking boost
             echo_boost = 0.0
@@ -417,12 +447,15 @@ class SearchPipeline:
 
             if boost_on_access:
                 access_ids.append(memory["id"])
-                if self._fade_config.access_strength_boost > 0:
-                    boosted_strength = min(1.0, strength + self._fade_config.access_strength_boost)
+                quality_promotable = quality.layer == "lml" and not quality.suppress_from_default_recall
+                if self._fade_config.access_strength_boost > 0 and quality_promotable:
+                    strength_cap = 1.0 if quality.strength_cap is None else float(quality.strength_cap)
+                    boosted_strength = min(strength_cap, strength + self._fade_config.access_strength_boost)
                     if boosted_strength != strength:
                         strength_updates[memory["id"]] = boosted_strength
                         strength = boosted_strength
-                promotion_ids.append(memory["id"])
+                if quality_promotable:
+                    promotion_ids.append(memory["id"])
                 # EchoMem: Re-echo on frequent access
                 if (
                     echo_processor
@@ -480,6 +513,15 @@ class SearchPipeline:
                     "resolver_predicate": resolver_predicate,
                     "resolver_grounded_missing_count": len(resolver_grounded_missing),
                     "memory_type": mem_type,
+                    "memory_class": quality.memory_class,
+                    "canonical_kind": quality.canonical_kind,
+                    "quality_boost": quality_multiplier - 1.0,
+                    "recall_explanation": recall_explanation(
+                        query=query,
+                        memory=memory,
+                        score=similarity,
+                        composite_score=combined,
+                    ),
                     "query_intent": query_intent.value if query_intent else None,
                     "confidence": metadata.get("mm_confidence"),
                     "conversation_context": memory.get("conversation_context"),
@@ -669,6 +711,71 @@ class SearchPipeline:
                 logger.debug("Buddhi search hook skipped: %s", e)
 
         return {"results": final_results}
+
+    def _db_lexical_fallback(
+        self,
+        *,
+        query_terms: Set[str],
+        effective_filters: Dict[str, Any],
+        user_id: Optional[str],
+        agent_id: Optional[str],
+        limit: int,
+        min_strength: float,
+    ) -> List[MemoryResult]:
+        """Recover grounded recall when vectors are unavailable or stale."""
+        fetch_limit = max(limit * 20, 200)
+        try:
+            memories = self._db.get_all_memories(
+                user_id=user_id,
+                agent_id=agent_id,
+                min_strength=min_strength,
+                limit=fetch_limit,
+            )
+        except Exception as exc:
+            logger.warning("DB lexical recall fallback failed: %s", exc)
+            return []
+
+        scored: List[MemoryResult] = []
+        for memory in memories:
+            if self._is_expired_fn(memory):
+                continue
+            metadata = memory.get("metadata") if isinstance(memory.get("metadata"), dict) else {}
+            if effective_filters and not matches_filters({**memory, **metadata}, effective_filters):
+                continue
+            quality = memory_quality_from_record(memory)
+            if quality.suppress_from_default_recall:
+                continue
+
+            haystack = " ".join(
+                [
+                    str(memory.get("memory") or ""),
+                    " ".join(str(item) for item in metadata.get("echo_keywords", []) if item),
+                    str(metadata.get("canonical_kind") or ""),
+                    str(metadata.get("dhee_memory_class") or ""),
+                ]
+            ).lower()
+            haystack_terms = set(re.sub(r"[^\w\s]", "", haystack).split())
+            overlap = query_terms & haystack_terms
+            if overlap:
+                lexical_score = min(1.0, 0.25 + (len(overlap) / max(4.0, float(len(query_terms) or 1))))
+            elif quality.memory_class == "canonical_personal":
+                lexical_score = 0.2
+            else:
+                continue
+            lexical_score *= float(quality.search_multiplier or 1.0)
+            scored.append(
+                MemoryResult(
+                    id=str(memory.get("id")),
+                    score=min(1.0, lexical_score),
+                    payload={
+                        "memory_id": memory.get("id"),
+                        "retrieval_fallback": "db_lexical",
+                    },
+                )
+            )
+
+        scored.sort(key=lambda item: item.score, reverse=True)
+        return scored[:limit]
 
     # -- Rerank passage builder -----------------------------------------------
 

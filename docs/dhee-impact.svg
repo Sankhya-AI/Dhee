@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1500 620" role="img" aria-labelledby="title desc">
+  <title id="title">Dhee repo impact map</title>
+  <desc id="desc">Sketch map answering what breaks if a coding agent touches a file.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2 2 L10 6 L2 10" fill="none" stroke="#22272e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <style>
+      .paper { fill: #fffaf0; }
+      .ink { stroke: #22272e; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; fill: none; }
+      .thin { stroke: #22272e; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; fill: none; }
+      .arrow { marker-end: url(#arrow); }
+      .title { font: 700 44px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #22272e; }
+      .label { font: 700 25px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #22272e; }
+      .small { font: 500 18px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #49515b; }
+      .tiny { font: 700 16px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #49515b; }
+    </style>
+  </defs>
+
+  <rect class="paper" width="1500" height="620"/>
+  <text class="title" x="64" y="78">"If I touch this file, what breaks?"</text>
+  <path class="thin" opacity=".14" d="M62 104 C260 78 449 113 628 93 C836 70 1004 112 1190 88 C1312 72 1410 84 1454 68"/>
+
+  <g transform="translate(596 225)">
+    <path d="M17 10 C93 -5 223 0 312 13 C344 18 362 42 357 76 C351 125 369 178 337 204 C298 235 86 222 34 205 C5 195 -6 159 5 121 C16 78 -12 31 17 10 Z" fill="#fff0b8"/>
+    <path class="ink" d="M17 10 C93 -5 223 0 312 13 C344 18 362 42 357 76 C351 125 369 178 337 204 C298 235 86 222 34 205 C5 195 -6 159 5 121 C16 78 -12 31 17 10 Z"/>
+    <text class="label" x="46" y="66">Touched file</text>
+    <text class="small" x="46" y="104">dhee/auth.py</text>
+    <text class="small" x="46" y="135">current git SHA</text>
+    <text class="small" x="46" y="166">source windows + symbols</text>
+  </g>
+
+  <g transform="translate(118 169)">
+    <path d="M11 8 C70 -4 171 1 237 10 C262 14 276 32 273 58 C269 97 280 132 253 151 C216 176 64 162 25 151 C4 145 -4 118 4 91 C13 58 -11 26 11 8 Z" fill="#d9ecff"/>
+    <path class="ink" d="M11 8 C70 -4 171 1 237 10 C262 14 276 32 273 58 C269 97 280 132 253 151 C216 176 64 162 25 151 C4 145 -4 118 4 91 C13 58 -11 26 11 8 Z"/>
+    <text class="label" x="34" y="59">Symbols</text>
+    <text class="small" x="34" y="97">callers + callees</text>
+    <text class="small" x="34" y="125">imports + exports</text>
+  </g>
+
+  <g transform="translate(1076 156)">
+    <path d="M11 8 C70 -4 178 1 247 10 C273 14 288 32 285 59 C281 101 292 137 263 156 C223 184 66 167 26 155 C4 148 -4 121 4 93 C13 59 -11 26 11 8 Z" fill="#d9f1cf"/>
+    <path class="ink" d="M11 8 C70 -4 178 1 247 10 C273 14 288 32 285 59 C281 101 292 137 263 156 C223 184 66 167 26 155 C4 148 -4 121 4 93 C13 59 -11 26 11 8 Z"/>
+    <text class="label" x="35" y="59">Routes</text>
+    <text class="small" x="35" y="97">Next app/pages</text>
+    <text class="small" x="35" y="126">API handlers</text>
+  </g>
+
+  <g transform="translate(130 397)">
+    <path d="M11 8 C72 -5 186 1 255 10 C282 14 297 33 294 60 C290 103 301 138 271 158 C231 185 67 168 26 156 C4 149 -4 121 4 93 C13 59 -11 26 11 8 Z" fill="#efe0ff"/>
+    <path class="ink" d="M11 8 C72 -5 186 1 255 10 C282 14 297 33 294 60 C290 103 301 138 271 158 C231 185 67 168 26 156 C4 149 -4 121 4 93 C13 59 -11 26 11 8 Z"/>
+    <text class="label" x="35" y="59">Tests</text>
+    <text class="small" x="35" y="98">closest pytest files</text>
+    <text class="small" x="35" y="127">required commands</text>
+  </g>
+
+  <g transform="translate(1070 402)">
+    <path d="M12 8 C78 -5 195 1 269 11 C297 15 313 34 310 63 C306 107 318 144 287 164 C244 192 70 174 27 161 C4 154 -4 124 4 95 C13 60 -11 26 12 8 Z" fill="#ffdcca"/>
+    <path class="ink" d="M12 8 C78 -5 195 1 269 11 C297 15 313 34 310 63 C306 107 318 144 287 164 C244 192 70 174 27 161 C4 154 -4 124 4 95 C13 60 -11 26 12 8 Z"/>
+    <text class="label" x="36" y="60">Owners + failures</text>
+    <text class="small" x="36" y="100">git history signals</text>
+    <text class="small" x="36" y="129">recent failure traces</text>
+  </g>
+
+  <g transform="translate(596 42)">
+    <path d="M10 7 C67 -4 178 1 247 9 C273 12 287 30 285 56 C281 96 291 128 263 147 C225 172 66 160 25 148 C4 142 -4 117 4 90 C12 57 -10 25 10 7 Z" fill="#ffffff"/>
+    <path class="ink" d="M10 7 C67 -4 178 1 247 9 C273 12 287 30 285 56 C281 96 291 128 263 147 C225 172 66 160 25 148 C4 142 -4 117 4 90 C12 57 -10 25 10 7 Z"/>
+    <text class="label" x="34" y="58">Components</text>
+    <text class="small" x="34" y="97">render tree</text>
+    <text class="small" x="34" y="125">used-by graph</text>
+  </g>
+
+  <path class="ink arrow" d="M594 285 C502 245 421 230 391 229"/>
+  <path class="ink arrow" d="M954 286 C1007 245 1039 229 1076 227"/>
+  <path class="ink arrow" d="M601 376 C507 430 439 462 425 470"/>
+  <path class="ink arrow" d="M947 376 C1000 428 1036 462 1074 477"/>
+  <path class="ink arrow" d="M761 223 C754 173 749 145 743 129"/>
+
+  <g transform="translate(560 544)">
+    <path class="thin" d="M0 0 C65 31 228 30 298 4"/>
+    <text class="tiny" x="321" y="11">impact output becomes an evidence packet, not a guess</text>
+  </g>
+</svg>

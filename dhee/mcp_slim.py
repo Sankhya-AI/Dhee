@@ -593,10 +593,11 @@ TOOLS = [
             "Router wrapper for Read. Opens a file, extracts a factual digest "
             "(path + line/char/token counts, symbols for Python/Markdown/JSON/"
             "JS/TS/Go/Rust, head+tail excerpt), stores the full raw content "
-            "under a pointer `ptr`, and returns only the digest. Use INSTEAD "
-            "OF native `Read` to keep large file contents out of the "
-            "conversation context. If the digest is insufficient, call "
-            "`dhee_expand_result(ptr=...)` to retrieve the raw."
+            "under a pointer `ptr`, and returns a digest. Use INSTEAD OF "
+            "native `Read` to keep large file contents out of the conversation "
+            "context. If `dhee_expand_result` is unavailable, rerun with "
+            "`offset`+`limit`; explicit bounded ranges include a capped "
+            "`source_window` inline."
         ),
         inputSchema={
             "type": "object",
@@ -604,6 +605,9 @@ TOOLS = [
                 "file_path": {"type": "string", "description": "Absolute path to the file"},
                 "offset": {"type": "integer", "description": "1-indexed start line (optional)"},
                 "limit": {"type": "integer", "description": "Number of lines to read from offset (optional)"},
+                "include_source": {"type": "boolean", "description": "Include a capped line-numbered source_window inline. Full raw still stays behind ptr."},
+                "max_source_lines": {"type": "integer", "description": "Max source_window lines (cap 120)."},
+                "max_source_chars": {"type": "integer", "description": "Max source_window chars (cap 12000)."},
                 "digest_depth": {
                     "type": "string",
                     "enum": ["shallow", "normal", "deep"],
@@ -1007,6 +1011,9 @@ def _handle_recall(args: Dict[str, Any]) -> Dict[str, Any]:
             "repo_root": r.get("repo_root"),
             "title": r.get("title"),
             "why": _recall_why(query, text),
+            "recall_explanation": r.get("recall_explanation"),
+            "memory_class": r.get("memory_class"),
+            "memory_kind": r.get("canonical_kind") or r.get("memory_type"),
         })
         lowest_kept_score = score if lowest_kept_score is None else min(lowest_kept_score, score)
         if len(memories) >= limit:
@@ -1463,6 +1470,122 @@ def _handle_dhee_context_graph_query(args: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _load_or_build_repo_brain(args: Dict[str, Any], fallback_goal: str) -> Dict[str, Any]:
+    from dhee.repo_intelligence import build_repo_brain, load_repo_brain
+
+    loaded = load_repo_brain(
+        args.get("repo"),
+        ref=args.get("ref"),
+        quarantine=bool(args.get("quarantine") or False),
+    )
+    brain = loaded.get("brain") if isinstance(loaded.get("brain"), dict) else None
+    if brain:
+        return brain
+    return build_repo_brain(
+        args.get("repo"),
+        goal=fallback_goal,
+        relevant_files=args.get("relevant_files"),
+        must_run=args.get("must_run"),
+        persist=bool(args.get("persist", True)),
+    )
+
+
+def _handle_dhee_repo_symbol_search(args: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee.repo_intelligence import repo_symbol_search
+
+    query = str(args.get("query") or args.get("goal") or args.get("task") or "").strip()
+    if not query:
+        return {"error": "query is required"}
+    brain = _load_or_build_repo_brain(args, query)
+    return {
+        "format": "dhee_repo_symbol_search.v1",
+        "symbol_search": repo_symbol_search(
+            brain,
+            query,
+            kind=args.get("kind"),
+            language=args.get("language"),
+            path=args.get("path"),
+            limit=int(args.get("limit") or 20),
+            include_tests=bool(args.get("include_tests") or False),
+        ),
+    }
+
+
+def _handle_dhee_repo_callers(args: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee.repo_intelligence import repo_callers
+
+    symbol = str(args.get("symbol") or args.get("query") or "").strip()
+    if not symbol:
+        return {"error": "symbol is required"}
+    brain = _load_or_build_repo_brain(args, symbol)
+    return {
+        "format": "dhee_repo_callers.v1",
+        "callers": repo_callers(
+            brain,
+            symbol,
+            depth=int(args.get("depth") or 1),
+            limit=int(args.get("limit") or 50),
+        ),
+    }
+
+
+def _handle_dhee_repo_callees(args: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee.repo_intelligence import repo_callees
+
+    symbol = str(args.get("symbol") or args.get("query") or "").strip()
+    if not symbol:
+        return {"error": "symbol is required"}
+    brain = _load_or_build_repo_brain(args, symbol)
+    return {
+        "format": "dhee_repo_callees.v1",
+        "callees": repo_callees(
+            brain,
+            symbol,
+            depth=int(args.get("depth") or 1),
+            limit=int(args.get("limit") or 50),
+        ),
+    }
+
+
+def _handle_dhee_repo_impact(args: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee.repo_intelligence import repo_impact
+
+    target = str(args.get("symbol_or_path") or args.get("symbol") or args.get("path") or args.get("query") or "").strip()
+    if not target:
+        return {"error": "symbol_or_path is required"}
+    brain = _load_or_build_repo_brain(args, target)
+    return {
+        "format": "dhee_repo_impact.v1",
+        "impact": repo_impact(
+            brain,
+            target,
+            depth=int(args.get("depth") or 2),
+            limit=int(args.get("limit") or 100),
+            include_tests=bool(args.get("include_tests", True)),
+        ),
+    }
+
+
+def _handle_dhee_repo_explore(args: Dict[str, Any]) -> Dict[str, Any]:
+    from dhee.repo_intelligence import repo_explore
+
+    query = str(args.get("query") or args.get("goal") or args.get("task") or "").strip()
+    if not query:
+        return {"error": "query is required"}
+    brain = _load_or_build_repo_brain(args, query)
+    return {
+        "format": "dhee_repo_explore.v1",
+        "explore": repo_explore(
+            brain,
+            query,
+            max_hops=int(args.get("max_hops") or 3),
+            max_files=int(args.get("max_files") or 8),
+            max_symbols=int(args.get("max_symbols") or 40),
+            max_source_chars=int(args.get("max_source_chars") or 18000),
+        ),
+    }
+
+
 def _temporal_fact_ledger(args: Dict[str, Any]):
     from dhee.temporal_fact_ledger import open_default_ledger
 
@@ -1840,6 +1963,8 @@ def _handle_dhee_tools_list(_args: Dict[str, Any]) -> Dict[str, Any]:
         "get_memory",
         "get_all_memories",
         "get_memory_stats",
+        "audit_memory_quality",
+        "repair_memory_quality",
         "search_skills",
         "apply_skill",
         "record_trajectory_step",
@@ -2048,6 +2173,11 @@ HANDLERS = {
     "dhee_repo_brain_localize": _handle_dhee_repo_brain_localize,
     "dhee_repo_graph_export": _handle_dhee_repo_graph_export,
     "dhee_context_graph_query": _handle_dhee_context_graph_query,
+    "dhee_repo_symbol_search": _handle_dhee_repo_symbol_search,
+    "dhee_repo_callers": _handle_dhee_repo_callers,
+    "dhee_repo_callees": _handle_dhee_repo_callees,
+    "dhee_repo_impact": _handle_dhee_repo_impact,
+    "dhee_repo_explore": _handle_dhee_repo_explore,
     "dhee_temporal_fact_assert": _handle_dhee_temporal_fact_assert,
     "dhee_temporal_fact_search": _handle_dhee_temporal_fact_search,
     "dhee_temporal_fact_get": _handle_dhee_temporal_fact_get,

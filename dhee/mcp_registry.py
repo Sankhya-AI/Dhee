@@ -42,6 +42,11 @@ REPO_INTELLIGENCE_TOOL_NAMES = (
     "dhee_repo_brain_localize",
     "dhee_repo_graph_export",
     "dhee_context_graph_query",
+    "dhee_repo_symbol_search",
+    "dhee_repo_callers",
+    "dhee_repo_callees",
+    "dhee_repo_impact",
+    "dhee_repo_explore",
 )
 
 TEMPORAL_FACT_TOOL_NAMES = (
@@ -107,6 +112,17 @@ _REPO_BRAIN_PROPERTIES = {
     "limit": {"type": "integer"},
     "node_limit": {"type": "integer"},
     "edge_limit": {"type": "integer"},
+    "kind": {"type": "string"},
+    "language": {"type": "string"},
+    "path": {"type": "string"},
+    "symbol": {"type": "string"},
+    "symbol_or_path": {"type": "string"},
+    "depth": {"type": "integer"},
+    "include_tests": {"type": "boolean"},
+    "max_hops": {"type": "integer"},
+    "max_files": {"type": "integer"},
+    "max_symbols": {"type": "integer"},
+    "max_source_chars": {"type": "integer"},
 }
 
 _TEMPORAL_FACT_PROPERTIES = {
@@ -171,6 +187,51 @@ TOOL_SPECS: Dict[str, Dict[str, Any]] = {
         "inputSchema": {
             "type": "object",
             "properties": {**deepcopy(_REPO_BRAIN_PROPERTIES), "max_hops": {"type": "integer"}},
+            "required": ["query"],
+        },
+    },
+    "dhee_repo_symbol_search": {
+        "name": "dhee_repo_symbol_search",
+        "description": "Search the v4 Dhee-native repo symbol index with confidence, provenance, path/language/kind filters, and agent-outcome ranking signals.",
+        "inputSchema": {
+            "type": "object",
+            "properties": deepcopy(_REPO_BRAIN_PROPERTIES),
+            "required": ["query"],
+        },
+    },
+    "dhee_repo_callers": {
+        "name": "dhee_repo_callers",
+        "description": "Trace callers of a symbol through the v4 normalized call graph.",
+        "inputSchema": {
+            "type": "object",
+            "properties": deepcopy(_REPO_BRAIN_PROPERTIES),
+            "required": ["symbol"],
+        },
+    },
+    "dhee_repo_callees": {
+        "name": "dhee_repo_callees",
+        "description": "Trace callees of a symbol through the v4 normalized call graph.",
+        "inputSchema": {
+            "type": "object",
+            "properties": deepcopy(_REPO_BRAIN_PROPERTIES),
+            "required": ["symbol"],
+        },
+    },
+    "dhee_repo_impact": {
+        "name": "dhee_repo_impact",
+        "description": "Trace likely edit impact from a symbol or path through calls, imports, tests, failures, ownership, and provenance.",
+        "inputSchema": {
+            "type": "object",
+            "properties": deepcopy(_REPO_BRAIN_PROPERTIES),
+            "required": ["symbol_or_path"],
+        },
+    },
+    "dhee_repo_explore": {
+        "name": "dhee_repo_explore",
+        "description": "Return a bounded agent-ready exploration packet: ranked symbols, impact files, tests, graph proof, and line-numbered source windows.",
+        "inputSchema": {
+            "type": "object",
+            "properties": deepcopy(_REPO_BRAIN_PROPERTIES),
             "required": ["query"],
         },
     },

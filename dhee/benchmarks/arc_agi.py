@@ -368,8 +368,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-tokens", type=int, default=2048, help="LLM max output tokens.")
     parser.add_argument("--enable-thinking", action="store_true", help="Enable thinking/CoT mode for supported models.")
     parser.add_argument("--embedder-provider", default="nvidia", choices=["nvidia", "openai", "gemini", "simple"])
-    parser.add_argument("--embedder-model", default="nvidia/nv-embed-v1")
-    parser.add_argument("--embedding-dims", type=int, default=4096)
+    parser.add_argument("--embedder-model", default="nvidia/llama-nemotron-embed-vl-1b-v2")
+    parser.add_argument("--embedding-dims", type=int, default=2048)
 
     return parser.parse_args()
 

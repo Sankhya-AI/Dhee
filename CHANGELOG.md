@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [7.0.0] - 2026-05-20 — Production-ready Developer Brain
+
+- Marked Dhee as the production-ready local developer brain for coding agents:
+  memory, repo cognition, handoff, context routing, task contracts, and proof
+  bundles for Codex, Claude Code, Cursor, Cline, Gemini CLI, and MCP clients.
+- Reframed the README into a shorter product-first guide with explicit
+  boundaries: Dhee is not a model, autocomplete tool, or hosted vector database.
+- Replaced the README visuals with three Excalidraw-style diagrams that show
+  the agent loop, repo-impact reasoning, and what Dhee does beside a coding
+  agent.
+- Hardened memory quality as a mandatory contract: canonical personal/project
+  facts, passive evidence, test fixtures, and operational events no longer
+  compete in the same recall lane.
+- Added repair and audit paths for legacy memory pollution, suppressed test
+  fixtures, queued/degraded rows, and vector reconciliation.
+- Standardized the high-quality semantic-memory defaults around the NVIDIA
+  OpenAI-compatible stack, zvec through `dhee-accel`, and the 2048-dimensional
+  Nemotron embedding profile.
+- Added first-class route and component maps to the persistent repo brain, plus
+  impact output for touched files, likely tests, impacted routes/components,
+  owners, and failure signatures.
+- Installed Kuzu-backed graph support as part of the production repo-cognition
+  stack and kept the package metadata at `Development Status :: 5 -
+  Production/Stable`.
+
 ## [6.2.0] - 2026-05-15 — Production launch hardening
 
 - Marked the public package metadata as `Development Status :: 5 -

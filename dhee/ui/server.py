@@ -4881,7 +4881,7 @@ def create_app(*, serve_static: bool = True, dev_mode: bool = False) -> FastAPI:
 
     @app.post("/api/ui/portability/export")
     def api_ui_portability_export(payload: UiPortabilityExportPayload) -> Dict[str, Any]:
-        from dhee.cli_config import CONFIG_DIR
+        from dhee.cli_config import get_config_dir
         from dhee.protocol import export_pack
 
         repo = payload.repo or _ui_repo()
@@ -4900,7 +4900,7 @@ def create_app(*, serve_static: bool = True, dev_mode: bool = False) -> FastAPI:
                 vector_store=vector_store,
                 output_path=output,
                 user_id=payload.user_id or _ui_user_id(),
-                key_dir=CONFIG_DIR,
+                key_dir=get_config_dir(),
                 repo=repo,
             )
             return {"ok": True, "result": result, "packs": _latest_dheemem_packs()}

@@ -1166,7 +1166,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--enrich-max-batches", type=int, default=200)
     parser.add_argument("--enable-rerank", dest="enable_rerank", action="store_true", default=True)
     parser.add_argument("--disable-rerank", dest="enable_rerank", action="store_false")
-    parser.add_argument("--rerank-model", default="nvidia/llama-3.2-nv-rerankqa-1b-v2")
+    parser.add_argument("--rerank-model", default="nvidia/llama-nemotron-rerank-vl-1b-v2")
     parser.add_argument("--disable-episodic-index", action="store_true", default=False)
     parser.add_argument("--disable-hierarchical-retrieval", action="store_true", default=False)
     parser.add_argument("--disable-orchestrated-search", action="store_true", default=False)

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dhee"
-version = "6.2.0"
-description = "Dhee Developer Brain — local memory, handoff, and git-backed context for AI coding agents"
+version = "7.0.0"
+description = "Dhee Developer Brain — local memory, repo cognition, handoff, and proof for AI coding agents"
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
@@ -48,7 +48,7 @@ openai = ["openai>=1.0.0"]
 ollama = ["ollama>=0.4.0"]
 # Internal providers (not documented, still functional)
 nvidia = ["openai>=1.0.0"]
-zvec = ["zvec>=0.2.1"]
+zvec = ["zvec>=0.4.0"]
 sqlite_vec = ["sqlite-vec>=0.1.1"]
 graph = ["kuzu>=0.11.3"]
 swe = [

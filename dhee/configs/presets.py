@@ -70,24 +70,29 @@ def smart_config():
         SkillConfig,
         VectorStoreConfig,
     )
+    from dhee.provider_defaults import DEFAULT_COLLECTION, embedding_dims_for, provider_defaults
     from dhee.utils.factory import _detect_provider
 
     embedder_provider, llm_provider = _detect_provider()
     data_dir = os.environ.get("DHEE_DATA_DIR") or os.path.join(os.path.expanduser("~"), ".dhee")
     os.makedirs(data_dir, exist_ok=True)
 
+    defaults = provider_defaults(embedder_provider)
+    dims = embedding_dims_for(embedder_provider, defaults.get("embedder_model"))
     if embedder_provider == "simple":
         dims = 384
         embedder_config = {"embedding_dims": dims}
     elif embedder_provider == "gemini":
-        dims = 3072
-        embedder_config = {"model": "gemini-embedding-001"}
+        embedder_config = {"model": defaults["embedder_model"]}
     elif embedder_provider == "openai":
-        dims = 1536
-        embedder_config = {"model": "text-embedding-3-small"}
+        embedder_config = {"model": defaults["embedder_model"]}
     elif embedder_provider == "ollama":
-        dims = 768
         embedder_config = {}
+    elif embedder_provider == "nvidia":
+        embedder_config = {
+            "model": defaults["embedder_model"],
+            "embedding_dims": dims,
+        }
     else:
         dims = 384
         embedder_config = {"embedding_dims": 384}
@@ -99,7 +104,7 @@ def smart_config():
             provider="zvec",
             config={
                 "path": os.path.join(data_dir, "zvec"),
-                "collection_name": "dhee_memories",
+                "collection_name": DEFAULT_COLLECTION,
                 "embedding_model_dims": dims,
             },
         )
@@ -107,7 +112,7 @@ def smart_config():
         vs = VectorStoreConfig(
             provider="memory",
             config={
-                "collection_name": "dhee_memories",
+                "collection_name": DEFAULT_COLLECTION,
                 "embedding_model_dims": dims,
             },
         )
@@ -120,7 +125,7 @@ def smart_config():
         llm=LLMConfig(provider=llm_provider, config={}),
         vector_store=vs,
         history_db_path=os.path.join(data_dir, "history.db"),
-        collection_name="dhee_memories",
+        collection_name=DEFAULT_COLLECTION,
         embedding_model_dims=dims,
         fade=FadeMemConfig(enable_forgetting=True),
         echo=EchoMemConfig(enable_echo=has_llm),

@@ -69,6 +69,7 @@ class VivekaAssessment:
     # What was assessed
     operation: str = ""             # e.g. "extraction", "retrieval", "answer"
     memory_id: str = ""
+    memory_ids: List[str] = field(default_factory=list)
     query: str = ""
 
     # Issues found
@@ -225,6 +226,11 @@ def _check_retrieval_quality(
     issues = []
     notes = []
     scores: Dict[str, float] = {}
+    retrieved_ids = [
+        str(r.get("id") or r.get("memory_id") or "")
+        for r in results[:top_k]
+        if r.get("id") or r.get("memory_id")
+    ]
 
     if not results:
         return VivekaAssessment(
@@ -235,6 +241,7 @@ def _check_retrieval_quality(
             query=query[:200],
             issues=["zero results returned"],
             dimension_scores={"retrieval_recall": -1.0},
+            memory_ids=[],
         )
 
     # Annamaya: structural checks
@@ -286,6 +293,8 @@ def _check_retrieval_quality(
         kosha_reached=AssessmentKosha.PRANAMAYA,
         operation="retrieval",
         query=query[:200],
+        memory_id=retrieved_ids[0] if retrieved_ids else "",
+        memory_ids=retrieved_ids,
         issues=issues,
         notes=notes,
         dimension_scores=scores,
@@ -660,9 +669,12 @@ class Viveka:
 
         elif assessment.operation == "retrieval":
             was_useful = assessment.is_aklishta
+            retrieved_ids = list(assessment.memory_ids)
+            if not retrieved_ids and assessment.memory_id:
+                retrieved_ids = [assessment.memory_id]
             self.samskara.on_retrieval(
                 query=assessment.query,
-                retrieved_ids=[assessment.memory_id] if assessment.memory_id else [],
+                retrieved_ids=retrieved_ids,
                 was_useful=was_useful,
                 user_id=user_id,
             )

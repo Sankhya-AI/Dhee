@@ -36,12 +36,13 @@ def memory():
         embedder=EmbedderConfig(
             provider="nvidia",
             config={
-                "model": "nvidia/nv-embedqa-e5-v5",
+                "model": "nvidia/llama-nemotron-embed-vl-1b-v2",
+                "embedding_dims": 2048,
             },
         ),
         vector_store=VectorStoreConfig(provider="memory", config={}),
         history_db_path=":memory:",
-        embedding_model_dims=1024,
+        embedding_model_dims=2048,
     )
     m = Memory(config=config)
     yield m

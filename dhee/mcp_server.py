@@ -9,40 +9,42 @@ Tools:
  6. get_last_session     — Handoff: load prior session
  7. save_session_digest  — Handoff: save current session
  8. get_memory_stats     — Quick health check
- 9. search_skills        — Semantic search over skills
-10. apply_skill          — Inject skill recipe into context
-11. log_skill_outcome    — Report success/failure for a skill
-12. record_trajectory_step — Record a step in active trajectory
-13. mine_skills          — Run skill mining cycle
-14. get_skill_stats      — Statistics about skills and trajectories
-15. search_skills_structural — Find skills by structural similarity
-16. analyze_skill_gaps   — Show what transfers vs what needs experimentation
-17. decompose_skill      — Trigger structural decomposition of a flat skill
-18. apply_skill_with_bindings — Apply skill with slot values, includes gap analysis
-19. enrich_pending       — Batch-enrich deferred memories
-20. think                — Cognitive decomposition (memory-grounded reasoning)
-21. anticipate           — Proactive scene + intention surfacing (Buddhi-powered)
-22. record_outcome       — Report task outcome for performance tracking
-23. reflect              — Agent-triggered insight synthesis
-24. store_intention      — Store a future trigger (prospective memory)
-25. dhee_list_assets     — List stored host-parsed artifacts
-26. dhee_get_asset       — Inspect a stored artifact and its bindings/chunks
-27. dhee_sync_codex_artifacts — Ingest Codex session logs into the artifact store
-28. dhee_why              — Explain memory/artifact provenance and lineage
-29. dhee_context_bootstrap — One read-only startup packet for Codex/agents
-30. dhee_handoff          — Emit a structured resume snapshot for a new harness
-31. dhee_inbox            — Fetch unread live shared-context broadcasts
-32. dhee_broadcast        — Publish live shared context to the workspace line
-33. dhee_submit_learning  — Submit an auditable learning candidate
-34. dhee_search_learnings — Search promoted learnings or candidates on request
-35. dhee_promote_learning — Promote a learning after gate/approval
-36. dhee_context_*       — Compiled state, debt, checkpoint, rollover, provision
-37. dhee_tools_list      — Discover compact vs full MCP surfaces
+ 9. audit_memory_quality — Read-only personal-memory readiness audit
+10. search_skills        — Semantic search over skills
+11. apply_skill          — Inject skill recipe into context
+12. log_skill_outcome    — Report success/failure for a skill
+13. record_trajectory_step — Record a step in active trajectory
+14. mine_skills          — Run skill mining cycle
+15. get_skill_stats      — Statistics about skills and trajectories
+16. search_skills_structural — Find skills by structural similarity
+17. analyze_skill_gaps   — Show what transfers vs what needs experimentation
+18. decompose_skill      — Trigger structural decomposition of a flat skill
+19. apply_skill_with_bindings — Apply skill with slot values, includes gap analysis
+20. enrich_pending       — Batch-enrich deferred memories
+21. think                — Cognitive decomposition (memory-grounded reasoning)
+22. anticipate           — Proactive scene + intention surfacing (Buddhi-powered)
+23. record_outcome       — Report task outcome for performance tracking
+24. reflect              — Agent-triggered insight synthesis
+25. store_intention      — Store a future trigger (prospective memory)
+26. dhee_list_assets     — List stored host-parsed artifacts
+27. dhee_get_asset       — Inspect a stored artifact and its bindings/chunks
+28. dhee_sync_codex_artifacts — Ingest Codex session logs into the artifact store
+29. dhee_why              — Explain memory/artifact provenance and lineage
+30. dhee_context_bootstrap — One read-only startup packet for Codex/agents
+31. dhee_handoff          — Emit a structured resume snapshot for a new harness
+32. dhee_inbox            — Fetch unread live shared-context broadcasts
+33. dhee_broadcast        — Publish live shared context to the workspace line
+34. dhee_submit_learning  — Submit an auditable learning candidate
+35. dhee_search_learnings — Search promoted learnings or candidates on request
+36. dhee_promote_learning — Promote a learning after gate/approval
+37. dhee_context_*       — Compiled state, debt, checkpoint, rollover, provision
+38. dhee_tools_list      — Discover compact vs full MCP surfaces
 """
 
 import json
 import logging
 import os
+import sqlite3
 from typing import Any, Dict, List, Optional
 
 from mcp.server import Server
@@ -57,6 +59,13 @@ from dhee.configs.base import (
     LLMConfig,
     EmbedderConfig,
     FadeMemConfig,
+)
+from dhee.provider_defaults import (
+    DEFAULT_COLLECTION,
+    DEFAULT_NVIDIA_EMBEDDER_MODEL,
+    DEFAULT_NVIDIA_LLM_MODEL,
+    EMBEDDING_DIMS_BY_MODEL,
+    embedding_dims_for,
 )
 
 logger = logging.getLogger(__name__)
@@ -144,41 +153,118 @@ def _maybe_sync_codex_runtime(arguments: Dict[str, Any]) -> Dict[str, Any] | Non
 
 
 def _get_embedding_dims_for_model(model: str, provider: str) -> int:
-    EMBEDDING_DIMS = {
-        "models/text-embedding-005": 768,
-        "text-embedding-005": 768,
-        "gemini-embedding-001": 3072,
-        "text-embedding-3-small": 1536,
-        "text-embedding-3-large": 3072,
-        "text-embedding-ada-002": 1536,
-    }
     env_dims = os.environ.get("DHEE_EMBEDDING_DIMS") or os.environ.get("FADEM_EMBEDDING_DIMS")
     if env_dims:
         return int(env_dims)
-    if model in EMBEDDING_DIMS:
-        return EMBEDDING_DIMS[model]
-    if provider == "gemini":
-        return 3072
-    elif provider == "openai":
-        return 1536
-    return 3072
+    if model in EMBEDDING_DIMS_BY_MODEL:
+        return EMBEDDING_DIMS_BY_MODEL[model]
+    return embedding_dims_for(provider, model)
+
+
+def _history_embedding_dims(history_db_path: str) -> Optional[int]:
+    """Return dominant stored embedding dimension for an existing memory DB."""
+    if not os.path.exists(history_db_path):
+        return None
+    try:
+        conn = sqlite3.connect(history_db_path)
+        try:
+            rows = conn.execute(
+                """
+                SELECT embedding
+                FROM memories
+                WHERE tombstone = 0
+                  AND embedding IS NOT NULL
+                  AND embedding != ''
+                LIMIT 200
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+
+    counts: Dict[int, int] = {}
+    for (raw_embedding,) in rows:
+        try:
+            parsed = json.loads(raw_embedding) if isinstance(raw_embedding, str) else raw_embedding
+        except Exception:
+            continue
+        if isinstance(parsed, list) and parsed:
+            counts[len(parsed)] = counts.get(len(parsed), 0) + 1
+    if not counts:
+        return None
+    return max(counts.items(), key=lambda item: item[1])[0]
 
 
 def get_memory_instance() -> FullMemory:
     """Create and return a configured FullMemory instance for the MCP server."""
-    from dhee.cli_config import get_api_key
+    from dhee.cli_config import get_api_key, load_config
 
+    config_json = load_config()
+    nvidia_key = get_api_key("nvidia")
     openai_key = get_api_key("openai")
     gemini_key = get_api_key("gemini")
-    nvidia_key = get_api_key("nvidia")
 
     def _env(key: str, default: str = "") -> str:
         """Read DHEE_ env var with FADEM_ fallback for backward compat."""
         return os.environ.get(f"DHEE_{key}") or os.environ.get(f"FADEM_{key}") or default
 
-    if openai_key:
+    from dhee.configs.base import _dhee_data_dir
+    configured_vector = config_json.get("vector_store") if isinstance(config_json, dict) else {}
+    configured_vector_config = (
+        dict(configured_vector.get("config") or {})
+        if isinstance(configured_vector, dict)
+        else {}
+    )
+    vec_db_path = _env("VEC_DB_PATH") or os.path.join(_dhee_data_dir(), "zvec")
+    collection = _env(
+        "COLLECTION",
+        str(configured_vector_config.get("collection_name") or DEFAULT_COLLECTION),
+    )
+    history_db_path = _env("HISTORY_DB") or os.path.join(_dhee_data_dir(), "history.db")
+    existing_embedding_dims = _history_embedding_dims(history_db_path)
+    preserve_existing_dims = bool(config_json.get("preserve_existing_embedding_dims", False))
+
+    provider_embedding_dims = embedding_dims_for("nvidia")
+    if nvidia_key:
+        embedder_model = _env(
+            "EMBEDDER_MODEL",
+            str(config_json.get("embedder_model") or DEFAULT_NVIDIA_EMBEDDER_MODEL),
+        )
+        provider_embedding_dims = _get_embedding_dims_for_model(embedder_model, "nvidia")
+        embedding_dims = int(
+            existing_embedding_dims
+            if preserve_existing_dims and existing_embedding_dims
+            else provider_embedding_dims
+        )
+        llm_config = LLMConfig(
+            provider="nvidia",
+            config={
+                "model": _env("LLM_MODEL", str(config_json.get("llm_model") or DEFAULT_NVIDIA_LLM_MODEL)),
+                "temperature": 0.2, "max_tokens": 4096, "api_key": nvidia_key,
+            }
+        )
+        use_simple_embedder = bool(
+            preserve_existing_dims
+            and existing_embedding_dims
+            and existing_embedding_dims != provider_embedding_dims
+        )
+        embedder_config = EmbedderConfig(
+            provider="simple" if use_simple_embedder else "nvidia",
+            config=(
+                {"embedding_dims": embedding_dims}
+                if use_simple_embedder
+                else {
+                    "model": embedder_model,
+                    "api_key": nvidia_key,
+                    "embedding_dims": embedding_dims,
+                }
+            ),
+        )
+    elif openai_key:
         embedder_model = _env("EMBEDDER_MODEL", "text-embedding-3-small")
-        embedding_dims = _get_embedding_dims_for_model(embedder_model, "openai")
+        provider_embedding_dims = _get_embedding_dims_for_model(embedder_model, "openai")
+        embedding_dims = int(existing_embedding_dims or provider_embedding_dims)
         llm_config = LLMConfig(
             provider="openai",
             config={
@@ -187,12 +273,17 @@ def get_memory_instance() -> FullMemory:
             }
         )
         embedder_config = EmbedderConfig(
-            provider="openai",
-            config={"model": embedder_model, "api_key": openai_key},
+            provider="simple" if existing_embedding_dims and existing_embedding_dims != provider_embedding_dims else "openai",
+            config=(
+                {"embedding_dims": embedding_dims}
+                if existing_embedding_dims and existing_embedding_dims != provider_embedding_dims
+                else {"model": embedder_model, "api_key": openai_key}
+            ),
         )
     elif gemini_key:
         embedder_model = _env("EMBEDDER_MODEL", "gemini-embedding-001")
-        embedding_dims = _get_embedding_dims_for_model(embedder_model, "gemini")
+        provider_embedding_dims = _get_embedding_dims_for_model(embedder_model, "gemini")
+        embedding_dims = int(existing_embedding_dims or provider_embedding_dims)
         llm_config = LLMConfig(
             provider="gemini",
             config={
@@ -201,37 +292,26 @@ def get_memory_instance() -> FullMemory:
             }
         )
         embedder_config = EmbedderConfig(
-            provider="gemini",
-            config={"model": embedder_model, "api_key": gemini_key},
-        )
-    elif nvidia_key:
-        embedder_model = _env("EMBEDDER_MODEL", "nvidia/llama-nemotron-embed-vl-1b-v2")
-        embedding_dims = 2048
-        llm_config = LLMConfig(
-            provider="nvidia",
-            config={
-                "model": _env("LLM_MODEL", "qwen/qwen3.5-397b-a17b"),
-                "temperature": 0.2, "max_tokens": 4096, "api_key": nvidia_key,
-            }
-        )
-        embedder_config = EmbedderConfig(
-            provider="nvidia",
-            config={"model": embedder_model, "api_key": nvidia_key},
+            provider="simple" if existing_embedding_dims and existing_embedding_dims != provider_embedding_dims else "gemini",
+            config=(
+                {"embedding_dims": embedding_dims}
+                if existing_embedding_dims and existing_embedding_dims != provider_embedding_dims
+                else {"model": embedder_model, "api_key": gemini_key}
+            ),
         )
     else:
-        # Zero-config: SimpleEmbedder + MockLLM
-        embedding_dims = 384
+        embedding_dims = int(
+            existing_embedding_dims
+            if preserve_existing_dims and existing_embedding_dims
+            else provider_embedding_dims
+        )
         llm_config = LLMConfig(provider="mock", config={})
         embedder_config = EmbedderConfig(
-            provider="simple", config={"embedding_dims": 384},
+            provider="simple", config={"embedding_dims": embedding_dims},
         )
 
-    from dhee.configs.base import _dhee_data_dir
-    vec_db_path = _env("VEC_DB_PATH") or os.path.join(_dhee_data_dir(), "zvec")
-    collection = _env("COLLECTION", "dhee_memories")
-
     # Use in-memory vector store for simple embedder (no persistent storage needed)
-    if embedder_config.provider == "simple":
+    if embedder_config.provider == "simple" and not existing_embedding_dims:
         vector_store_config = VectorStoreConfig(
             provider="memory",
             config={
@@ -248,8 +328,6 @@ def get_memory_instance() -> FullMemory:
                 "embedding_model_dims": embedding_dims,
             },
         )
-
-    history_db_path = _env("HISTORY_DB") or os.path.join(_dhee_data_dir(), "history.db")
 
     fade_config = FadeMemConfig(
         enable_forgetting=_env("ENABLE_FORGETTING", "true").lower() == "true",
@@ -541,6 +619,34 @@ TOOLS = [
             "properties": {
                 "user_id": {"type": "string", "description": "User identifier to get stats for (default: all users)"},
                 "agent_id": {"type": "string", "description": "Agent identifier to scope stats to (optional)"},
+            },
+        },
+    ),
+    Tool(
+        name="audit_memory_quality",
+        description="Read-only readiness audit for Dhee's personal-memory quality: canonical model coverage, noise isolation, queued/degraded writes, evidence distillation, and repair recommendations.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "user_id": {"type": "string", "description": "User identifier to audit (default: DHEE_USER_ID/all)"},
+                "agent_id": {"type": "string", "description": "Optional agent scope"},
+                "limit": {"type": "integer", "description": "Maximum memories to scan (default 10000)"},
+                "profile_keyword": {"type": "string", "description": "Optional keyword, e.g. 'chotu', that must appear in canonical personal memories"},
+                "require_personal_model": {"type": "boolean", "description": "Require canonical/LML personal-model checks (default true)"},
+            },
+        },
+    ),
+    Tool(
+        name="repair_memory_quality",
+        description="Dry-run or apply Dhee's memory-quality repair: promote canonical personal memories, isolate passive/test noise, and reopen degraded queued rows.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "user_id": {"type": "string", "description": "User identifier to repair (default: DHEE_USER_ID/all)"},
+                "agent_id": {"type": "string", "description": "Optional agent scope"},
+                "limit": {"type": "integer", "description": "Maximum memories to scan (default 10000)"},
+                "dry_run": {"type": "boolean", "description": "Preview repairs without writing (default true)"},
+                "reindex_vectors": {"type": "boolean", "description": "Also reconcile vector entries from authoritative DB rows"},
             },
         },
     ),
@@ -1188,10 +1294,10 @@ TOOLS = [
             "Router wrapper for Read. Opens a file, extracts a factual digest "
             "(path + line/char/token counts, symbols for Python/Markdown/JSON, "
             "head+tail excerpt), stores the full raw content under a pointer "
-            "`ptr`, and returns only the digest. Use this INSTEAD OF native "
-            "`Read` to keep large file contents out of the conversation "
-            "context. If the digest is insufficient, call "
-            "`dhee_expand_result(ptr=...)` to retrieve the raw."
+            "`ptr`, and returns a digest. Use this INSTEAD OF native `Read` "
+            "to keep large file contents out of the conversation context. If "
+            "`dhee_expand_result` is unavailable, rerun with `offset`+`limit`; "
+            "explicit bounded ranges include a capped `source_window` inline."
         ),
         inputSchema={
             "type": "object",
@@ -1199,6 +1305,9 @@ TOOLS = [
                 "file_path": {"type": "string", "description": "Absolute path to the file"},
                 "offset": {"type": "integer", "description": "1-indexed start line (optional)"},
                 "limit": {"type": "integer", "description": "Number of lines to read from offset (optional)"},
+                "include_source": {"type": "boolean", "description": "Include a capped line-numbered source_window inline. Full raw still stays behind ptr."},
+                "max_source_lines": {"type": "integer", "description": "Max source_window lines (cap 120)."},
+                "max_source_chars": {"type": "integer", "description": "Max source_window chars (cap 12000)."},
                 "digest_depth": {
                     "type": "string",
                     "enum": ["shallow", "normal", "deep"],
@@ -1409,6 +1518,9 @@ def _handle_search_memory(memory, args):
                 "score": round(r.get("composite_score", r.get("score", 0)), 3),
                 "layer": r.get("layer", "sml"),
                 "categories": r.get("categories", []),
+                "memory_class": r.get("memory_class"),
+                "memory_kind": r.get("canonical_kind") or r.get("memory_type"),
+                "recall_explanation": r.get("recall_explanation"),
             }
             for r in result["results"]
         ]
@@ -1754,6 +1866,122 @@ def _handle_dhee_context_graph_query(_memory, args):
             query,
             limit=int(args.get("limit") or 500),
             max_hops=int(args.get("max_hops") or 3),
+        ),
+    }
+
+
+def _load_or_build_repo_brain(args, fallback_goal: str):
+    from dhee.repo_intelligence import build_repo_brain, load_repo_brain
+
+    loaded = load_repo_brain(
+        args.get("repo"),
+        ref=args.get("ref"),
+        quarantine=bool(args.get("quarantine") or False),
+    )
+    brain = loaded.get("brain") if isinstance(loaded.get("brain"), dict) else None
+    if brain:
+        return brain
+    return build_repo_brain(
+        args.get("repo"),
+        goal=fallback_goal,
+        relevant_files=args.get("relevant_files"),
+        must_run=args.get("must_run"),
+        persist=bool(args.get("persist", True)),
+    )
+
+
+def _handle_dhee_repo_symbol_search(_memory, args):
+    from dhee.repo_intelligence import repo_symbol_search
+
+    query = str(args.get("query") or args.get("goal") or args.get("task") or "").strip()
+    if not query:
+        return {"error": "query is required"}
+    brain = _load_or_build_repo_brain(args, query)
+    return {
+        "format": "dhee_repo_symbol_search.v1",
+        "symbol_search": repo_symbol_search(
+            brain,
+            query,
+            kind=args.get("kind"),
+            language=args.get("language"),
+            path=args.get("path"),
+            limit=int(args.get("limit") or 20),
+            include_tests=bool(args.get("include_tests") or False),
+        ),
+    }
+
+
+def _handle_dhee_repo_callers(_memory, args):
+    from dhee.repo_intelligence import repo_callers
+
+    symbol = str(args.get("symbol") or args.get("query") or "").strip()
+    if not symbol:
+        return {"error": "symbol is required"}
+    brain = _load_or_build_repo_brain(args, symbol)
+    return {
+        "format": "dhee_repo_callers.v1",
+        "callers": repo_callers(
+            brain,
+            symbol,
+            depth=int(args.get("depth") or 1),
+            limit=int(args.get("limit") or 50),
+        ),
+    }
+
+
+def _handle_dhee_repo_callees(_memory, args):
+    from dhee.repo_intelligence import repo_callees
+
+    symbol = str(args.get("symbol") or args.get("query") or "").strip()
+    if not symbol:
+        return {"error": "symbol is required"}
+    brain = _load_or_build_repo_brain(args, symbol)
+    return {
+        "format": "dhee_repo_callees.v1",
+        "callees": repo_callees(
+            brain,
+            symbol,
+            depth=int(args.get("depth") or 1),
+            limit=int(args.get("limit") or 50),
+        ),
+    }
+
+
+def _handle_dhee_repo_impact(_memory, args):
+    from dhee.repo_intelligence import repo_impact
+
+    target = str(args.get("symbol_or_path") or args.get("symbol") or args.get("path") or args.get("query") or "").strip()
+    if not target:
+        return {"error": "symbol_or_path is required"}
+    brain = _load_or_build_repo_brain(args, target)
+    return {
+        "format": "dhee_repo_impact.v1",
+        "impact": repo_impact(
+            brain,
+            target,
+            depth=int(args.get("depth") or 2),
+            limit=int(args.get("limit") or 100),
+            include_tests=bool(args.get("include_tests", True)),
+        ),
+    }
+
+
+def _handle_dhee_repo_explore(_memory, args):
+    from dhee.repo_intelligence import repo_explore
+
+    query = str(args.get("query") or args.get("goal") or args.get("task") or "").strip()
+    if not query:
+        return {"error": "query is required"}
+    brain = _load_or_build_repo_brain(args, query)
+    return {
+        "format": "dhee_repo_explore.v1",
+        "explore": repo_explore(
+            brain,
+            query,
+            max_hops=int(args.get("max_hops") or 3),
+            max_files=int(args.get("max_files") or 8),
+            max_symbols=int(args.get("max_symbols") or 40),
+            max_source_chars=int(args.get("max_source_chars") or 18000),
         ),
     }
 
@@ -2163,6 +2391,34 @@ def _handle_get_memory_stats(memory, args):
     return memory.get_stats(
         user_id=args.get("user_id") or os.environ.get("DHEE_USER_ID"),
         agent_id=args.get("agent_id"),
+    )
+
+
+def _handle_audit_memory_quality(memory, args):
+    try:
+        limit = max(1, min(100_000, int(args.get("limit", 10_000))))
+    except (TypeError, ValueError):
+        limit = 10_000
+    return memory.audit_memory_quality(
+        user_id=args.get("user_id") or os.environ.get("DHEE_USER_ID"),
+        agent_id=args.get("agent_id"),
+        limit=limit,
+        profile_keyword=args.get("profile_keyword"),
+        require_personal_model=bool(args.get("require_personal_model", True)),
+    )
+
+
+def _handle_repair_memory_quality(memory, args):
+    try:
+        limit = max(1, min(100_000, int(args.get("limit", 10_000))))
+    except (TypeError, ValueError):
+        limit = 10_000
+    return memory.repair_memory_quality(
+        user_id=args.get("user_id") or os.environ.get("DHEE_USER_ID"),
+        agent_id=args.get("agent_id"),
+        limit=limit,
+        dry_run=bool(args.get("dry_run", True)),
+        reindex_vectors=bool(args.get("reindex_vectors", False)),
     )
 
 
@@ -2966,7 +3222,7 @@ def _handle_dhee_shared_task_results(_memory, arguments: Dict[str, Any]) -> Dict
                 "agent_id": row.get("agent_id"),
                 "created_at": row.get("created_at"),
                 "updated_at": row.get("updated_at"),
-                "metadata": row.get("metadata") or {},
+                "metadata": row.get("metadata") if isinstance(row.get("metadata"), dict) else {},
             }
         )
     return {
@@ -3106,6 +3362,11 @@ HANDLERS = {
     "dhee_repo_brain_localize": _handle_dhee_repo_brain_localize,
     "dhee_repo_graph_export": _handle_dhee_repo_graph_export,
     "dhee_context_graph_query": _handle_dhee_context_graph_query,
+    "dhee_repo_symbol_search": _handle_dhee_repo_symbol_search,
+    "dhee_repo_callers": _handle_dhee_repo_callers,
+    "dhee_repo_callees": _handle_dhee_repo_callees,
+    "dhee_repo_impact": _handle_dhee_repo_impact,
+    "dhee_repo_explore": _handle_dhee_repo_explore,
     "dhee_temporal_fact_assert": _handle_dhee_temporal_fact_assert,
     "dhee_temporal_fact_search": _handle_dhee_temporal_fact_search,
     "dhee_temporal_fact_get": _handle_dhee_temporal_fact_get,
@@ -3135,6 +3396,8 @@ HANDLERS = {
     "get_last_session": _handle_get_last_session,
     "save_session_digest": _handle_save_session_digest,
     "get_memory_stats": _handle_get_memory_stats,
+    "audit_memory_quality": _handle_audit_memory_quality,
+    "repair_memory_quality": _handle_repair_memory_quality,
     "search_skills": _handle_search_skills,
     "apply_skill": _handle_apply_skill,
     "log_skill_outcome": _handle_log_skill_outcome,

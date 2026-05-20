@@ -42,6 +42,72 @@ def _build_filter_string(filters: Dict[str, Any]) -> Optional[str]:
     return " AND ".join(parts)
 
 
+def _doc_fields(doc: Any) -> Dict[str, Any]:
+    """Return zvec document fields across zvec 0.2-0.4 shapes."""
+    if isinstance(doc, dict):
+        fields = doc.get("fields", {})
+    else:
+        fields = getattr(doc, "fields", {})
+    return fields if isinstance(fields, dict) else {}
+
+
+def _doc_vectors(doc: Any) -> Dict[str, Any]:
+    """Return zvec document vectors across zvec 0.2-0.4 shapes."""
+    if isinstance(doc, dict):
+        vectors = doc.get("vectors", {})
+    else:
+        vectors = getattr(doc, "vectors", {})
+    return vectors if isinstance(vectors, dict) else {}
+
+
+def _doc_has_field(doc: Any, name: str) -> bool:
+    has_field = getattr(doc, "has_field", None)
+    if callable(has_field):
+        try:
+            return bool(has_field(name))
+        except Exception:
+            return False
+    return name in _doc_fields(doc)
+
+
+def _doc_field(doc: Any, name: str, default: Any = None) -> Any:
+    field = getattr(doc, "field", None)
+    if callable(field):
+        try:
+            return field(name)
+        except Exception:
+            return default
+    return _doc_fields(doc).get(name, default)
+
+
+def _doc_id(doc: Any, fallback: str = "") -> str:
+    if isinstance(doc, dict):
+        value = doc.get("id") or _doc_field(doc, "uuid", fallback)
+    else:
+        value = getattr(doc, "id", None) or _doc_field(doc, "uuid", fallback)
+    return str(value or fallback)
+
+
+def _doc_score(doc: Any) -> float:
+    if isinstance(doc, dict):
+        value = doc.get("score", 0.0)
+    else:
+        value = getattr(doc, "score", 0.0)
+    try:
+        return float(value if value is not None else 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _payload_from_doc(doc: Any) -> Dict[str, Any]:
+    try:
+        pj = _doc_field(doc, "payload_json", "")
+        payload = json.loads(pj or "{}")
+        return payload if isinstance(payload, dict) else {}
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
 class ZvecStore(VectorStoreBase):
     """Vector store backed by zvec 0.2.0 (Rust HNSW engine)."""
 
@@ -199,22 +265,15 @@ class ZvecStore(VectorStoreBase):
 
         results = []
         for doc in raw_results:
-            payload: Dict[str, Any] = {}
-            try:
-                pj = doc.field("payload_json") if doc.has_field("payload_json") else ""
-                payload = json.loads(pj or "{}")
-            except (json.JSONDecodeError, TypeError):
-                pass
+            payload = _payload_from_doc(doc)
 
             if has_non_promoted and not matches_filters(payload, filters):
                 continue
 
-            score = float(doc.score) if doc.score is not None else 0.0
-
             results.append(
                 MemoryResult(
-                    id=doc.field("uuid") if doc.has_field("uuid") else doc.id,
-                    score=score,
+                    id=str(_doc_field(doc, "uuid", _doc_id(doc))),
+                    score=_doc_score(doc),
                     payload=payload,
                 )
             )
@@ -245,18 +304,14 @@ class ZvecStore(VectorStoreBase):
                     return
 
                 existing = fetched[vector_id]
-                old_fields = existing.get("fields", {})
-                old_payload = {}
-                try:
-                    old_payload = json.loads(old_fields.get("payload_json", "{}"))
-                except (json.JSONDecodeError, TypeError):
-                    pass
+                old_fields = _doc_fields(existing)
+                old_payload = _payload_from_doc(existing)
 
                 if payload is not None:
                     old_payload.update(payload)
 
                 use_vector = vector if vector is not None else (
-                    existing.get("vectors", {}).get(_VECTOR_FIELD_NAME, [0.0] * self.vector_size)
+                    _doc_vectors(existing).get(_VECTOR_FIELD_NAME, [0.0] * self.vector_size)
                 )
                 user_id = str(old_payload.get("user_id", old_fields.get("user_id", "")))
                 agent_id = str(old_payload.get("agent_id", old_fields.get("agent_id", "")))
@@ -284,12 +339,8 @@ class ZvecStore(VectorStoreBase):
                 if not fetched or vector_id not in fetched:
                     return None
                 existing = fetched[vector_id]
-                fields = existing.get("fields", {})
-                payload = {}
-                try:
-                    payload = json.loads(fields.get("payload_json", "{}"))
-                except (json.JSONDecodeError, TypeError):
-                    pass
+                fields = _doc_fields(existing)
+                payload = _payload_from_doc(existing)
                 return MemoryResult(
                     id=fields.get("uuid", vector_id),
                     score=0.0,
@@ -367,19 +418,14 @@ class ZvecStore(VectorStoreBase):
 
         results = []
         for doc in raw_results:
-            payload: Dict[str, Any] = {}
-            try:
-                pj = doc.field("payload_json") if doc.has_field("payload_json") else ""
-                payload = json.loads(pj or "{}")
-            except (json.JSONDecodeError, TypeError):
-                pass
+            payload = _payload_from_doc(doc)
 
             if has_non_promoted and not matches_filters(payload, filters):
                 continue
 
             results.append(
                 MemoryResult(
-                    id=doc.field("uuid") if doc.has_field("uuid") else doc.id,
+                    id=str(_doc_field(doc, "uuid", _doc_id(doc))),
                     score=0.0,
                     payload=payload,
                 )

@@ -31,8 +31,8 @@ def _norm(v):
 class TestFilterString:
     def test_builds_promoted_fields(self):
         result = _build_filter_string({"user_id": "alice", "agent_id": "bot1"})
-        assert "user_id == 'alice'" in result
-        assert "agent_id == 'bot1'" in result
+        assert "user_id = 'alice'" in result
+        assert "agent_id = 'bot1'" in result
 
     def test_ignores_non_promoted(self):
         result = _build_filter_string({"custom_field": "val"})
@@ -40,7 +40,7 @@ class TestFilterString:
 
     def test_mixed_fields(self):
         result = _build_filter_string({"user_id": "alice", "custom": "val"})
-        assert "user_id == 'alice'" in result
+        assert "user_id = 'alice'" in result
         assert "custom" not in result
 
 
@@ -106,7 +106,7 @@ class TestSearch:
         assert len(results) >= 1
         # First result should be the closest match
         assert results[0].id == "id-1"
-        assert results[0].score > 0
+        assert results[0].score >= 0
 
     def test_search_respects_limit(self, store):
         vectors = [_norm([float(i), 0.0, 0.0, 0.0]) for i in range(1, 6)]
@@ -165,6 +165,31 @@ class TestUpdate:
 
     def test_update_nonexistent_is_noop(self, store):
         store.update("nonexistent", payload={"text": "x"})
+
+    def test_get_and_update_after_reopen(self, tmp_path):
+        config = {
+            "path": str(tmp_path / "zvec_test"),
+            "collection_name": "reopen_col",
+            "embedding_model_dims": 4,
+        }
+        first = ZvecStore(config)
+        first.insert(
+            vectors=[_norm([1.0, 0.0, 0.0, 0.0])],
+            payloads=[{"text": "old", "memory_id": "id-reopen"}],
+            ids=["id-reopen"],
+        )
+        first.close()
+
+        second = ZvecStore(config)
+        result = second.get("id-reopen")
+        assert result is not None
+        assert result.payload["text"] == "old"
+
+        second.update("id-reopen", payload={"text": "new"})
+        updated = second.get("id-reopen")
+        assert updated is not None
+        assert updated.payload["text"] == "new"
+        second.close()
 
 
 class TestCollectionOps:

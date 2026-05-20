@@ -249,7 +249,8 @@ def _evaluate_read(inp: dict[str, Any]) -> dict[str, Any]:
     steer = (
         f"Call mcp__dhee__dhee_read(file_path={path!r}) instead. It returns "
         "a digest + ptr; raw stays out of the conversation. Use offset/limit "
-        "for a specific range."
+        "for a specific range; bounded Dhee reads include source_window inline "
+        "even when dhee_expand_result is not available."
     )
     return _deny(reason, steer)
 

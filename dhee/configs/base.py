@@ -4,6 +4,12 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, field_validator
 
 from dhee.configs.active import ActiveMemoryConfig
+from dhee.provider_defaults import (
+    DEFAULT_COLLECTION,
+    DEFAULT_NVIDIA_EMBEDDER_MODEL,
+    DEFAULT_NVIDIA_LLM_MODEL,
+    DEFAULT_NVIDIA_EMBEDDING_DIMS,
+)
 
 
 def _dhee_data_dir() -> str:
@@ -24,7 +30,7 @@ class VectorStoreConfig(BaseModel):
     config: Dict[str, Any] = Field(
         default_factory=lambda: {
             "path": os.path.join(_dhee_data_dir(), "zvec"),
-            "collection_name": "dhee_memories",
+            "collection_name": DEFAULT_COLLECTION,
         }
     )
 
@@ -38,10 +44,10 @@ class VectorStoreConfig(BaseModel):
 
 
 class LLMConfig(BaseModel):
-    provider: str = Field(default="openai")
+    provider: str = Field(default="nvidia")
     config: Dict[str, Any] = Field(
         default_factory=lambda: {
-            "model": "gpt-4o-mini",
+            "model": DEFAULT_NVIDIA_LLM_MODEL,
             "temperature": 0.2,
             "max_tokens": 4096,
         }
@@ -57,8 +63,13 @@ class LLMConfig(BaseModel):
 
 
 class EmbedderConfig(BaseModel):
-    provider: str = Field(default="openai")
-    config: Dict[str, Any] = Field(default_factory=lambda: {"model": "text-embedding-3-small"})
+    provider: str = Field(default="nvidia")
+    config: Dict[str, Any] = Field(
+        default_factory=lambda: {
+            "model": DEFAULT_NVIDIA_EMBEDDER_MODEL,
+            "embedding_dims": DEFAULT_NVIDIA_EMBEDDING_DIMS,
+        }
+    )
 
     @field_validator("provider")
     @classmethod
@@ -523,7 +534,7 @@ class TaskConfig(BaseModel):
 class RerankConfig(BaseModel):
     """Configuration for neural reranking (cross-encoder second stage)."""
     enable_rerank: bool = False
-    provider: str = "nvidia"  # Currently only nvidia supported
+    provider: str = "nvidia"
     model: str = "nvidia/llama-nemotron-rerank-vl-1b-v2"
     api_key_env: str = "NVIDIA_API_KEY"  # Env var name for API key
     top_n: int = 0  # Number of results to return after reranking (0 = return all, re-sorted)
@@ -614,8 +625,8 @@ class MemoryConfig(BaseModel):
     history_db_path: str = Field(
         default_factory=lambda: os.path.join(_dhee_data_dir(), "history.db")
     )
-    collection_name: str = "dhee_memories"
-    embedding_model_dims: int = 4096  # nvidia/nv-embed-v1 default dimensions
+    collection_name: str = DEFAULT_COLLECTION
+    embedding_model_dims: int = DEFAULT_NVIDIA_EMBEDDING_DIMS
     version: str = "v1.4"  # Updated for CLS Distillation Memory
     custom_fact_extraction_prompt: Optional[str] = None
     custom_conflict_prompt: Optional[str] = None
@@ -682,5 +693,3 @@ class MemoryConfig(BaseModel):
         """Everything: scenes, profiles, graph, tasks."""
         from dhee.configs.presets import full_config
         return full_config()
-
-

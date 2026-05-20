@@ -1,7 +1,7 @@
-"""dhee — The cognition layer that turns any agent into a HyperAgent.
+"""dhee — the local developer brain for AI coding agents.
 
-4 operations. Deferred enrichment. Minimal hot-path cost.
-Your agent remembers, learns from outcomes, and predicts what you need next.
+Dhee gives Codex, Claude Code, Cursor, Cline, Gemini CLI, and MCP clients a
+shared memory, repo-cognition, handoff, and proof layer that survives sessions.
 
 Quick Start:
     from dhee import Dhee
@@ -14,10 +14,10 @@ Quick Start:
 
 Memory Classes:
     Engram       — batteries-included memory interface with sensible defaults
-    CoreMemory   — lightweight: add/search/delete + decay (no LLM)
+    CoreMemory   — model-free compatibility path: add/search/delete + decay
     SmartMemory  — + echo encoding, categories, knowledge graph (needs LLM)
-    FullMemory   — + scenes, profiles, orchestration, cognition (everything)
-    Memory       — alias for CoreMemory (lightest default)
+    FullMemory   — + scenes, profiles, orchestration, cognition
+    Memory       — alias for CoreMemory for zero-config imports
 """
 
 from dhee.memory.core import CoreMemory
@@ -37,10 +37,10 @@ from dhee.memory.admission import (
     sanitize_admitted_content,
 )
 
-# Default: CoreMemory (lightest, zero-config)
+# Default import remains model-free for backwards compatibility.
 Memory = CoreMemory
 
-__version__ = "6.2.0"
+__version__ = "7.0.0"
 __all__ = [
     # Memory classes
     "Engram",

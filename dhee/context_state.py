@@ -801,8 +801,8 @@ class ContextStateStore:
             self.record_admission(block, result)
         return report
 
-    def render_state_card(self, *, max_tokens: int = STATE_CARD_TARGET_TOKENS) -> str:
-        state = self.load()
+    def render_state_card(self, *, max_tokens: int = STATE_CARD_TARGET_TOKENS, state: Optional[Dict[str, Any]] = None) -> str:
+        state = state or self.load()
         card = self._render_state_card(state, fact_limit=6, decision_limit=5, file_limit=8, evidence_limit=5)
         if estimate_tokens(card) <= max_tokens:
             return card
@@ -811,8 +811,8 @@ class ContextStateStore:
             return card
         return self._render_state_card(state, fact_limit=2, decision_limit=2, file_limit=3, evidence_limit=2)
 
-    def render_markdown(self) -> str:
-        state = self.load()
+    def render_markdown(self, state: Optional[Dict[str, Any]] = None) -> str:
+        state = state or self.load()
         lines = [
             "# Dhee Compiled State",
             "",

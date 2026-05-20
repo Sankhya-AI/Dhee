@@ -9,6 +9,7 @@ separate startup prompts.
 from __future__ import annotations
 
 import os
+import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -18,6 +19,34 @@ def _bounded_int(args: Dict[str, Any], name: str, default: int, upper: int = 20)
         return max(1, min(upper, int(args.get(name, default))))
     except (TypeError, ValueError):
         return default
+
+
+def _metadata_dict(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        current = dict(value)
+        for _ in range(4):
+            raw = current.get("legacy_metadata_raw")
+            if not isinstance(raw, str):
+                break
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                break
+            if not isinstance(parsed, dict):
+                break
+            overlay = {
+                key: item
+                for key, item in current.items()
+                if key not in {"legacy_metadata_raw", "legacy_metadata_type"}
+            }
+            current = {**parsed, **overlay}
+        return current
+    if value not in (None, "", [], {}):
+        return {
+            "legacy_metadata_raw": value,
+            "legacy_metadata_type": type(value).__name__,
+        }
+    return {}
 
 
 def _compact_shared_result(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -34,7 +63,7 @@ def _compact_shared_result(row: Dict[str, Any]) -> Dict[str, Any]:
         "agent_id": row.get("agent_id"),
         "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"),
-        "metadata": row.get("metadata") or {},
+        "metadata": _metadata_dict(row.get("metadata")),
     }
 
 

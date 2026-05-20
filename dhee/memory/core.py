@@ -27,6 +27,12 @@ from dhee.core.traces import (
     initialize_traces,
 )
 from dhee.db.sqlite import SQLiteManager
+from dhee.memory.quality import (
+    apply_memory_quality_contract,
+    enforce_quality_layer,
+    enforce_quality_strength,
+    memory_quality_from_record,
+)
 from dhee.skills.hashing import content_hash as _content_hash
 from dhee.utils.factory import EmbedderFactory, VectorStoreFactory
 from dhee.utils.math import cosine_similarity_batch
@@ -104,7 +110,15 @@ class CoreMemory:
 
         user_id = user_id or "default"
         metadata = dict(metadata or {})
+        if source_app and not metadata.get("source_app"):
+            metadata["source_app"] = source_app
         categories = list(categories or [])
+        metadata, quality = apply_memory_quality_contract(
+            content,
+            metadata,
+            categories,
+            explicit_remember=bool(metadata.get("explicit_remember") or metadata.get("policy_explicit")),
+        )
 
         # Content-hash dedup
         ch = _content_hash(content)
@@ -130,20 +144,17 @@ class CoreMemory:
         # Embed
         embedding = self.embedder.embed(content, memory_action="add")
 
-        # Classify memory type
-        memory_type = "semantic"
-        if metadata.get("memory_type"):
-            memory_type = metadata["memory_type"]
-
         # Initialize multi-trace strength
-        initial_strength = 1.0
+        initial_strength = enforce_quality_strength(1.0, quality)
         s_fast_val = s_mid_val = s_slow_val = None
         if self.distillation_config and self.distillation_config.enable_multi_trace:
             s_fast_val, s_mid_val, s_slow_val = initialize_traces(initial_strength, is_new=True)
 
         now = datetime.now(timezone.utc).isoformat()
         memory_id = str(uuid.uuid4())
-        namespace = str(metadata.get("namespace", "default") or "default").strip() or "default"
+        layer = enforce_quality_layer("sml", quality)
+        namespace = str(quality.namespace or metadata.get("namespace", "default") or "default").strip() or "default"
+        memory_type = str(quality.memory_type or metadata.get("memory_type") or "semantic").strip() or "semantic"
 
         memory_data = {
             "id": memory_id,
@@ -154,7 +165,7 @@ class CoreMemory:
             "categories": categories,
             "created_at": now,
             "updated_at": now,
-            "layer": "sml",
+            "layer": layer,
             "strength": initial_strength,
             "access_count": 0,
             "last_accessed": now,
@@ -162,7 +173,7 @@ class CoreMemory:
             "confidentiality_scope": metadata.get("confidentiality_scope", "work"),
             "source_type": "mcp",
             "source_app": source_app,
-            "decay_lambda": self.fade_config.sml_decay_rate,
+            "decay_lambda": quality.decay_lambda if quality.decay_lambda is not None else self.fade_config.sml_decay_rate,
             "status": "active",
             "importance": metadata.get("importance", 0.5),
             "sensitivity": metadata.get("sensitivity", "normal"),
@@ -182,6 +193,10 @@ class CoreMemory:
             "memory_id": memory_id,
             "user_id": user_id,
             "memory": content,
+            "namespace": namespace,
+            "memory_type": memory_type,
+            "layer": layer,
+            "metadata": metadata,
         }
         if agent_id:
             payload["agent_id"] = agent_id
@@ -199,11 +214,12 @@ class CoreMemory:
                 "id": memory_id,
                 "memory": content,
                 "event": "ADD",
-                "layer": "sml",
+                "layer": layer,
                 "strength": initial_strength,
                 "categories": categories,
                 "namespace": namespace,
                 "memory_type": memory_type,
+                "memory_class": quality.memory_class,
             }]
         }
 
@@ -316,15 +332,55 @@ class CoreMemory:
         if isinstance(data, str):
             # Simple content update
             content = data
+            existing = self.db.get_memory(memory_id) or {}
+            existing_metadata = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
+            existing_categories = existing.get("categories")
+            if isinstance(existing_categories, str):
+                try:
+                    existing_categories = json.loads(existing_categories)
+                except (json.JSONDecodeError, TypeError):
+                    existing_categories = []
+            if not isinstance(existing_categories, list):
+                existing_categories = []
+            metadata, quality = apply_memory_quality_contract(
+                content,
+                existing_metadata,
+                existing_categories,
+                explicit_remember=bool(
+                    existing_metadata.get("explicit_remember")
+                    or existing_metadata.get("policy_explicit")
+                ),
+            )
             embedding = self.embedder.embed(content, memory_action="add")
             ch = _content_hash(content)
-            self.db.update_memory(memory_id, {
+            strength = enforce_quality_strength(float(existing.get("strength", 1.0)), quality)
+            layer = enforce_quality_layer(str(existing.get("layer") or "sml"), quality)
+            update = {
                 "memory": content,
                 "embedding": embedding,
                 "content_hash": ch,
-            })
+                "metadata": metadata,
+                "namespace": quality.namespace,
+                "memory_type": quality.memory_type,
+                "layer": layer,
+                "strength": strength,
+                "importance": metadata.get("importance", existing.get("importance", 0.5)),
+            }
+            if quality.decay_lambda is not None:
+                update["decay_lambda"] = quality.decay_lambda
+            self.db.update_memory(memory_id, update)
             # Update vector store
-            payload = {"memory_id": memory_id, "memory": content}
+            payload = {
+                "memory_id": memory_id,
+                "user_id": existing.get("user_id") or "default",
+                "memory": content,
+                "namespace": quality.namespace,
+                "memory_type": quality.memory_type,
+                "layer": layer,
+                "metadata": metadata,
+            }
+            if existing.get("agent_id"):
+                payload["agent_id"] = existing.get("agent_id")
             try:
                 self.vector_store.delete(memory_id)
                 self.vector_store.insert(
@@ -378,6 +434,7 @@ class CoreMemory:
                     mem_meta = {}
             if mem_meta.get("tier") == "shruti":
                 continue
+            quality = memory_quality_from_record({**mem, "metadata": mem_meta})
 
             new_strength = calculate_decayed_strength(
                 current_strength=float(mem.get("strength", 1.0)),
@@ -386,11 +443,22 @@ class CoreMemory:
                 layer=mem.get("layer", "sml"),
                 config=self.fade_config,
             )
+            new_strength = enforce_quality_strength(new_strength, quality)
 
             if should_forget(new_strength, self.fade_config):
                 access_count = int(mem.get("access_count", 0))
                 # Vasana: memories recalled 3+ times compress instead of dying
-                if access_count >= 3:
+                if quality.suppress_from_default_recall:
+                    if self.fade_config.use_tombstone_deletion:
+                        self.db.update_memory(mem["id"], {"tombstone": 1, "strength": new_strength})
+                    else:
+                        self.db.delete_memory(mem["id"])
+                        try:
+                            self.vector_store.delete(mem["id"])
+                        except Exception:
+                            pass
+                    forgotten += 1
+                elif access_count >= 3:
                     content = mem.get("memory", mem.get("content", ""))
                     # Compress to first 100 chars + keep keywords
                     compressed = content[:100].rstrip() + "..." if len(content) > 100 else content
@@ -416,7 +484,7 @@ class CoreMemory:
                 int(mem.get("access_count", 0)),
                 new_strength,
                 self.fade_config,
-            ):
+            ) and quality.layer == "lml" and not quality.suppress_from_default_recall:
                 self.db.update_memory(mem["id"], {"strength": new_strength, "layer": "lml"})
                 promoted += 1
             else:

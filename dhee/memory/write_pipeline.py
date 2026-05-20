@@ -25,6 +25,12 @@ from dhee.memory.admission import (
     evaluate_memory_candidate,
     sanitize_admitted_content,
 )
+from dhee.memory.quality import (
+    apply_memory_quality_contract,
+    enforce_quality_layer,
+    enforce_quality_strength,
+    is_protected_canonical_memory,
+)
 from dhee.memory.retrieval_helpers import (
     attach_bitemporal_metadata,
     normalize_bitemporal_value,
@@ -471,6 +477,20 @@ class MemoryWritePipeline:
         if explicit_remember and explicit_intent and explicit_intent.content:
             content = explicit_intent.content
 
+        mem_metadata, quality = apply_memory_quality_contract(
+            content,
+            mem_metadata,
+            mem_categories,
+            explicit_remember=explicit_remember,
+        )
+        if quality.layer == "lml" and initial_layer == "auto":
+            initial_layer = "lml"
+        if quality.layer == "sml":
+            initial_layer = "sml"
+        initial_strength = enforce_quality_strength(initial_strength, quality)
+        if quality.is_canonical:
+            expiration_date = None
+
         admission = evaluate_memory_candidate(
             content,
             mem_metadata,
@@ -497,6 +517,15 @@ class MemoryWritePipeline:
             if admission.retention_policy != "durable":
                 initial_strength = min(initial_strength, max(0.2, admission.confidence))
             content = sanitize_admitted_content(content, admission)
+            mem_metadata, quality = apply_memory_quality_contract(
+                content,
+                mem_metadata,
+                mem_categories,
+                explicit_remember=explicit_remember,
+            )
+            initial_strength = enforce_quality_strength(initial_strength, quality)
+            if quality.is_canonical:
+                expiration_date = None
 
         blocked = detect_sensitive_categories(content)
         # allow_sensitive: explicit caller opt-in, or caller explicitly provided
@@ -736,6 +765,7 @@ class MemoryWritePipeline:
         event = "ADD"
         existing = None
         resolution = None
+        deferred_demotion: Optional[Tuple[Dict[str, Any], str]] = None
         if nearest and similarity >= self._fade_config.conflict_similarity_threshold:
             existing = nearest
 
@@ -745,12 +775,30 @@ class MemoryWritePipeline:
             resolution = resolve_conflict(existing, content, self._llm, self._config.custom_conflict_prompt)
 
             if resolution.classification == "CONTRADICTORY":
-                self._demote_existing_fn(existing, reason="CONTRADICTORY")
-                event = "UPDATE"
+                if is_protected_canonical_memory(existing) and not quality.is_canonical:
+                    mem_metadata["conflicts_with_memory_id"] = existing.get("id")
+                    mem_metadata["conflict_resolution"] = "CONTRADICTORY"
+                    mem_metadata["supersede_blocked_reason"] = "protected_canonical_existing"
+                    event = "ADD"
+                else:
+                    deferred_demotion = (existing, "CONTRADICTORY")
+                    event = "UPDATE"
             elif resolution.classification == "SUBSUMES":
                 content = resolution.merged_content or content
-                self._demote_existing_fn(existing, reason="SUBSUMES")
-                event = "UPDATE"
+                mem_metadata, quality = apply_memory_quality_contract(
+                    content,
+                    mem_metadata,
+                    mem_categories,
+                    explicit_remember=explicit_remember,
+                )
+                if is_protected_canonical_memory(existing) and not quality.is_canonical:
+                    mem_metadata["conflicts_with_memory_id"] = existing.get("id")
+                    mem_metadata["conflict_resolution"] = "SUBSUMES"
+                    mem_metadata["supersede_blocked_reason"] = "protected_canonical_existing"
+                    event = "ADD"
+                else:
+                    deferred_demotion = (existing, "SUBSUMES")
+                    event = "UPDATE"
             elif resolution.classification == "SUBSUMED":
                 boosted_strength = min(1.0, float(existing.get("strength", 1.0)) + 0.05)
                 self._db.update_memory(existing["id"], {"strength": boosted_strength})
@@ -787,11 +835,13 @@ class MemoryWritePipeline:
             mem_metadata["policy_low_confidence"] = True
             effective_strength = min(effective_strength, 0.4)
 
+        effective_strength = enforce_quality_strength(effective_strength, quality)
         layer = initial_layer
         if layer == "auto":
             layer = "sml"
         if low_confidence:
             layer = "sml"
+        layer = enforce_quality_layer(layer, quality)
 
         confidentiality_scope = str(
             mem_metadata.get("confidentiality_scope")
@@ -853,7 +903,7 @@ class MemoryWritePipeline:
             "source_type": source_type,
             "source_app": source_app or mem_metadata.get("source_app"),
             "source_event_id": mem_metadata.get("source_event_id"),
-            "decay_lambda": self._fade_config.sml_decay_rate,
+            "decay_lambda": mem_metadata.get("decay_lambda", self._fade_config.sml_decay_rate),
             "status": "active",
             "importance": mem_metadata.get("importance", 0.5),
             "sensitivity": mem_metadata.get("sensitivity", "normal"),
@@ -896,6 +946,15 @@ class MemoryWritePipeline:
                         effective_memory_id, rollback_err,
                     )
                 raise
+
+        if deferred_demotion and self._demote_existing_fn:
+            demote_memory, demote_reason = deferred_demotion
+            self._demote_existing_fn(
+                demote_memory,
+                reason=demote_reason,
+                superseded_by=effective_memory_id,
+                force=quality.is_canonical,
+            )
 
         # Fact decomposition
         if _unified_facts:
@@ -1125,6 +1184,12 @@ class MemoryWritePipeline:
         )
 
         high_confidence = explicit_remember or looks_high_confidence(content, mem_metadata)
+        mem_metadata, quality = apply_memory_quality_contract(
+            content,
+            mem_metadata,
+            mem_categories,
+            explicit_remember=explicit_remember,
+        )
 
         # --- Regex keyword extraction (0 LLM calls) ---
         extracted_keywords: List[str] = []
@@ -1188,10 +1253,14 @@ class MemoryWritePipeline:
         if not explicit_remember and not high_confidence:
             mem_metadata["policy_low_confidence"] = True
             effective_strength = min(effective_strength, 0.4)
+        effective_strength = enforce_quality_strength(effective_strength, quality)
 
         layer = initial_layer
         if layer == "auto":
             layer = "sml"
+        layer = enforce_quality_layer(layer, quality)
+        if quality.is_canonical:
+            expiration_date = None
 
         # --- Metadata ---
         confidentiality_scope = str(
@@ -1258,7 +1327,7 @@ class MemoryWritePipeline:
             "source_type": source_type,
             "source_app": source_app or mem_metadata.get("source_app"),
             "source_event_id": mem_metadata.get("source_event_id"),
-            "decay_lambda": self._fade_config.sml_decay_rate,
+            "decay_lambda": mem_metadata.get("decay_lambda", self._fade_config.sml_decay_rate),
             "status": "active",
             "importance": mem_metadata.get("importance", 0.5),
             "sensitivity": mem_metadata.get("sensitivity", "normal"),
@@ -1610,13 +1679,20 @@ class MemoryWritePipeline:
             memory_id = str(uuid.uuid4())
             mem_metadata = dict(processed_metadata_base)
             mem_metadata.update(item_metadata_list[idx])
-            mem_metadata = attach_bitemporal_metadata(
-                mem_metadata, observed_time=now
-            )
 
             echo_result = echo_results[idx]
             effective_strength = initial_strength
             mem_categories = list(items[idx].get("categories") or [])
+            explicit_batch_remember = bool(mem_metadata.get("explicit_remember") or mem_metadata.get("policy_explicit"))
+            mem_metadata, quality = apply_memory_quality_contract(
+                content,
+                mem_metadata,
+                mem_categories,
+                explicit_remember=explicit_batch_remember,
+            )
+            mem_metadata = attach_bitemporal_metadata(
+                mem_metadata, observed_time=now
+            )
 
             if echo_result:
                 effective_strength = (
@@ -1632,6 +1708,8 @@ class MemoryWritePipeline:
                 mem_metadata["category_confidence"] = cat_match.confidence
                 mem_metadata["category_auto"] = True
 
+            effective_strength = enforce_quality_strength(effective_strength, quality)
+            batch_layer = enforce_quality_layer("sml", quality)
             embedding = embeddings[idx]
             namespace_value = str(
                 mem_metadata.get("namespace", "default") or "default"
@@ -1660,7 +1738,7 @@ class MemoryWritePipeline:
                 "expiration_date": items[idx].get("expiration_date"),
                 "created_at": now,
                 "updated_at": now,
-                "layer": "sml",
+                "layer": batch_layer,
                 "strength": effective_strength,
                 "access_count": 0,
                 "last_accessed": now,
@@ -1669,7 +1747,7 @@ class MemoryWritePipeline:
                 "source_type": "mcp",
                 "source_app": items[idx].get("source_app"),
                 "source_event_id": mem_metadata.get("source_event_id"),
-                "decay_lambda": self._fade_config.sml_decay_rate,
+                "decay_lambda": mem_metadata.get("decay_lambda", self._fade_config.sml_decay_rate),
                 "status": "active",
                 "importance": mem_metadata.get("importance", 0.5),
                 "sensitivity": mem_metadata.get("sensitivity", "normal"),
@@ -1713,7 +1791,7 @@ class MemoryWritePipeline:
                     "id": memory_id,
                     "memory": content,
                     "event": "ADD",
-                    "layer": "sml",
+                    "layer": batch_layer,
                     "strength": effective_strength,
                     "echo_depth": (
                         echo_result.echo_depth.value if echo_result else None
@@ -2046,7 +2124,11 @@ class MemoryWritePipeline:
         explicit = metadata.get("memory_type")
         if explicit in ("episodic", "semantic", "task", "note", "procedural",
                        "project", "project_status", "project_tag",
-                       "warroom", "warroom_message"):
+                       "warroom", "warroom_message", "test_fixture",
+                       "operational_event",
+                       "screen_observation", "profile", "goal", "constraint",
+                       "preference", "decision", "style", "product",
+                       "product_philosophy"):
             return explicit
 
         if metadata.get("is_distilled"):

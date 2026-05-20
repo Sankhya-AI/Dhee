@@ -73,9 +73,21 @@ class StateMount(DheeMount):
         if parts == ["state"]:
             return entries_to_text(self.list(path))
         if parts == ["state", "current.md"]:
-            return store.render_markdown()
+            state = store.load()
+            if not state.get("goal") and hasattr(self.workspace, "infer_current_goal"):
+                inferred = self.workspace.infer_current_goal()
+                if inferred:
+                    state["goal"] = inferred
+                    state["goal_inferred_from"] = "dhee_memory_or_shared_task"
+            return store.render_markdown(state=state)
         if parts == ["state", "card.xml"]:
-            return store.render_state_card()
+            state = store.load()
+            if not state.get("goal") and hasattr(self.workspace, "infer_current_goal"):
+                inferred = self.workspace.infer_current_goal()
+                if inferred:
+                    state["goal"] = inferred
+                    state["goal_inferred_from"] = "dhee_memory_or_shared_task"
+            return store.render_state_card(state=state)
         if parts == ["state", "decisions.md"]:
             return store.render_decisions(superseded=False)
         if parts == ["state", "superseded.md"]:
@@ -690,13 +702,27 @@ class SharedMount(DheeMount):
 class SourceRootMount(DheeMount):
     prefix = "/sources"
 
+    _MEMORY_FILES = {
+        "recent.md": "recent",
+        "canonical.md": "canonical",
+        "passive-screen.md": "passive-screen",
+        "test.md": "test",
+    }
+
     def list(self, path: str) -> List[DheeFSEntry]:
         parts = _parts(path)
         if parts == ["sources"]:
             entries: List[DheeFSEntry] = []
+            if getattr(self.workspace, "db", None) is not None:
+                entries.append(DheeFSEntry(name="memory/", path="/sources/memory", kind="dir"))
             for source in self.workspace.context_sources:
                 entries.append(DheeFSEntry(name=f"{source.name}/", path=f"/sources/{source.name}", kind="dir"))
             return entries
+        if parts == ["sources", "memory"]:
+            return [
+                DheeFSEntry(name=name, path=f"/sources/memory/{name}")
+                for name in self._MEMORY_FILES
+            ]
         source, source_path = self._resolve_source(path)
         return source.list(source_path)
 
@@ -707,11 +733,26 @@ class SourceRootMount(DheeMount):
             if not entries:
                 return "# Context Sources\n\nNo context source mounts are registered."
             return entries_to_text(entries)
+        if parts == ["sources", "memory"]:
+            return entries_to_text(self.list(path))
+        if len(parts) == 3 and parts[:2] == ["sources", "memory"]:
+            view = self._MEMORY_FILES.get(parts[2])
+            if not view:
+                raise DheeFSNotFoundError(path)
+            return self._render_memory_source(view=view)
         source, source_path = self._resolve_source(path)
         return source.read(source_path)
 
     def search(self, path: str, query: str) -> List[Dict[str, Any]]:
         parts = _parts(path)
+        if parts == ["sources"] or parts[:2] == ["sources", "memory"]:
+            view = "recent"
+            if len(parts) == 3 and parts[2] in self._MEMORY_FILES:
+                view = self._MEMORY_FILES[parts[2]]
+            return [
+                {"path": f"/sources/memory/{view}.md", **row}
+                for row in self.workspace.memory_source_rows(view=view, query=query, limit=50)
+            ]
         if len(parts) >= 2:
             source, source_path = self._resolve_source(path)
             return [
@@ -737,6 +778,36 @@ class SourceRootMount(DheeMount):
             if getattr(source, "name", None) == name:
                 return source, path
         raise DheeFSNotFoundError(f"unknown context source: {name}")
+
+    def _render_memory_source(self, *, view: str) -> str:
+        rows = self.workspace.memory_source_rows(view=view, limit=80)
+        title = {
+            "recent": "Recent Dhee Memory Sources",
+            "canonical": "Canonical Personal Memory Sources",
+            "passive-screen": "Passive Screen Observation Sources",
+            "test": "Isolated Test Memory Sources",
+        }.get(view, "Dhee Memory Sources")
+        lines = [f"# {title}", ""]
+        if not rows:
+            lines.append("No matching memory sources.")
+            return "\n".join(lines)
+        for row in rows:
+            lines.extend(
+                [
+                    f"## {row.get('id')}",
+                    f"- class: {row.get('memory_class')}",
+                    f"- kind: {row.get('canonical_kind') or row.get('memory_type') or ''}",
+                    f"- namespace: {row.get('namespace')}",
+                    f"- source: {row.get('source_type') or ''} / {row.get('source_app') or ''}",
+                    f"- confidence: {row.get('confidence') if row.get('confidence') is not None else ''}",
+                    f"- strength: {row.get('strength') if row.get('strength') is not None else ''}",
+                    f"- created_at: {row.get('created_at') or ''}",
+                    "",
+                    str(row.get("memory") or "").replace("\n", " ")[:500],
+                    "",
+                ]
+            )
+        return "\n".join(lines).rstrip()
 
     def _source_search(self, source: Any, path: str, query: str) -> List[Dict[str, Any]]:
         try:

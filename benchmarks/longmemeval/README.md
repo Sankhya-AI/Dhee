@@ -20,10 +20,15 @@ Stricter `all@k` (every gold session in top-k) is also in `metrics.json`.
 ## Stack
 
 - Embedder: `nvidia/llama-nemotron-embed-vl-1b-v2`
-- Reranker: `nvidia/llama-3.2-nv-rerankqa-1b-v2`
+- Embedding dimensions: 2048 (model-native maximum)
+- Reranker used for this committed 99.0% R@3 run: `nvidia/llama-3.2-nv-rerankqa-1b-v2`
 - Top-k: 10
 - Mode: `--retrieval-only` (pure retrieval; no answer generation)
 - Dhee version: 3.4.0
+
+Note: current Dhee defaults may point at the newer
+`nvidia/llama-nemotron-rerank-vl-1b-v2`, but the committed metrics in this
+directory were produced with the reranker above.
 
 ## Comparison
 
@@ -46,7 +51,10 @@ Caveats worth knowing:
 ## Reproduce
 
 ```bash
-# from repo root, with .env containing NVIDIA_API_KEY
+# from repo root, with .env containing NVIDIA_API_KEY.
+# The script pins --embedding-dims 2048 because current NVIDIA embedding code
+# passes dimensions explicitly; the original April 16 run used the same
+# effective model-native dimension.
 bash benchmarks/longmemeval/command.sh
 ```
 

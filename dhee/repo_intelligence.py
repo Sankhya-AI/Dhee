@@ -31,12 +31,19 @@ from dhee import repo_link
 from dhee.runtime_io import read_json_checked, read_jsonl_checked, write_json_atomic
 
 
-REPO_INTELLIGENCE_SCHEMA = "dhee.repo_intelligence.v1"
+REPO_INTELLIGENCE_SCHEMA = "dhee.repo_intelligence.v4"
 REPO_BRAIN_POINTER_SCHEMA = "dhee.repo_brain_pointer.v1"
 LOCALIZATION_SCHEMA = "dhee.repo_localization.v1"
 VERIFICATION_CARD_SCHEMA = "dhee.verification_card.v1"
 REPO_GRAPH_ARTIFACT_SCHEMA = "dhee.repo_graph_artifact.v1"
 CONTEXT_GRAPH_SLICE_SCHEMA = "dhee.context_graph_slice.v1"
+REPO_SYMBOL_SEARCH_SCHEMA = "dhee.repo_symbol_search.v1"
+REPO_CALL_GRAPH_QUERY_SCHEMA = "dhee.repo_call_graph_query.v1"
+REPO_IMPACT_SCHEMA = "dhee.repo_impact.v1"
+REPO_EXPLORE_SCHEMA = "dhee.repo_explore.v1"
+SOURCE_WINDOW_SCHEMA = "dhee.source_window.v1"
+ROUTE_MAP_SCHEMA = "dhee.route_map.v1"
+COMPONENT_MAP_SCHEMA = "dhee.component_map.v1"
 
 MAX_INDEX_FILE_BYTES = 512_000
 MAX_SYMBOLS = 2_000
@@ -50,9 +57,15 @@ MAX_FAILURE_REFS = 600
 MAX_OWNERSHIP_FILES = 1_500
 MAX_TEST_OWNERSHIP_EDGES = 3_000
 MAX_TEST_LINKS_PER_SOURCE = 12
+MAX_ROUTE_RECORDS = 1_000
+MAX_COMPONENT_RECORDS = 2_000
+MAX_COMPONENT_EDGES = 4_000
 MAX_REPO_GRAPH_NODES = 4_000
 MAX_REPO_GRAPH_EDGES = 12_000
 DEFAULT_CONTEXT_GRAPH_QUERY_NODES = 500
+MAX_SOURCE_WINDOW_LINES = 80
+MAX_SOURCE_WINDOW_CHARS_PER_FILE = 4_000
+MAX_SOURCE_WINDOW_TOTAL_CHARS = 18_000
 SOURCE_SUFFIXES = {".py", ".js", ".jsx", ".ts", ".tsx"}
 JS_TS_SUFFIXES = {".js", ".jsx", ".ts", ".tsx"}
 TREE_SITTER_LANGUAGE_SPECS = {
@@ -406,6 +419,10 @@ def _module_name_for_path(rel: str) -> str:
     return ".".join(parts)
 
 
+def _stable_symbol_id(path: str, qualname: str) -> str:
+    return _stable_hash({"path": path, "qualname": qualname}, 18)
+
+
 def _build_module_map(py_files: Sequence[str]) -> Dict[str, str]:
     out: Dict[str, str] = {}
     for rel in py_files:
@@ -482,7 +499,7 @@ class _PythonIndexer(ast.NodeVisitor):
     def _add_symbol(self, node: ast.AST, kind: str) -> str:
         name = getattr(node, "name", "")
         qualname = self._qualname(name)
-        symbol_id = _stable_hash({"path": self.rel, "qualname": qualname, "kind": kind}, 18)
+        symbol_id = _stable_symbol_id(self.rel, qualname)
         decorators: List[str] = []
         for decorator in getattr(node, "decorator_list", [])[:8]:
             if isinstance(decorator, ast.Name):
@@ -739,7 +756,7 @@ def _resolve_js_import_path(current: str, specifier: str, module_to_path: Dict[s
         return None
     if spec.startswith("."):
         base = Path(current).parent / spec
-        normalized = str(base).replace(os.sep, "/")
+        normalized = os.path.normpath(str(base)).replace(os.sep, "/")
         probes = [normalized]
         probes.extend(normalized + suffix for suffix in JS_TS_SUFFIXES)
         probes.extend(str(Path(normalized) / f"index{suffix}").replace(os.sep, "/") for suffix in JS_TS_SUFFIXES)
@@ -786,6 +803,462 @@ def _js_ts_imports(rel: str, text: str, module_to_path: Dict[str, str]) -> List[
     return imports
 
 
+def _read_indexable_text(repo_root: Path, rel: str) -> str:
+    path = repo_root / rel
+    try:
+        if path.stat().st_size > MAX_INDEX_FILE_BYTES:
+            return ""
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _symbols_grouped_by_path(symbols: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    grouped: DefaultDict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for symbol in symbols:
+        path = str(symbol.get("path") or "")
+        if path:
+            grouped[path].append(symbol)
+    return grouped
+
+
+def _stable_component_id(path: str, name: str) -> str:
+    return _stable_hash({"component": name, "path": path}, 18)
+
+
+def _stable_route_id(path: str, route: str, framework: str, kind: str, methods: Sequence[str], handler: str = "") -> str:
+    return _stable_hash(
+        {
+            "route": route,
+            "path": path,
+            "framework": framework,
+            "kind": kind,
+            "methods": list(methods),
+            "handler": handler,
+        },
+        18,
+    )
+
+
+def _jsx_component_tags(text: str) -> List[str]:
+    seen: set[str] = set()
+    out: List[str] = []
+    for match in re.finditer(r"<\s*([A-Z][A-Za-z0-9_$.]*)\b", text or ""):
+        name = match.group(1).split(".", 1)[0]
+        if name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
+
+
+def _js_ts_exported_names(text: str) -> set[str]:
+    names: set[str] = set()
+    patterns = [
+        re.compile(r"\bexport\s+(?:default\s+)?class\s+([A-Za-z_$][\w$]*)"),
+        re.compile(r"\bexport\s+(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\("),
+        re.compile(r"\bexport\s+(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*="),
+    ]
+    for pattern in patterns:
+        for match in pattern.finditer(text or ""):
+            names.add(match.group(1))
+    return names
+
+
+def _looks_like_react_component(symbol: Dict[str, Any], path: str, text: str, jsx_tags: Sequence[str]) -> bool:
+    name = str(symbol.get("name") or "")
+    if not name or not name[0].isupper():
+        return False
+    if str(symbol.get("kind") or "") not in {"class", "function", "method"}:
+        return False
+    suffix = Path(path).suffix.lower()
+    if suffix in {".jsx", ".tsx"}:
+        return True
+    if name in set(jsx_tags):
+        return True
+    start_line = int(symbol.get("start_line") or 0)
+    if start_line <= 0:
+        return False
+    lines = (text or "").splitlines()
+    window = "\n".join(lines[max(0, start_line - 1): min(len(lines), start_line + 80)])
+    return bool(re.search(r"return\s*\(?\s*<", window) or re.search(r"=>\s*\(?\s*<", window))
+
+
+def _component_map(
+    repo_root: Path,
+    files: Sequence[str],
+    symbols: Sequence[Dict[str, Any]],
+    imports: Dict[str, List[Dict[str, Any]]],
+) -> Dict[str, Any]:
+    symbols_by_path = _symbols_grouped_by_path(symbols)
+    jsx_tags_by_path: Dict[str, List[str]] = {}
+    components: List[Dict[str, Any]] = []
+    by_path: DefaultDict[str, List[str]] = defaultdict(list)
+    by_name: DefaultDict[str, List[str]] = defaultdict(list)
+    by_id: Dict[str, Dict[str, Any]] = {}
+
+    for rel in files:
+        if Path(rel).suffix.lower() not in JS_TS_SUFFIXES:
+            continue
+        text = _read_indexable_text(repo_root, rel)
+        if not text:
+            continue
+        jsx_tags = _jsx_component_tags(text)
+        jsx_tags_by_path[rel] = jsx_tags
+        exported_names = _js_ts_exported_names(text)
+        for symbol in symbols_by_path.get(rel, []):
+            name = str(symbol.get("name") or "")
+            if not _looks_like_react_component(symbol, rel, text, jsx_tags):
+                continue
+            component_id = _stable_component_id(rel, name)
+            if component_id in by_id:
+                continue
+            record = {
+                "id": component_id,
+                "name": name,
+                "path": rel,
+                "symbol_id": symbol.get("id"),
+                "qualname": symbol.get("qualname") or name,
+                "kind": symbol.get("kind"),
+                "framework": "react",
+                "exported": name in exported_names,
+                "start_line": symbol.get("start_line"),
+                "end_line": symbol.get("end_line"),
+                "parser_backend": symbol.get("parser_backend"),
+                "confidence": 0.86 if Path(rel).suffix.lower() in {".jsx", ".tsx"} else 0.68,
+                "evidence_pointer": f"component_map:{rel}:{symbol.get('start_line') or 1}",
+            }
+            components.append(record)
+            by_id[component_id] = record
+            by_path[rel].append(component_id)
+            by_name[name].append(component_id)
+            if len(components) >= MAX_COMPONENT_RECORDS:
+                break
+        if len(components) >= MAX_COMPONENT_RECORDS:
+            break
+
+    dependency_edges: List[Dict[str, Any]] = []
+    for source, links in (imports or {}).items():
+        source_components = by_path.get(source) or []
+        if not source_components:
+            continue
+        source_tags = set(jsx_tags_by_path.get(source) or [])
+        for link in links or []:
+            target = str(link.get("resolved_path") or "")
+            target_components = by_path.get(target) or []
+            if not target_components:
+                continue
+            for source_id in source_components:
+                for target_id in target_components:
+                    target_component = by_id.get(target_id) or {}
+                    target_name = str(target_component.get("name") or "")
+                    exact_jsx_use = target_name in source_tags
+                    if not exact_jsx_use and len(target_components) > 1:
+                        continue
+                    dependency_edges.append(
+                        {
+                            "source_component_id": source_id,
+                            "target_component_id": target_id,
+                            "source_path": source,
+                            "target_path": target,
+                            "type": "uses_component",
+                            "reason": "jsx tag references imported component" if exact_jsx_use else "component file import",
+                            "confidence": 0.82 if exact_jsx_use else 0.52,
+                            "evidence_pointer": f"component_import:{source}:{target}",
+                        }
+                    )
+                    if len(dependency_edges) >= MAX_COMPONENT_EDGES:
+                        break
+                if len(dependency_edges) >= MAX_COMPONENT_EDGES:
+                    break
+            if len(dependency_edges) >= MAX_COMPONENT_EDGES:
+                break
+        if len(dependency_edges) >= MAX_COMPONENT_EDGES:
+            break
+
+    return {
+        "schema_version": COMPONENT_MAP_SCHEMA,
+        "components": components,
+        "by_id": by_id,
+        "by_path": {key: list(dict.fromkeys(value)) for key, value in by_path.items()},
+        "by_name": {key: list(dict.fromkeys(value)) for key, value in by_name.items()},
+        "dependency_edges": dependency_edges,
+        "summary": {
+            "component_count": len(components),
+            "component_file_count": len(by_path),
+            "dependency_edge_count": len(dependency_edges),
+            "frameworks": {"react": len(components)} if components else {},
+        },
+    }
+
+
+def _route_segment_from_fs(segment: str) -> str:
+    value = str(segment or "")
+    if not value or (value.startswith("(") and value.endswith(")")) or value.startswith("@"):
+        return ""
+    if value.startswith("[[...") and value.endswith("]]"):
+        return "*" + value[5:-2] + "?"
+    if value.startswith("[...") and value.endswith("]"):
+        return "*" + value[4:-1]
+    if value.startswith("[") and value.endswith("]"):
+        return ":" + value[1:-1]
+    return value
+
+
+def _route_path_from_segments(segments: Sequence[str]) -> str:
+    clean = [_route_segment_from_fs(segment) for segment in segments]
+    clean = [segment for segment in clean if segment]
+    return "/" + "/".join(clean) if clean else "/"
+
+
+def _exported_http_methods(text: str) -> List[str]:
+    methods: List[str] = []
+    pattern = re.compile(
+        r"\bexport\s+(?:(?:async\s+)?function|const|let|var)\s+"
+        r"(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\b"
+    )
+    for match in pattern.finditer(text or ""):
+        method = match.group(1).upper()
+        if method not in methods:
+            methods.append(method)
+    return methods
+
+
+def _next_route_candidate(rel: str, text: str) -> Optional[Dict[str, Any]]:
+    parts = list(Path(rel).parts)
+    if not parts or Path(rel).suffix.lower() not in JS_TS_SUFFIXES:
+        return None
+    name = Path(parts[-1]).stem
+    if parts[0] == "app" and name in {"page", "route"}:
+        route = _route_path_from_segments(parts[1:-1])
+        is_api = name == "route"
+        return {
+            "framework": "nextjs_app_router",
+            "kind": "api_route" if is_api else "page_route",
+            "route": route,
+            "methods": _exported_http_methods(text) if is_api else ["GET"],
+            "line": 1,
+            "confidence": 0.94,
+        }
+    if parts[0] == "pages" and len(parts) >= 2 and not Path(parts[-1]).name.startswith("_"):
+        segments = parts[1:-1]
+        stem = Path(parts[-1]).stem
+        if stem != "index":
+            segments.append(stem)
+        route = _route_path_from_segments(segments)
+        is_api = len(parts) >= 3 and parts[1] == "api"
+        return {
+            "framework": "nextjs_pages_router",
+            "kind": "api_route" if is_api else "page_route",
+            "route": route,
+            "methods": _exported_http_methods(text) if is_api else ["GET"],
+            "line": 1,
+            "confidence": 0.9,
+        }
+    return None
+
+
+def _python_route_candidates(rel: str, text: str) -> List[Dict[str, Any]]:
+    if not rel.endswith(".py"):
+        return []
+    out: List[Dict[str, Any]] = []
+    pending: List[Dict[str, Any]] = []
+    decorator_re = re.compile(
+        r"^\s*@\s*([A-Za-z_][\w\.]*)\."
+        r"(get|post|put|patch|delete|options|head|route|api_route)"
+        r"\s*\(\s*['\"]([^'\"]+)['\"]"
+    )
+    method_list_re = re.compile(r"methods\s*=\s*\[([^\]]+)\]")
+    def_re = re.compile(r"^\s*(?:async\s+)?def\s+([A-Za-z_][\w]*)\s*\(")
+    for line_no, line in enumerate((text or "").splitlines(), start=1):
+        decorator_match = decorator_re.search(line)
+        if decorator_match:
+            decorator_method = decorator_match.group(2).lower()
+            methods = [decorator_method.upper()] if decorator_method not in {"route", "api_route"} else []
+            methods_match = method_list_re.search(line)
+            if methods_match:
+                methods = [
+                    value.strip().strip("'\"").upper()
+                    for value in methods_match.group(1).split(",")
+                    if value.strip().strip("'\"")
+                ]
+            pending.append(
+                {
+                    "framework": "python_web",
+                    "kind": "api_route",
+                    "route": decorator_match.group(3),
+                    "methods": methods or ["ANY"],
+                    "line": line_no,
+                    "confidence": 0.82,
+                }
+            )
+            continue
+        def_match = def_re.search(line)
+        if def_match and pending:
+            handler = def_match.group(1)
+            for item in pending:
+                record = dict(item)
+                record["handler_name"] = handler
+                out.append(record)
+            pending = []
+        elif line.strip() and not line.strip().startswith("@") and pending:
+            pending = []
+    return out
+
+
+def _js_route_candidates(rel: str, text: str, component_map: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if Path(rel).suffix.lower() not in JS_TS_SUFFIXES:
+        return []
+    out: List[Dict[str, Any]] = []
+    line_offsets = _line_offsets(text)
+    express_re = re.compile(
+        r"\b(?:app|router)\.(get|post|put|patch|delete|options|head|all|use)"
+        r"\s*\(\s*['\"]([^'\"]+)['\"]",
+        re.IGNORECASE,
+    )
+    for match in express_re.finditer(text or ""):
+        method = match.group(1).upper()
+        out.append(
+            {
+                "framework": "express",
+                "kind": "api_route",
+                "route": match.group(2),
+                "methods": ["ANY"] if method in {"ALL", "USE"} else [method],
+                "line": _line_for_offset(line_offsets, match.start()),
+                "confidence": 0.78,
+            }
+        )
+    if "react-router" in (text or "") or "createBrowserRouter" in (text or "") or "<Route" in (text or ""):
+        route_re = re.compile(r"\bpath\s*[:=]\s*['\"]([^'\"]+)['\"]")
+        components_by_name = component_map.get("by_name") or {}
+        for match in route_re.finditer(text or ""):
+            window = text[match.end(): match.end() + 240]
+            component_match = re.search(r"element\s*[:=]\s*\{?\s*<([A-Z][A-Za-z0-9_]*)", window)
+            component_name = component_match.group(1) if component_match else ""
+            component_ids = components_by_name.get(component_name) or []
+            out.append(
+                {
+                    "framework": "react_router",
+                    "kind": "client_route",
+                    "route": match.group(1),
+                    "methods": ["GET"],
+                    "component_name": component_name,
+                    "component_id": component_ids[0] if component_ids else "",
+                    "line": _line_for_offset(line_offsets, match.start()),
+                    "confidence": 0.74 if component_name else 0.56,
+                }
+            )
+    return out
+
+
+def _symbol_id_for_name(symbols_by_path: Dict[str, List[Dict[str, Any]]], path: str, name: str) -> str:
+    if not name:
+        return ""
+    for symbol in symbols_by_path.get(path, []):
+        if str(symbol.get("name") or "") == name:
+            return str(symbol.get("id") or "")
+    return ""
+
+
+def _component_for_route(path: str, candidate: Dict[str, Any], component_map: Dict[str, Any]) -> Tuple[str, str]:
+    component_id = str(candidate.get("component_id") or "")
+    component_name = str(candidate.get("component_name") or "")
+    by_id = component_map.get("by_id") or {}
+    if component_id and component_id in by_id:
+        return component_id, component_name or str(by_id[component_id].get("name") or "")
+    path_components = list((component_map.get("by_path") or {}).get(path) or [])
+    if path_components:
+        record = by_id.get(path_components[0]) or {}
+        return path_components[0], str(record.get("name") or component_name)
+    return "", component_name
+
+
+def _route_record(
+    path: str,
+    candidate: Dict[str, Any],
+    component_map: Dict[str, Any],
+    symbols_by_path: Dict[str, List[Dict[str, Any]]],
+) -> Dict[str, Any]:
+    methods = list(dict.fromkeys(str(method).upper() for method in (candidate.get("methods") or ["ANY"]) if method))
+    handler_name = str(candidate.get("handler_name") or "")
+    component_id, component_name = _component_for_route(path, candidate, component_map)
+    handler_symbol_id = _symbol_id_for_name(symbols_by_path, path, handler_name or component_name)
+    route = str(candidate.get("route") or "/")
+    framework = str(candidate.get("framework") or "unknown")
+    kind = str(candidate.get("kind") or "route")
+    return {
+        "id": _stable_route_id(path, route, framework, kind, methods, handler_name or component_name),
+        "route": route,
+        "path": path,
+        "framework": framework,
+        "kind": kind,
+        "methods": methods,
+        "handler_name": handler_name,
+        "handler_symbol_id": handler_symbol_id,
+        "component_name": component_name,
+        "component_id": component_id,
+        "line": candidate.get("line") or 1,
+        "confidence": float(candidate.get("confidence") or 0.5),
+        "evidence_pointer": f"route_map:{path}:{candidate.get('line') or 1}",
+    }
+
+
+def _route_map(
+    repo_root: Path,
+    files: Sequence[str],
+    symbols: Sequence[Dict[str, Any]],
+    component_map: Dict[str, Any],
+) -> Dict[str, Any]:
+    symbols_by_path = _symbols_grouped_by_path(symbols)
+    routes: List[Dict[str, Any]] = []
+    by_path: DefaultDict[str, List[str]] = defaultdict(list)
+    by_route: DefaultDict[str, List[str]] = defaultdict(list)
+    seen: set[str] = set()
+
+    for rel in files:
+        language = _language_for_path(rel)
+        if not language:
+            continue
+        text = _read_indexable_text(repo_root, rel)
+        if not text:
+            continue
+        candidates: List[Dict[str, Any]] = []
+        next_candidate = _next_route_candidate(rel, text)
+        if next_candidate:
+            candidates.append(next_candidate)
+        candidates.extend(_js_route_candidates(rel, text, component_map))
+        candidates.extend(_python_route_candidates(rel, text))
+        for candidate in candidates:
+            record = _route_record(rel, candidate, component_map, symbols_by_path)
+            if record["id"] in seen:
+                continue
+            seen.add(record["id"])
+            routes.append(record)
+            by_path[rel].append(record["id"])
+            by_route[record["route"]].append(record["id"])
+            if len(routes) >= MAX_ROUTE_RECORDS:
+                break
+        if len(routes) >= MAX_ROUTE_RECORDS:
+            break
+
+    frameworks: DefaultDict[str, int] = defaultdict(int)
+    kinds: DefaultDict[str, int] = defaultdict(int)
+    for route in routes:
+        frameworks[str(route.get("framework") or "unknown")] += 1
+        kinds[str(route.get("kind") or "route")] += 1
+    return {
+        "schema_version": ROUTE_MAP_SCHEMA,
+        "routes": routes,
+        "by_path": {key: list(dict.fromkeys(value)) for key, value in by_path.items()},
+        "by_route": {key: list(dict.fromkeys(value)) for key, value in by_route.items()},
+        "summary": {
+            "route_count": len(routes),
+            "route_file_count": len(by_path),
+            "frameworks": dict(sorted(frameworks.items())),
+            "kinds": dict(sorted(kinds.items())),
+        },
+    }
+
+
 def _js_ts_symbols(rel: str, text: str) -> List[Dict[str, Any]]:
     patterns = [
         ("class", re.compile(r"^\s*(?:export\s+default\s+|export\s+)?class\s+([A-Za-z_$][\w$]*)", re.MULTILINE)),
@@ -805,7 +1278,7 @@ def _js_ts_symbols(rel: str, text: str) -> List[Dict[str, Any]]:
                 continue
             seen.add(key)
             start_line = _line_for_offset(line_offsets, match.start())
-            symbol_id = _stable_hash({"path": rel, "qualname": name, "kind": kind}, 18)
+            symbol_id = _stable_symbol_id(rel, name)
             out.append(
                 {
                     "id": symbol_id,
@@ -823,6 +1296,72 @@ def _js_ts_symbols(rel: str, text: str) -> List[Dict[str, Any]]:
                     "doc": "",
                 }
             )
+            if kind == "class":
+                out.extend(_js_ts_class_method_symbols(rel, text, name, match.end(), line_offsets, seen))
+    return out
+
+
+def _js_ts_class_method_symbols(
+    rel: str,
+    text: str,
+    class_name: str,
+    class_name_end: int,
+    line_offsets: Sequence[int],
+    seen: set,
+) -> List[Dict[str, Any]]:
+    body_start = text.find("{", class_name_end)
+    if body_start < 0:
+        return []
+    depth = 0
+    body_end = -1
+    for idx in range(body_start, len(text)):
+        char = text[idx]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                body_end = idx
+                break
+    if body_end < 0:
+        return []
+
+    body = text[body_start + 1:body_end]
+    method_pattern = re.compile(
+        r"^\s*(?:(?:public|private|protected|static|readonly|async)\s+)*"
+        r"([A-Za-z_$][\w$]*)\s*\([^;{}]*\)\s*(?::\s*[^{}]+)?\{",
+        re.MULTILINE,
+    )
+    out: List[Dict[str, Any]] = []
+    for match in method_pattern.finditer(body):
+        name = match.group(1)
+        if name in {"if", "for", "while", "switch", "catch"}:
+            continue
+        absolute_start = body_start + 1 + match.start()
+        qualname = f"{class_name}.{name}"
+        key = (qualname, absolute_start)
+        if key in seen:
+            continue
+        seen.add(key)
+        start_line = _line_for_offset(line_offsets, absolute_start)
+        symbol_id = _stable_symbol_id(rel, qualname)
+        out.append(
+            {
+                "id": symbol_id,
+                "path": rel,
+                "module": str(Path(rel).with_suffix("")).replace(os.sep, "."),
+                "qualname": qualname,
+                "name": name,
+                "kind": "method",
+                "language": _language_for_path(rel),
+                "parser_backend": "static_regex",
+                "start_line": start_line,
+                "end_line": start_line,
+                "signature": _js_signature_line(text, absolute_start),
+                "decorators": [],
+                "doc": "",
+            }
+        )
     return out
 
 
@@ -842,13 +1381,17 @@ def _js_ts_calls(rel: str, text: str, file_symbols: Sequence[Dict[str, Any]]) ->
         caller = _nearest_symbol_before(symbols_by_line, line)
         if not caller:
             continue
+        if line == int(caller.get("start_line") or 0) and callee == caller.get("name"):
+            continue
         calls.append(
             {
                 "path": rel,
                 "caller": caller.get("name"),
+                "caller_qualname": caller.get("qualname"),
                 "caller_id": caller.get("id"),
                 "callee": callee,
                 "line": line,
+                "parser_backend": "static_regex",
             }
         )
     return calls
@@ -1067,15 +1610,8 @@ def _tree_sitter_span_from_node(
     qual_parts = list(parents) + [name]
     start_line = int(node.start_point[0]) + 1
     end_line = int(node.end_point[0]) + 1
-    span_id = _stable_hash(
-        {
-            "path": rel,
-            "qualname": ".".join(qual_parts),
-            "node_type": node_type,
-            "start": start_line,
-        },
-        18,
-    )
+    qualname = ".".join(qual_parts)
+    span_id = _stable_symbol_id(rel, qualname)
     return {
         "id": span_id,
         "path": rel,
@@ -1084,7 +1620,7 @@ def _tree_sitter_span_from_node(
         "node_type": node_type,
         "kind": kind,
         "name": name,
-        "qualname": ".".join(qual_parts),
+        "qualname": qualname,
         "parent": ".".join(parents),
         "start_line": start_line,
         "end_line": end_line,
@@ -1119,7 +1655,7 @@ def _tree_sitter_call_from_node(
         "parser_backend": "tree_sitter",
         "caller": parents[-1] if parents else None,
         "caller_qualname": caller,
-        "caller_id": _stable_hash({"path": rel, "qualname": caller}, 18) if caller else None,
+        "caller_id": _stable_symbol_id(rel, caller) if caller else None,
         "callee": callee,
         "line": int(node.start_point[0]) + 1,
         "column": int(node.start_point[1]) + 1,
@@ -1150,36 +1686,113 @@ def _node_signature(source: bytes, node: Any, limit: int = 180) -> str:
 
 
 def _merge_syntax_symbols(symbols: Sequence[Dict[str, Any]], syntax_index: Dict[str, Any]) -> List[Dict[str, Any]]:
-    merged = [dict(symbol) for symbol in symbols]
-    seen = {
-        (str(symbol.get("path") or ""), str(symbol.get("qualname") or ""), str(symbol.get("kind") or ""))
-        for symbol in merged
-    }
+    by_key: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+    order: List[Tuple[str, str, str]] = []
+    for symbol in symbols:
+        key = (str(symbol.get("path") or ""), str(symbol.get("qualname") or ""), str(symbol.get("kind") or ""))
+        if key not in by_key:
+            order.append(key)
+        by_key[key] = dict(symbol)
     for span in syntax_index.get("spans") or []:
         key = (str(span.get("path") or ""), str(span.get("qualname") or ""), str(span.get("kind") or ""))
-        if key in seen:
+        current = by_key.get(key) or {}
+        if key not in by_key:
+            order.append(key)
+        by_key[key] = {
+            "id": span.get("id") or current.get("id"),
+            "path": span.get("path") or current.get("path"),
+            "module": current.get("module") or str(Path(str(span.get("path") or "")).with_suffix("")).replace(os.sep, "."),
+            "qualname": span.get("qualname") or current.get("qualname"),
+            "name": span.get("name") or current.get("name"),
+            "kind": span.get("kind") or current.get("kind"),
+            "language": span.get("language") or current.get("language"),
+            "parser_backend": "tree_sitter",
+            "fallback_parser_backend": current.get("parser_backend"),
+            "start_line": span.get("start_line") or current.get("start_line"),
+            "end_line": span.get("end_line") or current.get("end_line"),
+            "signature": span.get("signature") or current.get("signature") or "",
+            "decorators": list(current.get("decorators") or []),
+            "doc": current.get("doc") or "",
+        }
+        if len(order) >= MAX_SYMBOLS:
+            break
+    return [by_key[key] for key in order[:MAX_SYMBOLS]]
+
+
+def _augment_syntax_index_with_static_fallback(
+    syntax_index: Dict[str, Any],
+    symbols: Sequence[Dict[str, Any]],
+    call_sites: Sequence[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Expose regex JS/TS spans when tree-sitter grammars are unavailable."""
+    syntax = dict(syntax_index or {})
+    spans = [dict(span) for span in syntax.get("spans") or []]
+    calls = [dict(call) for call in syntax.get("call_sites") or []]
+    span_keys = {
+        (str(span.get("path") or ""), str(span.get("qualname") or ""), str(span.get("kind") or ""))
+        for span in spans
+    }
+    call_keys = {_call_site_key(call) for call in calls if _call_site_key(call)}
+
+    for symbol in symbols:
+        if str(symbol.get("language") or "") not in {"javascript", "typescript"}:
             continue
-        seen.add(key)
-        merged.append(
+        if str(symbol.get("parser_backend") or "") != "static_regex":
+            continue
+        qualname = str(symbol.get("qualname") or "")
+        key = (str(symbol.get("path") or ""), qualname, str(symbol.get("kind") or ""))
+        if key in span_keys:
+            continue
+        span_keys.add(key)
+        parent = qualname.rsplit(".", 1)[0] if "." in qualname else ""
+        spans.append(
             {
-                "id": span.get("id"),
-                "path": span.get("path"),
-                "module": str(Path(str(span.get("path") or "")).with_suffix("")).replace(os.sep, "."),
-                "qualname": span.get("qualname"),
-                "name": span.get("name"),
-                "kind": span.get("kind"),
-                "language": span.get("language"),
-                "parser_backend": "tree_sitter",
-                "start_line": span.get("start_line"),
-                "end_line": span.get("end_line"),
-                "signature": span.get("signature") or "",
-                "decorators": [],
-                "doc": "",
+                "id": symbol.get("id"),
+                "path": symbol.get("path"),
+                "language": symbol.get("language"),
+                "parser_backend": "static_regex",
+                "node_type": "static_regex_symbol",
+                "kind": symbol.get("kind"),
+                "name": symbol.get("name"),
+                "qualname": qualname,
+                "parent": parent,
+                "start_line": symbol.get("start_line"),
+                "end_line": symbol.get("end_line"),
+                "signature": symbol.get("signature") or "",
             }
         )
-        if len(merged) >= MAX_SYMBOLS:
-            break
-    return merged[:MAX_SYMBOLS]
+
+    for call in call_sites:
+        if str(call.get("parser_backend") or "") != "static_regex":
+            continue
+        if _language_for_path(str(call.get("path") or "")) not in {"javascript", "typescript"}:
+            continue
+        key = _call_site_key(call)
+        if not key or key in call_keys:
+            continue
+        call_keys.add(key)
+        calls.append(dict(call))
+
+    summary = dict(syntax.get("summary") or {})
+    summary["span_count"] = len(spans[:MAX_SYNTAX_SPANS])
+    summary["call_site_count"] = len(calls[:MAX_CALL_SITES])
+    summary["static_fallback_span_count"] = sum(
+        1 for span in spans if span.get("parser_backend") == "static_regex"
+    )
+    summary["static_fallback_call_site_count"] = sum(
+        1 for call in calls if call.get("parser_backend") == "static_regex"
+    )
+    if summary["static_fallback_span_count"] or summary["static_fallback_call_site_count"]:
+        syntax["active"] = True
+        if not any(
+            isinstance(status, dict) and status.get("available")
+            for status in (syntax.get("languages") or {}).values()
+        ):
+            syntax["backend"] = "static_regex"
+    syntax["spans"] = spans[:MAX_SYNTAX_SPANS]
+    syntax["call_sites"] = calls[:MAX_CALL_SITES]
+    syntax["summary"] = summary
+    return syntax
 
 
 def _merge_call_sites(call_sites: Sequence[Dict[str, Any]], syntax_index: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -2584,12 +3197,13 @@ def _engine_card(syntax_index: Optional[Dict[str, Any]] = None, lsp_index: Optio
     )
     tree_sitter_available = bool(tree_sitter_languages) or importlib.util.find_spec("tree_sitter") is not None
     return {
-        "indexer": "swe_repo_brain.v3",
-        "languages": ["python", "javascript", "typescript"],
+        "indexer": "swe_repo_brain.v4",
+        "languages": ["python", "javascript", "typescript", "tsx"],
         "parsers": {
-            "python": "stdlib_ast + tree_sitter",
-            "javascript": "static_regex + tree_sitter",
-            "typescript": "static_regex + tree_sitter",
+            "python": "tree_sitter primary + stdlib_ast fallback",
+            "javascript": "tree_sitter primary + static_regex fallback",
+            "typescript": "tree_sitter primary + static_regex fallback",
+            "tsx": "tree_sitter primary + static_regex fallback",
         },
         "lsp": {
             "available": any(lsp_servers.values()),
@@ -2674,6 +3288,7 @@ def build_repo_brain(
     incremental = _incremental_index_report(manifest, previous)
     symbols, imports, call_sites, source_reuse = _index_sources(repo_root, files, previous, incremental)
     syntax_index, syntax_reuse = _syntax_index(repo_root, files, previous, incremental)
+    syntax_index = _augment_syntax_index_with_static_fallback(syntax_index, symbols, call_sites)
     symbols = _merge_syntax_symbols(symbols, syntax_index)
     call_sites = _merge_call_sites(call_sites, syntax_index)
     call_graph = _resolve_call_edges(call_sites, symbols)
@@ -2689,6 +3304,8 @@ def build_repo_brain(
     test_ownership = _test_ownership_index(files, imports, tests, coverage, failure_index, flaky_tests)
     path, latest_path, ref = _brain_paths(repo_root, state, goal)
     lsp_summary = lsp_index.get("summary") or {}
+    component_map = _component_map(repo_root, files, symbols, imports)
+    route_map = _route_map(repo_root, files, symbols, component_map)
     brain: Dict[str, Any] = {
         "schema_version": REPO_INTELLIGENCE_SCHEMA,
         "kind": "swe_repo_brain",
@@ -2713,6 +3330,8 @@ def build_repo_brain(
         "coverage_map": coverage,
         "test_ownership": test_ownership,
         "dependency_graph": dependency_graph,
+        "component_map": component_map,
+        "route_map": route_map,
         "setup_commands": _setup_commands(files),
         "flaky_tests": flaky_tests,
         "failure_index": failure_index,
@@ -2743,6 +3362,9 @@ def build_repo_brain(
             "test_file_count": len(tests.get("test_files") or []),
             "coverage_file_count": len(coverage.get("files") or []),
             "test_ownership_edge_count": int((test_ownership.get("summary") or {}).get("edge_count") or 0),
+            "component_count": int((component_map.get("summary") or {}).get("component_count") or 0),
+            "component_dependency_edge_count": int((component_map.get("summary") or {}).get("dependency_edge_count") or 0),
+            "route_count": int((route_map.get("summary") or {}).get("route_count") or 0),
             "failure_record_count": int((failure_index.get("summary") or {}).get("record_count") or 0),
             "failure_file_count": int((failure_index.get("summary") or {}).get("file_count") or 0),
             "ownership_file_count": int((ownership.get("summary") or {}).get("file_count") or 0),
@@ -2752,7 +3374,12 @@ def build_repo_brain(
             "historical_failure_count": 0,
         },
     }
+    _materialize_v4_layers(repo_root, brain)
     brain["metrics"]["historical_failure_count"] = len(brain["historical_failure_signatures"])
+    brain["metrics"]["symbol_index_count"] = int((brain.get("symbol_index") or {}).get("summary", {}).get("symbol_count") or 0)
+    brain["metrics"]["edge_index_count"] = int((brain.get("edge_index") or {}).get("summary", {}).get("edge_count") or 0)
+    brain["metrics"]["query_index_entry_count"] = int((brain.get("query_index") or {}).get("summary", {}).get("entry_count") or 0)
+    brain["metrics"]["source_window_file_count"] = int((brain.get("source_windows") or {}).get("summary", {}).get("file_count") or 0)
     if persist:
         brain["storage"] = {
             "ref": ref,
@@ -2821,6 +3448,13 @@ def repo_brain_summary(brain: Dict[str, Any]) -> Dict[str, Any]:
         "lsp_live_reference_count": metrics.get("lsp_live_reference_count", 0),
         "repo_graph_node_count": metrics.get("repo_graph_node_count", 0),
         "repo_graph_edge_count": metrics.get("repo_graph_edge_count", 0),
+        "symbol_index_count": metrics.get("symbol_index_count", 0),
+        "edge_index_count": metrics.get("edge_index_count", 0),
+        "query_index_entry_count": metrics.get("query_index_entry_count", 0),
+        "source_window_file_count": metrics.get("source_window_file_count", 0),
+        "component_count": metrics.get("component_count", 0),
+        "component_dependency_edge_count": metrics.get("component_dependency_edge_count", 0),
+        "route_count": metrics.get("route_count", 0),
         "test_count": metrics.get("test_file_count", 0),
         "coverage_file_count": metrics.get("coverage_file_count", 0),
         "test_ownership_edge_count": metrics.get("test_ownership_edge_count", 0),
@@ -3410,6 +4044,73 @@ def repo_graph_from_brain(
         if path:
             add_edge(f"file:{path}", node_id, "contains", source_ref="symbols", confidence=0.99)
 
+    component_node_by_id: Dict[str, str] = {}
+    for component in ((brain.get("component_map") or {}).get("components") or []):
+        component_id = str(component.get("id") or "")
+        path = str(component.get("path") or "")
+        if not component_id or not path:
+            continue
+        node_id = f"component:{component_id}"
+        component_node_by_id[component_id] = node_id
+        add_node(
+            node_id,
+            "component",
+            str(component.get("name") or component_id),
+            path=path,
+            name=component.get("name"),
+            framework=component.get("framework"),
+            symbol_id=component.get("symbol_id"),
+            exported=component.get("exported"),
+            start_line=component.get("start_line"),
+            end_line=component.get("end_line"),
+            source="component_map",
+        )
+        add_edge(f"file:{path}", node_id, "contains", source_ref="component_map", confidence=float(component.get("confidence") or 0.7))
+        symbol_id = str(component.get("symbol_id") or "")
+        if symbol_id and symbol_id in symbol_node_by_id:
+            add_edge(node_id, symbol_node_by_id[symbol_id], "implemented_by", source_ref="component_map", confidence=0.86)
+
+    for edge in ((brain.get("component_map") or {}).get("dependency_edges") or []):
+        source_id = str(edge.get("source_component_id") or "")
+        target_id = str(edge.get("target_component_id") or "")
+        if source_id in component_node_by_id and target_id in component_node_by_id:
+            add_edge(
+                component_node_by_id[source_id],
+                component_node_by_id[target_id],
+                "uses_component",
+                reason=edge.get("reason"),
+                confidence=float(edge.get("confidence") or 0.5),
+                source_ref="component_map",
+            )
+
+    for route in ((brain.get("route_map") or {}).get("routes") or []):
+        route_id = str(route.get("id") or "")
+        path = str(route.get("path") or "")
+        route_path = str(route.get("route") or "")
+        if not route_id or not path or not route_path:
+            continue
+        node_id = f"route:{route_id}"
+        add_node(
+            node_id,
+            "route",
+            route_path,
+            path=path,
+            route=route_path,
+            methods=list(route.get("methods") or []),
+            framework=route.get("framework"),
+            kind=route.get("kind"),
+            handler_name=route.get("handler_name"),
+            component_name=route.get("component_name"),
+            source="route_map",
+        )
+        add_edge(f"file:{path}", node_id, "exposes_route", source_ref="route_map", confidence=float(route.get("confidence") or 0.7))
+        component_id = str(route.get("component_id") or "")
+        if component_id in component_node_by_id:
+            add_edge(node_id, component_node_by_id[component_id], "renders", source_ref="route_map", confidence=0.84)
+        handler_symbol_id = str(route.get("handler_symbol_id") or "")
+        if handler_symbol_id in symbol_node_by_id:
+            add_edge(node_id, symbol_node_by_id[handler_symbol_id], "handled_by", source_ref="route_map", confidence=0.8)
+
     for source, imports in (brain.get("imports") or {}).items():
         for item in imports or []:
             target = str(item.get("resolved_path") or "")
@@ -3526,6 +4227,1009 @@ def repo_graph_from_brain(
         },
     }
     return graph
+
+
+def _symbol_confidence(symbol: Dict[str, Any]) -> float:
+    backend = str(symbol.get("parser_backend") or "")
+    if backend == "tree_sitter":
+        base = 0.94
+    elif backend == "python_ast":
+        base = 0.88
+    elif backend == "static_regex":
+        base = 0.64
+    elif backend.startswith("lsp"):
+        base = 0.96
+    else:
+        base = 0.5
+    if not symbol.get("start_line"):
+        base -= 0.08
+    if not symbol.get("end_line"):
+        base -= 0.04
+    return round(max(0.05, min(0.99, base)), 3)
+
+
+def _qualified_symbol_name(symbol: Dict[str, Any]) -> str:
+    qualname = str(symbol.get("qualname") or symbol.get("name") or "").strip()
+    module = str(symbol.get("module") or "").strip(".")
+    if module and qualname and not qualname.startswith(module + "."):
+        return f"{module}.{qualname}"
+    return qualname or module
+
+
+def _normalize_symbol_record(symbol: Dict[str, Any]) -> Dict[str, Any]:
+    path = str(symbol.get("path") or "")
+    qualname = str(symbol.get("qualname") or symbol.get("name") or "")
+    symbol_id = str(symbol.get("id") or _stable_symbol_id(path, qualname))
+    confidence = _symbol_confidence(symbol)
+    backend = str(symbol.get("parser_backend") or "unknown")
+    return {
+        "id": symbol_id,
+        "node_id": f"symbol:{symbol_id}",
+        "path": path,
+        "module": symbol.get("module") or str(Path(path).with_suffix("")).replace(os.sep, "."),
+        "name": symbol.get("name"),
+        "qualname": qualname,
+        "qualified_name": _qualified_symbol_name(symbol),
+        "kind": symbol.get("kind"),
+        "language": symbol.get("language") or _language_for_path(path),
+        "span": {
+            "start_line": int(symbol.get("start_line") or 0),
+            "end_line": int(symbol.get("end_line") or symbol.get("start_line") or 0),
+        },
+        "parser_backend": backend,
+        "fallback_parser_backend": symbol.get("fallback_parser_backend"),
+        "confidence": confidence,
+        "signature": symbol.get("signature") or "",
+        "evidence_pointer": f"symbol:{symbol_id}",
+        "provenance": {
+            "source": "symbol_index",
+            "parser_backend": backend,
+            "confidence": confidence,
+        },
+    }
+
+
+def _build_symbol_index(brain: Dict[str, Any]) -> Dict[str, Any]:
+    records = [_normalize_symbol_record(symbol) for symbol in brain.get("symbols") or []]
+    by_id: Dict[str, Dict[str, Any]] = {}
+    by_name: DefaultDict[str, List[str]] = defaultdict(list)
+    by_qualname: DefaultDict[str, List[str]] = defaultdict(list)
+    by_path: DefaultDict[str, List[str]] = defaultdict(list)
+    for record in records:
+        symbol_id = str(record.get("id") or "")
+        if not symbol_id:
+            continue
+        by_id[symbol_id] = record
+        for value in (record.get("name"), record.get("qualname"), record.get("qualified_name")):
+            key = str(value or "").lower()
+            if key:
+                by_qualname[key].append(symbol_id)
+        name_key = str(record.get("name") or "").lower()
+        if name_key:
+            by_name[name_key].append(symbol_id)
+        path = str(record.get("path") or "")
+        if path:
+            by_path[path].append(symbol_id)
+    return {
+        "schema_version": "dhee.symbol_index.v1",
+        "records": records,
+        "by_id": by_id,
+        "by_name": {key: list(dict.fromkeys(value)) for key, value in by_name.items()},
+        "by_qualname": {key: list(dict.fromkeys(value)) for key, value in by_qualname.items()},
+        "by_path": {key: list(dict.fromkeys(value)) for key, value in by_path.items()},
+        "summary": {
+            "symbol_count": len(records),
+            "tree_sitter_symbol_count": sum(1 for item in records if item.get("parser_backend") == "tree_sitter"),
+            "fallback_symbol_count": sum(1 for item in records if item.get("parser_backend") != "tree_sitter"),
+        },
+    }
+
+
+def _build_edge_index(brain: Dict[str, Any]) -> Dict[str, Any]:
+    graph = repo_graph_from_brain(brain)
+    records: List[Dict[str, Any]] = []
+    by_source: DefaultDict[str, List[str]] = defaultdict(list)
+    by_target: DefaultDict[str, List[str]] = defaultdict(list)
+    by_type: DefaultDict[str, List[str]] = defaultdict(list)
+    by_source_type: DefaultDict[str, List[str]] = defaultdict(list)
+    by_target_type: DefaultDict[str, List[str]] = defaultdict(list)
+    for edge in graph.get("edges") or []:
+        edge_id = str(edge.get("id") or _stable_hash(edge, 16))
+        record = {
+            "id": edge_id,
+            "source": edge.get("source"),
+            "target": edge.get("target"),
+            "type": edge.get("type"),
+            "confidence": float(edge.get("confidence") or 0.0),
+            "metadata": dict(edge.get("metadata") or {}),
+            "provenance": dict(edge.get("provenance") or {}),
+            "evidence_pointer": edge_id,
+        }
+        records.append(record)
+        source = str(record.get("source") or "")
+        target = str(record.get("target") or "")
+        edge_type = str(record.get("type") or "")
+        by_source[source].append(edge_id)
+        by_target[target].append(edge_id)
+        by_type[edge_type].append(edge_id)
+        by_source_type[f"{source}\t{edge_type}"].append(edge_id)
+        by_target_type[f"{target}\t{edge_type}"].append(edge_id)
+    return {
+        "schema_version": "dhee.edge_index.v1",
+        "records": records,
+        "by_id": {str(item.get("id")): item for item in records},
+        "by_source": {key: value for key, value in by_source.items()},
+        "by_target": {key: value for key, value in by_target.items()},
+        "by_type": {key: value for key, value in by_type.items()},
+        "by_source_type": {key: value for key, value in by_source_type.items()},
+        "by_target_type": {key: value for key, value in by_target_type.items()},
+        "summary": {
+            "edge_count": len(records),
+            "edge_types": dict(graph.get("edge_types") or {}),
+        },
+    }
+
+
+def _build_query_index(brain: Dict[str, Any]) -> Dict[str, Any]:
+    entries: List[Dict[str, Any]] = []
+    by_token: DefaultDict[str, List[str]] = defaultdict(list)
+    for item in brain.get("file_manifest") or []:
+        path = str(item.get("path") or "")
+        if not path:
+            continue
+        tokens = _tokens(_path_text(path) + " " + str(item.get("language") or ""))
+        entry = {
+            "id": f"file:{path}",
+            "kind": "file",
+            "path": path,
+            "tokens": tokens,
+            "confidence": 0.86 if item.get("indexed") else 0.45,
+        }
+        entries.append(entry)
+        for token in tokens:
+            by_token[token].append(entry["id"])
+    for record in (brain.get("symbol_index") or {}).get("records") or []:
+        text = " ".join(
+            str(record.get(key) or "")
+            for key in ("name", "qualname", "qualified_name", "signature", "path", "kind")
+        )
+        tokens = _tokens(text)
+        entry = {
+            "id": str(record.get("node_id") or f"symbol:{record.get('id')}"),
+            "kind": "symbol",
+            "path": record.get("path"),
+            "symbol_id": record.get("id"),
+            "tokens": tokens,
+            "confidence": record.get("confidence"),
+        }
+        entries.append(entry)
+        for token in tokens:
+            by_token[token].append(entry["id"])
+    for component in ((brain.get("component_map") or {}).get("components") or []):
+        component_id = str(component.get("id") or "")
+        if not component_id:
+            continue
+        text = " ".join(str(component.get(key) or "") for key in ("name", "qualname", "path", "framework"))
+        tokens = _tokens(text)
+        entry = {
+            "id": f"component:{component_id}",
+            "kind": "component",
+            "path": component.get("path"),
+            "component_id": component_id,
+            "tokens": tokens,
+            "confidence": component.get("confidence"),
+        }
+        entries.append(entry)
+        for token in tokens:
+            by_token[token].append(entry["id"])
+    for route in ((brain.get("route_map") or {}).get("routes") or []):
+        route_id = str(route.get("id") or "")
+        if not route_id:
+            continue
+        text = " ".join(
+            str(route.get(key) or "")
+            for key in ("route", "path", "framework", "kind", "handler_name", "component_name")
+        )
+        tokens = _tokens(text)
+        entry = {
+            "id": f"route:{route_id}",
+            "kind": "route",
+            "path": route.get("path"),
+            "route_id": route_id,
+            "tokens": tokens,
+            "confidence": route.get("confidence"),
+        }
+        entries.append(entry)
+        for token in tokens:
+            by_token[token].append(entry["id"])
+    return {
+        "schema_version": "dhee.query_index.v1",
+        "entries": entries,
+        "by_token": {key: list(dict.fromkeys(value))[:160] for key, value in by_token.items()},
+        "summary": {
+            "entry_count": len(entries),
+            "token_count": len(by_token),
+        },
+    }
+
+
+def _extractor_versions(syntax_index: Dict[str, Any], lsp_index: Dict[str, Any]) -> Dict[str, Any]:
+    versions: Dict[str, Any] = {
+        "schema_version": "dhee.extractor_versions.v1",
+        "engine": "swe_repo_brain.v4",
+        "python_ast": "stdlib",
+        "static_regex": "builtin",
+        "tree_sitter": None,
+        "grammars": {},
+        "lsp": {
+            "mode": (lsp_index or {}).get("mode") or "request_plan_only",
+            "summary": (lsp_index or {}).get("summary") or {},
+        },
+    }
+    try:
+        from importlib import metadata as importlib_metadata
+
+        versions["tree_sitter"] = importlib_metadata.version("tree-sitter")
+        for language, status in ((syntax_index or {}).get("languages") or {}).items():
+            module = str((status or {}).get("module") or "")
+            if not module:
+                continue
+            try:
+                versions["grammars"][language] = {
+                    "module": module,
+                    "version": importlib_metadata.version(module.replace("_", "-")),
+                    "available": bool((status or {}).get("available")),
+                }
+            except Exception:
+                versions["grammars"][language] = {
+                    "module": module,
+                    "version": "",
+                    "available": bool((status or {}).get("available")),
+                }
+    except Exception:
+        versions["tree_sitter"] = ""
+    return versions
+
+
+def _source_window_catalog(repo_root: Path, brain: Dict[str, Any]) -> Dict[str, Any]:
+    files: Dict[str, Dict[str, Any]] = {}
+    symbols_by_path = (brain.get("symbol_index") or {}).get("by_path") or {}
+    symbols_by_id = (brain.get("symbol_index") or {}).get("by_id") or {}
+    for item in brain.get("file_manifest") or []:
+        path = str(item.get("path") or "")
+        if not path or not _language_for_path(path):
+            continue
+        absolute = repo_root / path
+        line_count = 0
+        try:
+            if absolute.stat().st_size <= MAX_INDEX_FILE_BYTES:
+                line_count = len(absolute.read_text(encoding="utf-8", errors="replace").splitlines())
+        except OSError:
+            line_count = 0
+        windows: List[Dict[str, Any]] = []
+        for symbol_id in (symbols_by_path.get(path) or [])[:40]:
+            symbol = symbols_by_id.get(symbol_id) or {}
+            span = symbol.get("span") or {}
+            start_line = int(span.get("start_line") or 1)
+            end_line = int(span.get("end_line") or start_line)
+            end_line = min(max(end_line, start_line), start_line + MAX_SOURCE_WINDOW_LINES - 1)
+            windows.append(
+                {
+                    "path": path,
+                    "start_line": start_line,
+                    "end_line": end_line,
+                    "hash": _stable_hash({"path": path, "start": start_line, "end": end_line, "sha256": item.get("sha256")}, 16),
+                    "confidence": symbol.get("confidence", 0.5),
+                    "provenance": {
+                        "source": "symbol_span",
+                        "evidence_pointer": str(symbol.get("evidence_pointer") or ""),
+                        "parser_backend": symbol.get("parser_backend"),
+                    },
+                }
+            )
+        files[path] = {
+            "path": path,
+            "language": item.get("language") or _language_for_path(path),
+            "sha256": item.get("sha256") or "",
+            "line_count": line_count,
+            "windows": windows,
+        }
+    return {
+        "schema_version": SOURCE_WINDOW_SCHEMA,
+        "mode": "metadata_catalog_no_bodies",
+        "files": files,
+        "summary": {
+            "file_count": len(files),
+            "window_count": sum(len(item.get("windows") or []) for item in files.values()),
+            "raw_file_bodies_excluded": True,
+        },
+    }
+
+
+def _materialize_v4_layers(repo_root: Path, brain: Dict[str, Any]) -> None:
+    brain["repo_root"] = str(repo_root)
+    brain["symbol_index"] = _build_symbol_index(brain)
+    brain["edge_index"] = _build_edge_index(brain)
+    brain["query_index"] = _build_query_index(brain)
+    brain["source_windows"] = _source_window_catalog(repo_root, brain)
+    brain["extractor_versions"] = _extractor_versions(brain.get("syntax_index") or {}, brain.get("lsp_index") or {})
+
+
+def _brain_repo_root(brain: Dict[str, Any], repo: str | os.PathLike[str] | None = None) -> Optional[Path]:
+    if repo is not None:
+        return resolve_repo_root(repo)
+    root = str(brain.get("repo_root") or "")
+    if root:
+        return Path(root).expanduser().resolve()
+    storage_path = str((brain.get("storage") or {}).get("path") or "")
+    if storage_path and os.path.isabs(storage_path):
+        return Path(storage_path).resolve().parents[3]
+    return None
+
+
+def _node_path(node: Dict[str, Any]) -> str:
+    metadata = node.get("metadata") or {}
+    if str(node.get("id") or "").startswith("file:"):
+        return str(metadata.get("path") or str(node.get("id")).split(":", 1)[1])
+    return str(metadata.get("path") or "")
+
+
+def _edge_records(brain: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    index = brain.get("edge_index") or {}
+    by_id = index.get("by_id") if isinstance(index, dict) else {}
+    if isinstance(by_id, dict) and by_id:
+        return by_id
+    return _build_edge_index(brain).get("by_id") or {}
+
+
+def _symbol_records(brain: Dict[str, Any]) -> List[Dict[str, Any]]:
+    index = brain.get("symbol_index") or {}
+    records = index.get("records") if isinstance(index, dict) else None
+    if isinstance(records, list) and records:
+        return records
+    return _build_symbol_index(brain).get("records") or []
+
+
+def _symbol_records_by_id(brain: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    index = brain.get("symbol_index") or {}
+    by_id = index.get("by_id") if isinstance(index, dict) else None
+    if isinstance(by_id, dict) and by_id:
+        return by_id
+    return {str(item.get("id")): item for item in _symbol_records(brain)}
+
+
+def _resolve_symbol_nodes(brain: Dict[str, Any], symbol: str, *, limit: int = 20) -> List[str]:
+    query = str(symbol or "").strip()
+    if not query:
+        return []
+    records_by_id = _symbol_records_by_id(brain)
+    if query.startswith("symbol:"):
+        node_id = query
+        raw_id = query.split(":", 1)[1]
+        if raw_id in records_by_id:
+            return [node_id]
+    if query in records_by_id:
+        return [f"symbol:{query}"]
+    lowered = query.lower()
+    exact: List[str] = []
+    partial: List[str] = []
+    for record in records_by_id.values():
+        values = [
+            str(record.get("name") or ""),
+            str(record.get("qualname") or ""),
+            str(record.get("qualified_name") or ""),
+        ]
+        if any(lowered == value.lower() for value in values if value):
+            exact.append(str(record.get("node_id") or f"symbol:{record.get('id')}"))
+        elif any(lowered in value.lower() for value in values if value):
+            partial.append(str(record.get("node_id") or f"symbol:{record.get('id')}"))
+    if exact:
+        return list(dict.fromkeys(exact))[:limit]
+    if partial:
+        return list(dict.fromkeys(partial))[:limit]
+    search = repo_symbol_search(brain, query, limit=limit, include_tests=True)
+    return [
+        str(item.get("node_id"))
+        for item in search.get("results") or []
+        if item.get("node_id")
+    ][:limit]
+
+
+def _file_nodes_for_symbol_nodes(brain: Dict[str, Any], node_ids: Sequence[str]) -> List[str]:
+    records = _symbol_records_by_id(brain)
+    out: List[str] = []
+    for node_id in node_ids:
+        raw_id = str(node_id).split(":", 1)[1] if str(node_id).startswith("symbol:") else str(node_id)
+        path = str((records.get(raw_id) or {}).get("path") or "")
+        if path:
+            out.append(f"file:{path}")
+    return list(dict.fromkeys(out))
+
+
+def _source_windows_for_files(
+    repo_root: Optional[Path],
+    brain: Dict[str, Any],
+    files: Sequence[str],
+    *,
+    query: str = "",
+    max_files: int = 8,
+    max_lines: int = MAX_SOURCE_WINDOW_LINES,
+    max_chars_per_file: int = MAX_SOURCE_WINDOW_CHARS_PER_FILE,
+    max_total_chars: int = MAX_SOURCE_WINDOW_TOTAL_CHARS,
+) -> List[Dict[str, Any]]:
+    if repo_root is None:
+        return []
+    manifest_by_path = {str(item.get("path") or ""): item for item in brain.get("file_manifest") or []}
+    symbols_by_path = (brain.get("symbol_index") or {}).get("by_path") or {}
+    symbols_by_id = (brain.get("symbol_index") or {}).get("by_id") or {}
+    query_tokens = set(_tokens(query))
+    windows: List[Dict[str, Any]] = []
+    total_chars = 0
+    for path in list(dict.fromkeys(str(item) for item in files if item))[:max_files]:
+        if path.startswith("file:"):
+            path = path.split(":", 1)[1]
+        if path not in manifest_by_path:
+            continue
+        absolute = repo_root / path
+        try:
+            if absolute.stat().st_size > MAX_INDEX_FILE_BYTES:
+                continue
+            lines = absolute.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        if not lines:
+            continue
+        hit_line = 1
+        confidence = 0.58
+        if query_tokens:
+            for index, line in enumerate(lines, start=1):
+                lowered = line.lower()
+                if any(token in lowered for token in query_tokens):
+                    hit_line = index
+                    confidence = 0.84
+                    break
+        if confidence < 0.84:
+            for symbol_id in symbols_by_path.get(path) or []:
+                symbol = symbols_by_id.get(symbol_id) or {}
+                span = symbol.get("span") or {}
+                if span.get("start_line"):
+                    hit_line = int(span.get("start_line") or 1)
+                    confidence = max(confidence, float(symbol.get("confidence") or 0.58))
+                    break
+        half = max(0, int(max_lines) // 2)
+        start = max(1, hit_line - half)
+        end = min(len(lines), start + int(max_lines) - 1)
+        start = max(1, end - int(max_lines) + 1)
+        selected = lines[start - 1:end]
+        numbered = "\n".join(f"{line_no:>4} | {line}" for line_no, line in enumerate(selected, start=start))
+        while len(numbered) > max_chars_per_file and len(selected) > 1:
+            selected = selected[:-1]
+            end -= 1
+            numbered = "\n".join(f"{line_no:>4} | {line}" for line_no, line in enumerate(selected, start=start))
+        if total_chars + len(numbered) > max_total_chars:
+            remaining = max_total_chars - total_chars
+            if remaining <= 0:
+                break
+            numbered = numbered[:remaining].rstrip()
+            if not numbered:
+                break
+        total_chars += len(numbered)
+        file_hash = str((manifest_by_path.get(path) or {}).get("sha256") or "")
+        windows.append(
+            {
+                "schema_version": SOURCE_WINDOW_SCHEMA,
+                "path": path,
+                "start_line": start,
+                "end_line": end,
+                "line_count": max(0, end - start + 1),
+                "char_count": len(numbered),
+                "hash": _stable_hash({"path": path, "start": start, "end": end, "text": numbered}, 16),
+                "file_sha256": file_hash,
+                "confidence": round(min(0.96, confidence), 3),
+                "provenance": {
+                    "source": "bounded_source_window",
+                    "evidence_pointer": f"source_window:{path}:{start}-{end}",
+                    "parser_backend": "repo_brain.v4",
+                },
+                "numbered_source": numbered,
+            }
+        )
+        if total_chars >= max_total_chars:
+            break
+    return windows
+
+
+def repo_symbol_search(
+    brain: Dict[str, Any],
+    query: str,
+    *,
+    kind: str | None = None,
+    language: str | None = None,
+    path: str | None = None,
+    limit: int = 20,
+    include_tests: bool = False,
+) -> Dict[str, Any]:
+    """Rank symbols with path, graph, freshness, verifier, and provenance signals."""
+
+    query = str(query or "").strip()
+    tokens = set(_tokens(query))
+    limit = max(1, min(200, int(limit or 20)))
+    dirty_paths = set(str(item) for item in brain.get("dirty_paths") or [])
+    failure_paths = set(((brain.get("failure_index") or {}).get("by_file") or {}).keys())
+    ownership_paths = set(((brain.get("git_ownership") or {}).get("by_file") or {}).keys())
+    test_owned_paths = set(((brain.get("test_ownership") or {}).get("source_to_tests") or {}).keys())
+    results: List[Dict[str, Any]] = []
+    for record in _symbol_records(brain):
+        symbol_path = str(record.get("path") or "")
+        if not include_tests and _is_test_file(symbol_path):
+            continue
+        if kind and str(record.get("kind") or "").lower() != str(kind).lower():
+            continue
+        if language and str(record.get("language") or "").lower() != str(language).lower():
+            continue
+        if path and str(path).replace(os.sep, "/").strip("/") not in symbol_path:
+            continue
+        text_parts = [
+            str(record.get("name") or ""),
+            str(record.get("qualname") or ""),
+            str(record.get("qualified_name") or ""),
+            str(record.get("signature") or ""),
+        ]
+        symbol_text = " ".join(text_parts).lower()
+        path_text = _path_text(symbol_path)
+        score = 0.0
+        reasons: List[str] = []
+        lowered_query = query.lower()
+        if lowered_query:
+            exact_values = {part.lower() for part in text_parts if part}
+            if lowered_query in exact_values:
+                score += 42.0
+                reasons.append("exact symbol match")
+            elif any(value.endswith("." + lowered_query) for value in exact_values):
+                score += 32.0
+                reasons.append("qualified symbol suffix match")
+            elif lowered_query in symbol_text:
+                score += 20.0
+                reasons.append("symbol text contains query")
+        overlap = tokens & set(_tokens(symbol_text))
+        if overlap:
+            score += min(18.0, 4.0 * len(overlap))
+            reasons.append("symbol token overlap: " + ", ".join(sorted(overlap)[:6]))
+        path_overlap = tokens & set(_tokens(path_text))
+        if path_overlap:
+            score += min(10.0, 2.5 * len(path_overlap))
+            reasons.append("path token overlap: " + ", ".join(sorted(path_overlap)[:6]))
+        confidence = float(record.get("confidence") or 0.0)
+        score += confidence * 8.0
+        if symbol_path in dirty_paths:
+            score += 5.0
+            reasons.append("file is dirty in current branch")
+        if symbol_path in failure_paths:
+            score += 4.0
+            reasons.append("recent failure evidence touches file")
+        if symbol_path in test_owned_paths:
+            score += 3.0
+            reasons.append("owned tests exist for file")
+        if symbol_path in ownership_paths:
+            score += 0.75
+            reasons.append("git ownership evidence available")
+        if score <= confidence * 8.0 and query:
+            continue
+        item = dict(record)
+        item.update(
+            {
+                "schema_version": REPO_SYMBOL_SEARCH_SCHEMA,
+                "score": round(score, 3),
+                "confidence": round(min(0.97, max(confidence, 0.2 + score / 70.0)), 3),
+                "reasons": list(dict.fromkeys(reasons))[:8],
+                "evidence_pointers": [str(record.get("evidence_pointer") or "")],
+            }
+        )
+        results.append(item)
+    results.sort(key=lambda item: (-float(item.get("score") or 0.0), str(item.get("path") or ""), str(item.get("qualified_name") or "")))
+    return {
+        "schema_version": REPO_SYMBOL_SEARCH_SCHEMA,
+        "query": query,
+        "filters": {
+            "kind": kind,
+            "language": language,
+            "path": path,
+            "include_tests": include_tests,
+        },
+        "results": results[:limit],
+        "summary": {
+            "result_count": len(results[:limit]),
+            "candidate_count": len(results),
+            "limit": limit,
+        },
+    }
+
+
+def _call_graph_query(
+    brain: Dict[str, Any],
+    symbol: str,
+    *,
+    direction: str,
+    depth: int = 1,
+    limit: int = 50,
+) -> Dict[str, Any]:
+    depth = max(1, min(8, int(depth or 1)))
+    limit = max(1, min(500, int(limit or 50)))
+    target_nodes = _resolve_symbol_nodes(brain, symbol, limit=20)
+    edge_index = brain.get("edge_index") if isinstance(brain.get("edge_index"), dict) else _build_edge_index(brain)
+    edges_by_id = edge_index.get("by_id") or {}
+    by_source = edge_index.get("by_source") or {}
+    by_target = edge_index.get("by_target") or {}
+    selected_edges: Dict[str, Dict[str, Any]] = {}
+    selected_nodes = set(target_nodes)
+    frontier = set(target_nodes)
+    tiers: List[Dict[str, Any]] = []
+    for hop in range(1, depth + 1):
+        next_frontier: set[str] = set()
+        tier_edges: List[str] = []
+        for node_id in sorted(frontier):
+            edge_ids = by_target.get(node_id, []) if direction == "callers" else by_source.get(node_id, [])
+            for edge_id in edge_ids:
+                edge = edges_by_id.get(edge_id) or {}
+                if edge.get("type") != "calls":
+                    continue
+                selected_edges[edge_id] = edge
+                tier_edges.append(edge_id)
+                peer = str(edge.get("source") if direction == "callers" else edge.get("target") or "")
+                if peer and peer not in selected_nodes:
+                    selected_nodes.add(peer)
+                    next_frontier.add(peer)
+                if len(selected_edges) >= limit:
+                    break
+            if len(selected_edges) >= limit:
+                break
+        tiers.append({"hop": hop, "edge_ids": tier_edges[:limit], "node_ids": sorted(next_frontier)})
+        frontier = next_frontier
+        if not frontier or len(selected_edges) >= limit:
+            break
+    graph_nodes = {str(node.get("id")): node for node in repo_graph_from_brain(brain).get("nodes") or []}
+    nodes = [graph_nodes[node_id] for node_id in sorted(selected_nodes) if node_id in graph_nodes]
+    return {
+        "schema_version": REPO_CALL_GRAPH_QUERY_SCHEMA,
+        "query_type": direction,
+        "symbol": symbol,
+        "target_nodes": target_nodes,
+        "depth": depth,
+        "nodes": nodes,
+        "edges": list(selected_edges.values())[:limit],
+        "tiers": tiers,
+        "summary": {
+            "node_count": len(nodes),
+            "edge_count": len(selected_edges),
+            "limit": limit,
+            "truncated": len(selected_edges) >= limit,
+        },
+        "policy": {
+            "provenance_required": True,
+            "raw_file_bodies_excluded": True,
+        },
+    }
+
+
+def repo_callers(brain: Dict[str, Any], symbol: str, *, depth: int = 1, limit: int = 50) -> Dict[str, Any]:
+    return _call_graph_query(brain, symbol, direction="callers", depth=depth, limit=limit)
+
+
+def repo_callees(brain: Dict[str, Any], symbol: str, *, depth: int = 1, limit: int = 50) -> Dict[str, Any]:
+    return _call_graph_query(brain, symbol, direction="callees", depth=depth, limit=limit)
+
+
+def _candidate_tests_for_paths(brain: Dict[str, Any], paths: Sequence[str], *, limit: int = 24) -> List[Dict[str, Any]]:
+    tests: Dict[str, Dict[str, Any]] = {}
+    for path in paths:
+        path = str(path or "")
+        if not path:
+            continue
+        if _is_test_file(path):
+            tests[path] = {
+                "path": path,
+                "command": _test_command_for_path(path),
+                "score": 14.0,
+                "confidence": 0.86,
+                "reason": "impacted test file",
+                "source": path,
+            }
+        for source_map in (
+            (brain.get("test_ownership") or {}).get("source_to_tests") or {},
+            (brain.get("test_map") or {}).get("source_to_tests") or {},
+        ):
+            for link in source_map.get(path, []) or []:
+                test_path = str(link.get("path") or "")
+                if not test_path:
+                    continue
+                score = float(link.get("score") or 0.0)
+                current = tests.get(test_path)
+                if not current or score > float(current.get("score") or 0.0):
+                    tests[test_path] = {
+                        "path": test_path,
+                        "command": str(link.get("command") or _test_command_for_path(test_path)),
+                        "score": round(score, 3),
+                        "confidence": float(link.get("confidence") or 0.6),
+                        "reason": "owned test for impacted source",
+                        "source": path,
+                        "evidence_pointers": list(link.get("evidence_pointers") or [])[:6],
+                    }
+    return sorted(tests.values(), key=lambda item: (-float(item.get("score") or 0.0), str(item.get("path") or "")))[:limit]
+
+
+def repo_impact(
+    brain: Dict[str, Any],
+    symbol_or_path: str,
+    *,
+    depth: int = 2,
+    limit: int = 100,
+    include_tests: bool = True,
+) -> Dict[str, Any]:
+    """Trace likely edit impact through symbols, imports, calls, tests, failures, and ownership."""
+
+    target = str(symbol_or_path or "").strip()
+    depth = max(1, min(8, int(depth or 2)))
+    limit = max(1, min(500, int(limit or 100)))
+    file_paths = {str(item.get("path") or "") for item in brain.get("file_manifest") or []}
+    seed_nodes: List[str] = []
+    target_path = target.replace(os.sep, "/").lstrip("./")
+    if target_path in file_paths:
+        seed_nodes.append(f"file:{target_path}")
+        seed_nodes.extend(f"symbol:{symbol_id}" for symbol_id in ((brain.get("symbol_index") or {}).get("by_path") or {}).get(target_path, [])[:20])
+    else:
+        symbol_nodes = _resolve_symbol_nodes(brain, target, limit=20)
+        seed_nodes.extend(symbol_nodes)
+        seed_nodes.extend(_file_nodes_for_symbol_nodes(brain, symbol_nodes))
+    seed_nodes = list(dict.fromkeys(seed_nodes))
+    edge_index = brain.get("edge_index") if isinstance(brain.get("edge_index"), dict) else _build_edge_index(brain)
+    edges_by_id = edge_index.get("by_id") or {}
+    by_source = edge_index.get("by_source") or {}
+    by_target = edge_index.get("by_target") or {}
+    selected_edges: Dict[str, Dict[str, Any]] = {}
+    selected_nodes = set(seed_nodes)
+    frontier = set(seed_nodes)
+    relation_weights = {
+        "failed_with": 12.0,
+        "tested_by": 10.0,
+        "calls": 8.0,
+        "exposes_route": 8.0,
+        "renders": 8.0,
+        "uses_component": 7.5,
+        "imports": 7.0,
+        "handled_by": 6.5,
+        "implemented_by": 5.0,
+        "contains": 4.0,
+        "owned_by": 1.0,
+    }
+    node_scores: DefaultDict[str, float] = defaultdict(float)
+    node_reasons: DefaultDict[str, List[str]] = defaultdict(list)
+    for node_id in seed_nodes:
+        node_scores[node_id] += 24.0
+        node_reasons[node_id].append("impact seed")
+    for hop in range(1, depth + 1):
+        if not frontier or len(selected_nodes) >= limit:
+            break
+        next_frontier: set[str] = set()
+        for node_id in sorted(frontier):
+            candidate_edge_ids = list(by_source.get(node_id, []) or []) + list(by_target.get(node_id, []) or [])
+            candidate_edges = []
+            for edge_id in candidate_edge_ids:
+                edge = edges_by_id.get(edge_id) or {}
+                edge_type = str(edge.get("type") or "")
+                if edge_type not in relation_weights:
+                    continue
+                if edge_type == "owned_by" and hop > 1:
+                    continue
+                if not include_tests and edge_type in {"tested_by", "failed_with"}:
+                    continue
+                candidate_edges.append(edge)
+            candidate_edges.sort(
+                key=lambda edge: (
+                    -relation_weights.get(str(edge.get("type") or ""), 0.0),
+                    -float(edge.get("confidence") or 0.0),
+                    str(edge.get("source") or ""),
+                    str(edge.get("target") or ""),
+                )
+            )
+            for edge in candidate_edges:
+                edge_id = str(edge.get("id") or "")
+                if edge_id:
+                    selected_edges[edge_id] = edge
+                source = str(edge.get("source") or "")
+                target_node = str(edge.get("target") or "")
+                for peer in (source, target_node):
+                    if not peer or peer == node_id:
+                        continue
+                    gain = relation_weights.get(str(edge.get("type") or ""), 1.0) * float(edge.get("confidence") or 0.5) / hop
+                    node_scores[peer] += gain
+                    node_reasons[peer].append(f"{edge.get('type')} edge within {hop} hop(s)")
+                    if peer not in selected_nodes:
+                        selected_nodes.add(peer)
+                        next_frontier.add(peer)
+                if len(selected_nodes) >= limit:
+                    break
+            if len(selected_nodes) >= limit:
+                break
+        frontier = next_frontier
+    graph_nodes = {str(node.get("id")): node for node in repo_graph_from_brain(brain).get("nodes") or []}
+    impacted_by_path: Dict[str, Dict[str, Any]] = {}
+    for node_id in selected_nodes:
+        node = graph_nodes.get(node_id) or {}
+        path = _node_path(node)
+        if not path:
+            continue
+        score = node_scores[node_id]
+        current = impacted_by_path.get(path)
+        if current and float(current.get("score") or 0.0) >= score:
+            current["reasons"].extend(node_reasons[node_id])
+            continue
+        impacted_by_path[path] = {
+            "path": path,
+            "kind": _file_kind(path),
+            "score": round(score, 3),
+            "confidence": round(min(0.96, 0.24 + score / 50.0), 3),
+            "reasons": list(dict.fromkeys(node_reasons[node_id]))[:8],
+            "node_id": node_id,
+        }
+    impacted_files = sorted(
+        impacted_by_path.values(),
+        key=lambda item: (-float(item.get("score") or 0.0), item.get("path") or ""),
+    )[:limit]
+    impacted_routes: List[Dict[str, Any]] = []
+    impacted_components: List[Dict[str, Any]] = []
+    seen_routes: set[str] = set()
+    seen_components: set[str] = set()
+    for node_id in selected_nodes:
+        node = graph_nodes.get(node_id) or {}
+        metadata = node.get("metadata") or {}
+        node_type = str(node.get("type") or "")
+        if node_type == "route":
+            route = str(metadata.get("route") or node.get("label") or "")
+            if route and route not in seen_routes:
+                seen_routes.add(route)
+                impacted_routes.append(
+                    {
+                        "route": route,
+                        "path": str(metadata.get("path") or ""),
+                        "methods": list(metadata.get("methods") or []),
+                        "framework": metadata.get("framework"),
+                        "kind": metadata.get("kind"),
+                        "score": round(node_scores[node_id], 3),
+                        "confidence": round(min(0.96, 0.24 + node_scores[node_id] / 50.0), 3),
+                        "reasons": list(dict.fromkeys(node_reasons[node_id]))[:8],
+                        "node_id": node_id,
+                    }
+                )
+        elif node_type == "component":
+            name = str(metadata.get("name") or node.get("label") or "")
+            key = f"{metadata.get('path')}:{name}"
+            if name and key not in seen_components:
+                seen_components.add(key)
+                impacted_components.append(
+                    {
+                        "name": name,
+                        "path": str(metadata.get("path") or ""),
+                        "framework": metadata.get("framework"),
+                        "score": round(node_scores[node_id], 3),
+                        "confidence": round(min(0.96, 0.24 + node_scores[node_id] / 50.0), 3),
+                        "reasons": list(dict.fromkeys(node_reasons[node_id]))[:8],
+                        "node_id": node_id,
+                    }
+                )
+    impacted_routes.sort(key=lambda item: (-float(item.get("score") or 0.0), item.get("route") or ""))
+    impacted_components.sort(key=lambda item: (-float(item.get("score") or 0.0), item.get("path") or "", item.get("name") or ""))
+    impacted_routes = impacted_routes[:limit]
+    impacted_components = impacted_components[:limit]
+    candidate_tests = _candidate_tests_for_paths(
+        brain,
+        [str(item.get("path") or "") for item in impacted_files],
+        limit=24,
+    ) if include_tests else []
+    return {
+        "schema_version": REPO_IMPACT_SCHEMA,
+        "target": target,
+        "seed_nodes": seed_nodes,
+        "depth": depth,
+        "impacted_files": impacted_files,
+        "impacted_routes": impacted_routes,
+        "impacted_components": impacted_components,
+        "candidate_tests": candidate_tests,
+        "edges": list(selected_edges.values())[:limit],
+        "summary": {
+            "seed_count": len(seed_nodes),
+            "impacted_file_count": len(impacted_files),
+            "impacted_route_count": len(impacted_routes),
+            "impacted_component_count": len(impacted_components),
+            "candidate_test_count": len(candidate_tests),
+            "edge_count": min(len(selected_edges), limit),
+            "limit": limit,
+            "truncated": len(selected_nodes) >= limit,
+        },
+        "policy": {
+            "provenance_required": True,
+            "raw_file_bodies_excluded": True,
+        },
+    }
+
+
+def repo_explore(
+    brain: Dict[str, Any],
+    query: str,
+    *,
+    max_hops: int = 3,
+    max_files: int = 8,
+    max_symbols: int = 40,
+    max_source_chars: int = MAX_SOURCE_WINDOW_TOTAL_CHARS,
+) -> Dict[str, Any]:
+    """Return a bounded agent-ready exploration packet for a repo question."""
+
+    query = str(query or "").strip()
+    max_hops = max(1, min(8, int(max_hops or 3)))
+    max_files = max(1, min(40, int(max_files or 8)))
+    max_symbols = max(1, min(120, int(max_symbols or 40)))
+    max_source_chars = max(1_000, min(MAX_SOURCE_WINDOW_TOTAL_CHARS, int(max_source_chars or MAX_SOURCE_WINDOW_TOTAL_CHARS)))
+    symbol_search = repo_symbol_search(brain, query, limit=max_symbols, include_tests=False)
+    seed = query
+    if symbol_search.get("results"):
+        first = symbol_search["results"][0]
+        seed = str(first.get("qualified_name") or first.get("qualname") or first.get("name") or query)
+    impact = repo_impact(brain, seed, depth=max(1, max_hops - 1), limit=max_files * 8, include_tests=True)
+    graph = context_graph_query(brain, query, limit=max(80, max_files * 20), max_hops=max_hops)
+    file_paths = [
+        str(item.get("path") or "")
+        for item in impact.get("impacted_files") or []
+        if item.get("path")
+    ]
+    if len(file_paths) < max_files:
+        for item in (graph.get("localization") or {}).get("candidate_files") or []:
+            path = str(item.get("path") or "")
+            if path and path not in file_paths:
+                file_paths.append(path)
+    file_paths = file_paths[:max_files]
+    source_windows = _source_windows_for_files(
+        _brain_repo_root(brain),
+        brain,
+        file_paths,
+        query=query,
+        max_files=max_files,
+        max_total_chars=max_source_chars,
+    )
+    return {
+        "schema_version": REPO_EXPLORE_SCHEMA,
+        "query": query,
+        "repo": brain.get("repo"),
+        "brain_ref": (brain.get("storage") or {}).get("ref") or brain.get("head_short"),
+        "symbols": (symbol_search.get("results") or [])[:max_symbols],
+        "impact": {
+            "target": impact.get("target"),
+            "impacted_files": (impact.get("impacted_files") or [])[:max_files],
+            "impacted_routes": (impact.get("impacted_routes") or [])[:max_files],
+            "impacted_components": (impact.get("impacted_components") or [])[:max_symbols],
+            "candidate_tests": impact.get("candidate_tests") or [],
+            "summary": impact.get("summary") or {},
+        },
+        "context_graph": {
+            "nodes": (graph.get("nodes") or [])[:max_files * 6],
+            "edges": (graph.get("edges") or [])[:max_files * 10],
+            "proof_items": graph.get("proof_items") or [],
+            "summary": graph.get("summary") or {},
+        },
+        "source_windows": source_windows,
+        "summary": {
+            "symbol_count": min(len(symbol_search.get("results") or []), max_symbols),
+            "file_count": len(file_paths),
+            "source_window_count": len(source_windows),
+            "source_window_chars": sum(int(item.get("char_count") or 0) for item in source_windows),
+            "max_hops": max_hops,
+        },
+        "policy": {
+            "bounded_line_numbered_source_windows": True,
+            "max_lines_per_file": MAX_SOURCE_WINDOW_LINES,
+            "max_chars_per_file": MAX_SOURCE_WINDOW_CHARS_PER_FILE,
+            "max_total_source_chars": max_source_chars,
+            "raw_file_bodies_excluded_by_default": True,
+        },
+    }
 
 
 def context_graph_slice(
@@ -3649,6 +5353,24 @@ def context_graph_slice(
         for edge in selected_edges_by_id.values()
         if edge.get("source") in kept and edge.get("target") in kept
     ]
+    source_paths: List[str] = []
+    for item in proof_items:
+        if str(item.get("id") or "").startswith("file:"):
+            source_paths.append(str(item.get("id")).split(":", 1)[1])
+    for node in nodes:
+        path = _node_path(node)
+        if path:
+            source_paths.append(path)
+    source_windows = _source_windows_for_files(
+        _brain_repo_root(brain),
+        brain,
+        source_paths,
+        query=query,
+        max_files=8,
+        max_lines=MAX_SOURCE_WINDOW_LINES,
+        max_chars_per_file=MAX_SOURCE_WINDOW_CHARS_PER_FILE,
+        max_total_chars=MAX_SOURCE_WINDOW_TOTAL_CHARS,
+    )
     return {
         "schema_version": CONTEXT_GRAPH_SLICE_SCHEMA,
         "generated_at": _now_iso(),
@@ -3660,10 +5382,13 @@ def context_graph_slice(
         "edges": edges,
         "expansion_tiers": expansion_tiers,
         "proof_items": proof_items,
+        "source_windows": source_windows,
         "summary": {
             "seed_count": len(seed_set),
             "node_count": len(nodes),
             "edge_count": len(edges),
+            "source_window_count": len(source_windows),
+            "source_window_chars": sum(int(item.get("char_count") or 0) for item in source_windows),
             "max_hops": max_hops,
             "limit": limit,
             "truncated": len(selected_nodes) > len(nodes),
@@ -3673,6 +5398,10 @@ def context_graph_slice(
             "multi_resolution": True,
             "raw_file_bodies_excluded": True,
             "every_item_has_provenance": True,
+            "bounded_line_numbered_source_windows": True,
+            "max_lines_per_file": MAX_SOURCE_WINDOW_LINES,
+            "max_chars_per_file": MAX_SOURCE_WINDOW_CHARS_PER_FILE,
+            "max_total_source_chars": MAX_SOURCE_WINDOW_TOTAL_CHARS,
         },
     }
 

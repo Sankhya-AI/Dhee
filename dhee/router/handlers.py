@@ -51,6 +51,12 @@ PTR_TTL_SECONDS = 7 * 24 * 3600  # 7 days
 # isn't.
 INLINE_INFLATION_THRESHOLD = 2048
 
+# Explicit slices must not require a second pointer-expansion tool to be useful.
+# Keep the inline body sharply bounded so Dhee still protects the context
+# firewall for whole-file reads.
+SOURCE_WINDOW_MAX_LINES = 120
+SOURCE_WINDOW_MAX_CHARS = 12_000
+
 _ROUTE_DB = None
 _ROUTE_DB_PATH = None
 
@@ -170,6 +176,58 @@ def _inline_read(content: str, ptr: str, path: str, line_count: int, char_count:
         f"{content}{trailer}"
         f"</dhee_read>"
     )
+
+
+def _source_window(
+    *,
+    file_path: str,
+    lines: list[str],
+    start_line: int,
+    requested_line_count: int,
+    max_lines: int = SOURCE_WINDOW_MAX_LINES,
+    max_chars: int = SOURCE_WINDOW_MAX_CHARS,
+) -> Dict[str, Any]:
+    """Return a capped, line-numbered source window for explicit reads."""
+
+    max_lines = max(1, min(SOURCE_WINDOW_MAX_LINES, int(max_lines or SOURCE_WINDOW_MAX_LINES)))
+    max_chars = max(200, min(SOURCE_WINDOW_MAX_CHARS, int(max_chars or SOURCE_WINDOW_MAX_CHARS)))
+    numbered: list[str] = []
+    consumed = 0
+    truncated = False
+    end_line = start_line - 1
+    for index, raw_line in enumerate(lines, start=start_line):
+        if len(numbered) >= max_lines:
+            truncated = True
+            break
+        body = raw_line.rstrip("\n")
+        rendered = f"{index:>4} | {body}"
+        remaining = max_chars - consumed
+        if remaining <= 0:
+            truncated = True
+            break
+        if len(rendered) > remaining:
+            rendered = rendered[: max(0, remaining - 14)].rstrip() + " ...[truncated]"
+            truncated = True
+        numbered.append(rendered)
+        consumed += len(rendered) + 1
+        end_line = index
+        if truncated:
+            break
+    if requested_line_count > len(numbered):
+        truncated = True
+    content = "\n".join(numbered)
+    return {
+        "path": file_path,
+        "start_line": start_line,
+        "end_line": end_line,
+        "line_count": len(numbered),
+        "requested_line_count": requested_line_count,
+        "char_count": len(content),
+        "max_lines": max_lines,
+        "max_chars": max_chars,
+        "truncated": truncated,
+        "numbered_source": content,
+    }
 
 
 def _inline_bash(cmd: str, exit_code: int, duration_ms: int, stdout: str, stderr: str, ptr: str) -> str:
@@ -338,6 +396,19 @@ def handle_dhee_read(arguments: Dict[str, Any]) -> Dict[str, Any]:
         return {"error": f"limit must be int or None, got: {limit_raw!r}"}
     if limit is not None and limit < 0:
         return {"error": f"limit must be >= 0, got: {limit}"}
+    include_source = bool(
+        arguments.get("include_source")
+        or arguments.get("include_raw")
+        or arguments.get("include_content")
+    )
+    try:
+        max_source_lines = int(arguments.get("max_source_lines") or SOURCE_WINDOW_MAX_LINES)
+    except (TypeError, ValueError):
+        return {"error": f"max_source_lines must be int, got: {arguments.get('max_source_lines')!r}"}
+    try:
+        max_source_chars = int(arguments.get("max_source_chars") or SOURCE_WINDOW_MAX_CHARS)
+    except (TypeError, ValueError):
+        return {"error": f"max_source_chars must be int, got: {arguments.get('max_source_chars')!r}"}
     # Phase 4/8: if caller didn't pin depth, consult the tuned policy.
     intent_label = _intent.classify_read(file_path)
     task_query = str(arguments.get("query") or arguments.get("task") or "").strip()
@@ -433,6 +504,32 @@ def handle_dhee_read(arguments: Dict[str, Any]) -> Dict[str, Any]:
     )
     if schema and schema.get("note"):
         d.notes.append(str(schema["note"]))
+    source_window = None
+    if range_ is not None or include_source:
+        window_start = range_[0] if range_ else 1
+        source_window = _source_window(
+            file_path=file_path,
+            lines=selected,
+            start_line=window_start,
+            requested_line_count=len(selected),
+            max_lines=max_source_lines,
+            max_chars=max_source_chars,
+        )
+        if range_ is not None:
+            d.notes.append(
+                "bounded source_window included inline for this explicit range; "
+                "no pointer expansion is needed for these lines"
+            )
+        else:
+            d.notes.append(
+                "include_source requested; capped source_window included inline, "
+                "not the full raw file"
+            )
+    else:
+        d.notes.append(
+            "if dhee_expand_result is unavailable, rerun dhee_read with "
+            "offset+limit; explicit bounded reads include source_window inline"
+        )
     stored = ptr_store.store(
         content,
         tool="Read",
@@ -448,6 +545,8 @@ def handle_dhee_read(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "task_intent": (schema or {}).get("intent"),
             "task_source": state_route.get("source") if state_route else ("explicit" if (task_query or task_intent) else ""),
             "depth": depth,
+            "source_window_included": bool(source_window),
+            "source_window_truncated": bool((source_window or {}).get("truncated")),
         }),
     )
     rendered = d.render(stored.ptr, depth=depth)
@@ -486,6 +585,8 @@ def handle_dhee_read(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "inlined": inlined,
             "task_intent": (schema or {}).get("intent"),
             "focus_count": len(d.focus),
+            "source_window_included": bool(source_window),
+            "source_window_truncated": bool((source_window or {}).get("truncated")),
         },
         # Hash this routed_read against the per-file baseline so a second
         # read of the same unchanged file produces no broadcast at all.
@@ -504,6 +605,7 @@ def handle_dhee_read(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "depth": depth,
             "inlined": inlined,
             "focus_count": len(d.focus),
+            "source_window_included": bool(source_window),
         },
         content_hash=_stable_context_hash("routed_read", file_path, offset, limit, content),
     )
@@ -518,7 +620,16 @@ def handle_dhee_read(arguments: Dict[str, Any]) -> Dict[str, Any]:
         "task_intent": (schema or {}).get("intent"),
         "task_source": state_route.get("source") if state_route else ("explicit" if (task_query or task_intent) else ""),
         "focus_count": len(d.focus),
+        "pointer_recovery": {
+            "expand_tool": "dhee_expand_result",
+            "if_expand_unavailable": "call dhee_read again with offset+limit; bounded reads return source_window inline",
+            "max_inline_source_lines": SOURCE_WINDOW_MAX_LINES,
+            "max_inline_source_chars": SOURCE_WINDOW_MAX_CHARS,
+        },
     }
+    if source_window is not None:
+        result["source_window"] = source_window
+        result["bounded_source_included"] = True
     observation = record_router_observation(contract_guard, result)
     runtime_info = router_result_runtime(contract_guard, observation)
     if runtime_info:

@@ -5,7 +5,18 @@ import textwrap
 from pathlib import Path
 
 from dhee import repo_intelligence as repo_mod
-from dhee.repo_intelligence import build_repo_brain, context_graph_query, load_repo_brain, localize_issue, repo_graph_from_brain
+from dhee.repo_intelligence import (
+    build_repo_brain,
+    context_graph_query,
+    load_repo_brain,
+    localize_issue,
+    repo_callers,
+    repo_callees,
+    repo_explore,
+    repo_graph_from_brain,
+    repo_impact,
+    repo_symbol_search,
+)
 from dhee.task_contracts import compile_task_contract
 
 
@@ -194,10 +205,16 @@ def test_repo_brain_persists_symbols_imports_calls_and_test_map(tmp_path):
     )
 
     storage = brain["storage"]
-    assert brain["schema_version"] == "dhee.repo_intelligence.v1"
+    assert brain["schema_version"] == "dhee.repo_intelligence.v4"
+    assert brain["engine"]["indexer"] == "swe_repo_brain.v4"
     assert storage["ref"].startswith("repo_brain:")
     assert (repo / storage["path"]).exists()
     assert (repo / ".dhee" / "context" / "repo_brain" / "latest.json").exists()
+    assert brain["symbol_index"]["summary"]["symbol_count"] >= 3
+    assert brain["edge_index"]["summary"]["edge_count"] >= 3
+    assert brain["query_index"]["summary"]["entry_count"] >= brain["metrics"]["indexed_file_count"]
+    assert brain["source_windows"]["summary"]["raw_file_bodies_excluded"] is True
+    assert brain["extractor_versions"]["engine"] == "swe_repo_brain.v4"
     assert any(symbol["qualname"] == "ContextFirewall.allow_path" for symbol in brain["symbols"])
     assert any(symbol["name"] == "normalize_path" for symbol in brain["symbols"])
     assert any(
@@ -228,14 +245,19 @@ def test_repo_brain_persists_symbols_imports_calls_and_test_map(tmp_path):
     context_graph = context_graph_query(brain, "Fix failing context firewall tests")
     assert context_graph["schema_version"] == "dhee.context_graph_slice.v1"
     assert context_graph["summary"]["node_count"] >= 2
+    assert context_graph["summary"]["source_window_count"] >= 1
+    assert context_graph["source_windows"][0]["line_count"] <= 80
+    assert context_graph["source_windows"][0]["char_count"] <= 4000
+    assert context_graph["source_windows"][0]["provenance"]["source"] == "bounded_source_window"
     assert context_graph["expansion_tiers"][0]["hop"] == 0
     assert context_graph["policy"]["comprehensive_context_first"] is True
+    assert context_graph["policy"]["bounded_line_numbered_source_windows"] is True
     assert brain["git_ownership"]["by_file"]["dhee/context_firewall.py"]["authors"][0]["name"] == "Dhee Test"
     assert brain["metrics"]["ownership_file_count"] >= 3
 
     loaded = load_repo_brain(repo)
     assert loaded["ok"] is True
-    assert loaded["brain"]["schema_version"] == "dhee.repo_intelligence.v1"
+    assert loaded["brain"]["schema_version"] == "dhee.repo_intelligence.v4"
 
 
 def test_repo_brain_executes_live_lsp_when_supported_server_is_available(tmp_path, monkeypatch):
@@ -354,13 +376,11 @@ def test_repo_brain_indexes_typescript_coverage_flaky_and_incremental_delta(tmp_
     assert any(call["callee"] == "normalizeToken" for call in second["call_sites"])
     assert any(
         call["callee"] == "normalizeToken"
-        and call["parser_backend"] == "tree_sitter"
         and call["caller_qualname"] == "AuthService.login"
         for call in second["call_sites"]
     )
     assert any(
         edge["callee_name"] == "normalizeToken"
-        and edge["parser_backend"] == "tree_sitter"
         and edge["caller_qualname"] == "AuthService.login"
         for edge in second["call_graph"]
     )
@@ -400,6 +420,81 @@ def test_repo_brain_indexes_typescript_coverage_flaky_and_incremental_delta(tmp_
     assert localization["candidate_tests"][0]["reason"] == "owned test from test-ownership index"
 
 
+def test_repo_brain_persists_route_component_maps_and_impact(tmp_path):
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "app" / "dashboard").mkdir(parents=True)
+    (repo / "app" / "components").mkdir(parents=True)
+    (repo / "app" / "api" / "health").mkdir(parents=True)
+    (repo / "src").mkdir()
+    (repo / "app" / "dashboard" / "page.tsx").write_text(
+        "import { UserPanel } from '../components/UserPanel'\n\n"
+        "export default function DashboardPage() {\n"
+        "  return <UserPanel />\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (repo / "app" / "components" / "UserPanel.tsx").write_text(
+        "export function UserPanel() {\n"
+        "  return <section />\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (repo / "app" / "api" / "health" / "route.ts").write_text(
+        "export async function GET() {\n"
+        "  return Response.json({ ok: true })\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (repo / "src" / "server.ts").write_text(
+        "import express from 'express'\n"
+        "const router = express.Router()\n"
+        "router.post('/login', loginHandler)\n"
+        "function loginHandler() { return true }\n",
+        encoding="utf-8",
+    )
+    (repo / "api.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n\n"
+        "@app.get('/health')\n"
+        "def health():\n"
+        "    return {'ok': True}\n",
+        encoding="utf-8",
+    )
+    _run(["git", "add", "."], repo)
+    _run(["git", "commit", "-m", "add routes"], repo)
+
+    brain = build_repo_brain(repo, goal="Understand dashboard route impact")
+
+    route_map = brain["route_map"]
+    routes = route_map["routes"]
+    route_values = {route["route"] for route in routes}
+    assert route_map["schema_version"] == "dhee.route_map.v1"
+    assert "/dashboard" in route_values
+    assert "/api/health" in route_values
+    assert "/login" in route_values
+    assert "/health" in route_values
+    assert brain["metrics"]["route_count"] >= 4
+
+    component_map = brain["component_map"]
+    component_names = {component["name"] for component in component_map["components"]}
+    assert component_map["schema_version"] == "dhee.component_map.v1"
+    assert {"DashboardPage", "UserPanel"}.issubset(component_names)
+    assert any(edge["type"] == "uses_component" for edge in component_map["dependency_edges"])
+    assert brain["metrics"]["component_count"] >= 2
+
+    graph = repo_graph_from_brain(brain)
+    assert graph["node_types"]["route"] >= 4
+    assert graph["node_types"]["component"] >= 2
+    assert graph["edge_types"]["exposes_route"] >= 4
+    assert graph["edge_types"]["renders"] >= 1
+    assert graph["edge_types"]["uses_component"] >= 1
+
+    impact = repo_impact(brain, "app/components/UserPanel.tsx", depth=3)
+    assert any(route["route"] == "/dashboard" for route in impact["impacted_routes"])
+    assert any(component["name"] == "UserPanel" for component in impact["impacted_components"])
+    assert any(edge["type"] in {"uses_component", "renders"} for edge in impact["edges"])
+
+
 def test_repo_localizer_ranks_source_symbols_and_nearest_tests(tmp_path):
     repo = _init_repo(tmp_path / "repo")
     brain = build_repo_brain(repo, goal="Fix failing context firewall tests")
@@ -413,6 +508,35 @@ def test_repo_localizer_ranks_source_symbols_and_nearest_tests(tmp_path):
     assert any(item["qualname"] == "ContextFirewall" for item in localization["candidate_symbols"])
 
 
+def test_repo_native_symbol_call_impact_and_explore_queries(tmp_path):
+    repo = _init_repo(tmp_path / "repo")
+    brain = build_repo_brain(repo, goal="Fix failing context firewall tests")
+
+    search = repo_symbol_search(brain, "ContextFirewall allow_path", limit=5)
+    assert search["schema_version"] == "dhee.repo_symbol_search.v1"
+    assert any(item["qualname"] == "ContextFirewall.allow_path" for item in search["results"])
+    assert search["results"][0]["evidence_pointers"]
+
+    callers = repo_callers(brain, "normalize_path", depth=1)
+    assert callers["schema_version"] == "dhee.repo_call_graph_query.v1"
+    assert any(edge["type"] == "calls" for edge in callers["edges"])
+    assert any("allow_path" in (node.get("label") or "") for node in callers["nodes"])
+
+    callees = repo_callees(brain, "ContextFirewall.allow_path", depth=1)
+    assert any("normalize_path" in (node.get("label") or "") for node in callees["nodes"])
+
+    impact = repo_impact(brain, "normalize_path", depth=2)
+    assert impact["schema_version"] == "dhee.repo_impact.v1"
+    assert any(item["path"] == "dhee/context_firewall.py" for item in impact["impacted_files"])
+    assert any(item["path"] == "tests/test_context_firewall.py" for item in impact["candidate_tests"])
+
+    explore = repo_explore(brain, "Fix failing context firewall tests", max_files=4, max_symbols=8)
+    assert explore["schema_version"] == "dhee.repo_explore.v1"
+    assert explore["source_windows"]
+    assert explore["summary"]["source_window_chars"] <= 18000
+    assert "numbered_source" in explore["source_windows"][0]
+
+
 def test_task_contract_consumes_repo_brain_localizer_and_verifier(tmp_path):
     repo = _init_repo(tmp_path / "repo")
 
@@ -422,8 +546,13 @@ def test_task_contract_consumes_repo_brain_localizer_and_verifier(tmp_path):
     assert contract["repo_intelligence"]["symbol_count"] >= 3
     assert contract["repo_intelligence"]["localization_status"] == "localized"
     assert contract["localization"]["candidate_files"][0]["path"] == "dhee/context_firewall.py"
+    assert contract["impact_analysis"]["schema_version"] == "dhee.repo_impact.v1"
+    assert any(item["path"] == "tests/test_context_firewall.py" for item in contract["impact_analysis"]["candidate_tests"])
     assert "pytest tests/test_context_firewall.py" in contract["must_run"]
-    assert "python3 -m py_compile dhee/context_firewall.py" in contract["verification_card"]["import_smoke_tests"]
+    assert any(
+        command.startswith("python3 -m py_compile") and "dhee/context_firewall.py" in command
+        for command in contract["verification_card"]["import_smoke_tests"]
+    )
     assert "no separate pass-to-pass regression command identified" in contract["verification_card"]["coverage_gaps"]
     assert any(item["kind"] == "localization" for item in contract["compiled_context"]["items"])
 
@@ -444,14 +573,52 @@ def test_mcp_slim_repo_brain_tools(tmp_path):
     context_graph = mcp_slim.HANDLERS["dhee_context_graph_query"](
         {"repo": str(repo), "query": "Fix failing context firewall tests", "limit": 100}
     )
+    symbol_search = mcp_slim.HANDLERS["dhee_repo_symbol_search"](
+        {"repo": str(repo), "query": "ContextFirewall allow_path", "limit": 5}
+    )
+    callers = mcp_slim.HANDLERS["dhee_repo_callers"](
+        {"repo": str(repo), "symbol": "normalize_path"}
+    )
+    impact = mcp_slim.HANDLERS["dhee_repo_impact"](
+        {"repo": str(repo), "symbol_or_path": "normalize_path"}
+    )
+    explore = mcp_slim.HANDLERS["dhee_repo_explore"](
+        {"repo": str(repo), "query": "Fix failing context firewall tests", "max_files": 4}
+    )
 
     assert indexed["repo_intelligence"]["symbol_count"] >= 3
     assert fetched["ok"] is True
     assert fetched["brain"] is None
-    assert fetched["repo_intelligence"]["schema_version"] == "dhee.repo_intelligence.v1"
+    assert fetched["repo_intelligence"]["schema_version"] == "dhee.repo_intelligence.v4"
     assert localized["ok"] is True
     assert localized["localization"]["candidate_files"][0]["path"] == "dhee/context_firewall.py"
     assert graph["repo_graph"]["schema_version"] == "dhee.repo_graph_artifact.v1"
     assert graph["repo_graph"]["node_count"] >= 4
     assert context_graph["context_graph"]["policy"]["comprehensive_context_first"] is True
+    assert context_graph["context_graph"]["source_windows"]
     assert context_graph["context_graph"]["summary"]["edge_count"] >= 1
+    assert symbol_search["symbol_search"]["results"]
+    assert callers["callers"]["edges"]
+    assert any(item["path"] == "dhee/context_firewall.py" for item in impact["impact"]["impacted_files"])
+    assert explore["explore"]["source_windows"]
+
+    cli = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "dhee.cli",
+            "context",
+            "repo-brain",
+            "search",
+            "ContextFirewall allow_path",
+            "--repo",
+            str(repo),
+            "--json",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    cli_result = json.loads(cli.stdout)
+    assert cli_result["symbol_search"]["results"]

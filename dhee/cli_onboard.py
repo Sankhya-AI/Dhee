@@ -3,7 +3,7 @@
 Invoked at the tail of ``install.sh`` and usable on its own afterwards.
 Walks the user through:
 
-  1. Provider selection (openai default, then gemini, nvidia, ollama)
+  1. Provider selection (NVIDIA default, then OpenAI/Gemini/Ollama)
   2. API key paste (masked echo, stored in the encrypted secret store)
   3. Optional git repo linking for shared `.dhee/context/`
   4. Final "run ``dhee link`` / ``dhee handoff``" handoff
@@ -23,16 +23,15 @@ import sys
 from typing import Optional, Tuple
 
 from dhee.cli_config import PROVIDER_DEFAULTS, load_config, save_config
+from dhee.provider_defaults import DEFAULT_COLLECTION, provider_defaults
 
-# Order matters — this is the order presented to the user. ``openai`` is
-# first by design (most users have an OpenAI key already, and it's the
-# path of least friction for the product's core memory calls).
-PROVIDER_ORDER = ["openai", "gemini", "nvidia", "ollama"]
+# Order matters: NVIDIA is Dhee's default provider.
+PROVIDER_ORDER = ["nvidia", "openai", "gemini", "ollama"]
 
 PROVIDER_HINTS = {
-    "openai": "default · https://platform.openai.com/api-keys",
+    "openai": "https://platform.openai.com/api-keys",
     "gemini": "https://aistudio.google.com/app/apikey",
-    "nvidia": "https://build.nvidia.com  (NIM/NGC API key)",
+    "nvidia": "default · https://build.nvidia.com  (NIM/NGC API key)",
     "ollama": "local runtime — no key needed",
 }
 
@@ -115,14 +114,18 @@ def _save_key(provider: str, api_key: str) -> str:
 
 def _save_provider_in_config(provider: str) -> None:
     config = load_config()
-    defaults = PROVIDER_DEFAULTS.get(provider, {})
+    defaults = provider_defaults(provider)
     config["provider"] = provider
-    if defaults.get("llm_model"):
-        config.setdefault("llm_model", defaults["llm_model"])
-    if defaults.get("embedder_model"):
-        config.setdefault("embedder_model", defaults["embedder_model"])
-    if defaults.get("embedding_dims"):
-        config.setdefault("embedding_dims", defaults["embedding_dims"])
+    config["llm_model"] = defaults["llm_model"]
+    config["embedder_model"] = defaults["embedder_model"]
+    config["embedding_dims"] = defaults["embedding_dims"]
+    config["vector_store"] = {
+        "provider": "zvec",
+        "config": {
+            "collection_name": DEFAULT_COLLECTION,
+            "embedding_model_dims": defaults["embedding_dims"],
+        },
+    }
     save_config(config)
 
 

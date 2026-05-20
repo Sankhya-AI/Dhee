@@ -26,7 +26,7 @@ ACTION_PLAN_SCHEMA = "dhee.chotu_action_plan.v1"
 ACTION_BYTECODE_SCHEMA = "dhee.chotu_action_bytecode.v1"
 CONTRACT_COMPILER_SCHEMA = "dhee.contract_compiler.v1"
 CONTEXT_LEDGER_SCHEMA = "dhee.context_ledger.v1"
-REPO_INTELLIGENCE_SCHEMA = "dhee.repo_intelligence.v1"
+REPO_INTELLIGENCE_SCHEMA = "dhee.repo_intelligence.v4"
 VERIFICATION_CARD_SCHEMA = "dhee.verification_card.v1"
 CONTAMINATION_STATUS_SCHEMA = "dhee.contamination_status.v1"
 TASK_INTERPRETATION_SCHEMA = "dhee.task_contract_interpretation.v1"
@@ -693,6 +693,36 @@ def _merge_test_commands(initial: Sequence[str], localization: Dict[str, Any], l
     return merged[:limit]
 
 
+def _impact_seed(goal: str, localization: Dict[str, Any]) -> str:
+    for item in localization.get("candidate_symbols") or []:
+        value = str(item.get("qualname") or item.get("name") or item.get("symbol_id") or "")
+        if value:
+            return value
+    for item in localization.get("candidate_files") or []:
+        value = str(item.get("path") or "")
+        if value:
+            return value
+    return str(goal or "")
+
+
+def _merge_impact_files(current: Sequence[str], impact: Dict[str, Any], limit: int = 20) -> List[str]:
+    merged = [str(path) for path in current if path]
+    for item in impact.get("impacted_files") or []:
+        path = str(item.get("path") or "")
+        if path and path not in merged:
+            merged.append(path)
+    return merged[:limit]
+
+
+def _merge_impact_test_commands(current: Sequence[str], impact: Dict[str, Any], limit: int = 12) -> List[str]:
+    merged = [str(command) for command in current if command]
+    for item in impact.get("candidate_tests") or []:
+        command = str(item.get("command") or "")
+        if command and command not in merged:
+            merged.append(command)
+    return merged[:limit]
+
+
 def _context_item(
     *,
     kind: str,
@@ -1280,6 +1310,24 @@ def compile_task_contract(
     repo_intelligence["localization_confidence"] = localization.get("confidence")
     relevant_files = _merge_relevant_files(initial_relevant_files, localization)
     test_commands = initial_test_commands if must_run else _merge_test_commands(initial_test_commands, localization)
+    impact_analysis: Dict[str, Any] = {}
+    try:
+        impact_analysis = repo_brain_mod.repo_impact(
+            repo_brain,
+            _impact_seed(goal, localization),
+            depth=2,
+            limit=80,
+            include_tests=True,
+        )
+        relevant_files = _merge_impact_files(relevant_files, impact_analysis)
+        if not must_run:
+            test_commands = _merge_impact_test_commands(test_commands, impact_analysis)
+    except Exception as exc:
+        impact_analysis = {
+            "schema_version": "dhee.repo_impact.v1",
+            "status": "unavailable",
+            "error": str(exc)[:240],
+        }
     affected_modules = _affected_modules(relevant_files, branch_state)
     failures = [dict(item) for item in (recent_failures or []) if isinstance(item, dict)]
     contract = {
@@ -1316,6 +1364,7 @@ def compile_task_contract(
     contract["must_run"] = contract["test_commands"]
     contract["repo_intelligence"] = repo_intelligence
     contract["localization"] = localization
+    contract["impact_analysis"] = impact_analysis
     contract["compiled_context"] = _context_ledger(contract, repo_intelligence)
     contract["verification_card"] = _verification_card(contract, repo_intelligence, repo_brain)
     contract["contamination_status"] = _contamination_status(contract["goal"], contract["memory_pointers"])
