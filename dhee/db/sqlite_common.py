@@ -16,6 +16,13 @@ VALID_SCENE_COLUMNS = frozenset({
     "title", "summary", "topic", "location", "participants", "memory_ids",
     "start_time", "end_time", "embedding", "strength", "access_count",
     "tombstone", "layer", "scene_strength", "topic_embedding_ref", "namespace",
+    "episode_id", "agent_id", "agent_category", "source_app",
+    "hero_character_id", "hero_focus", "setting", "intent_type", "action_lane",
+    "action", "obstacle", "result", "emotional_weight",
+    "next_possible_moves_json", "outcome", "outcome_status",
+    "story_progress_delta", "importance", "confidence", "visibility_scope",
+    "privacy_class", "consolidated_card_id", "consolidated_card_json",
+    "created_at", "updated_at",
 })
 
 VALID_PROFILE_COLUMNS = frozenset({

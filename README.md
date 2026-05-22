@@ -1,12 +1,12 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Sankhya-AI/Dhee/main/docs/dhee-hero.png" alt="The shared learning layer for AI agents" width="100%">
+  <img src="https://raw.githubusercontent.com/Sankhya-AI/Dhee/main/docs/dhee-hero.png" alt="Dhee world memory layer for AI agents" width="100%">
 </p>
 
 <h1 align="center">Dhee</h1>
 
 <p align="center">
-  <b>The local developer brain for AI coding agents.</b><br>
-  Persistent memory, repo cognition, handoff, routing, and proof for Codex, Claude Code, Cursor, Gemini CLI, Cline, and any MCP client.
+  <b>World memory for AI agents.</b><br>
+  A context compiler, repo brain, narrative scene graph, handoff bus, and proof layer for Codex, Claude Code, Cursor, Gemini CLI, Cline, Chotu, and any MCP client.
 </p>
 
 <p align="center">
@@ -18,19 +18,11 @@
 
 ---
 
-## What Dhee Is
+Dhee gives an agent the bigger story before it takes the next action.
 
-Dhee is a production-ready, local-first context and memory layer for coding agents.
+LLMs are powerful, but they still miss the arc. What is the user trying to become? What happened last session? Which decision was already made? Which failure should not be repeated? Which proof is required before touching code?
 
-It is not a model, not an autocomplete tool, and not a hosted vector database. It sits beside your agent and keeps the work grounded:
-
-- **Memory that does not rot into noise:** canonical facts, preferences, decisions, project rules, passive evidence, test fixtures, and operational events are separated.
-- **Repo cognition that survives sessions:** symbol graph, imports, calls, route/component map, test map, ownership, historical failures, and impact analysis.
-- **Context routing:** large files, grep output, logs, test runs, and agent handoffs become compact digests with evidence pointers.
-- **Action contracts:** before edits, Dhee can compile the task into files, constraints, tests, risk, and proof obligations.
-- **Handoff:** another agent can continue with the current repo state, decisions, blockers, and next action.
-
-The promise is simple: **less prompt sludge, fewer repeated mistakes, better grounded code edits.**
+Dhee stores that story locally and compiles it into the smallest useful context. Not a transcript pile. Not vibes. Memory with shape.
 
 ## Install
 
@@ -39,13 +31,13 @@ pip install dhee
 dhee install
 ```
 
-Or use the installer:
+Or use the one-command installer:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Sankhya-AI/Dhee/main/install.sh | sh
 ```
 
-Then wire a repo:
+Wire a repo:
 
 ```bash
 cd /path/to/repo
@@ -54,7 +46,75 @@ dhee status
 dhee ui
 ```
 
-MCP clients can use:
+## What Is Dhee?
+
+Dhee is the memory layer agents should have had from day one.
+
+It runs beside the model and answers the questions that raw chat history cannot:
+
+| The agent needs | Dhee gives it |
+| --- | --- |
+| What matters right now? | A compiled context packet with included and rejected reasons. |
+| What happened before? | Durable user, project, repo, scene, and handoff memory. |
+| What files are risky? | Repo brain impact analysis, likely tests, owners, routes, and symbols. |
+| What should not be used? | Secret filters, privacy classes, supersession, contradiction, and proof gates. |
+| What is the larger story? | Series, Seasons, Episodes, Scenes, and SceneCards. |
+| Can another agent continue? | Session digests, shared task state, evidence refs, and handoff packets. |
+
+## Context Compiler
+
+Most agents drown in context or starve without it. Dhee does the boring hard part in the middle.
+
+- Reads summarize files instead of dumping them.
+- Searches return compact matches with expansion pointers.
+- Tool output becomes reusable evidence, not one-turn sludge.
+- Task contracts define files, constraints, tests, and proof obligations.
+- SceneCards become the default retrieval object.
+- Raw transcripts stay out of prompts unless explicitly requested.
+
+The model gets the part of the world it needs, in the form it can use.
+
+## Narrative Memory
+
+This is the new Dhee core.
+
+```text
+Series -> Season -> Episode -> Scene -> SceneCard -> MemoryItem
+```
+
+In plain English:
+
+- **Series** is the biggest purpose. Example: become a successful CTO.
+- **Season** is a period of the story: learning, struggle, first success, downfall, comeback.
+- **Episode** is the meaningful arc of a day.
+- **Scene** is a bounded work moment with a hero, intent, action, obstacle, result, and outcome.
+- **SceneCard** is the retrieval card the agent sees later: compact, evidence-backed, privacy-aware.
+- **MemoryItem** is promoted only when the SceneCard is worth keeping long-term.
+
+That story gives the model anticipation. The prior is advisory, never bossy: explicit user intent, facts, privacy, and proof gates win.
+
+## Retrieval That Actually Ranks
+
+Dhee can run model-free, but the production retrieval path is built for serious agent work:
+
+```bash
+pip install "dhee[nvidia,zvec,mcp]"
+dhee key set nvidia
+```
+
+Current high-quality stack:
+
+- Embedder: `nvidia/llama-nemotron-embed-vl-1b-v2`
+- Reranker: `nvidia/llama-3.2-nv-rerankqa-1b-v2`
+- Vector backend: `zvec` through `dhee-accel`
+- Routine narrative rollups: `google/gemma-4-31b-it`
+- Series-level strategic rollups: `moonshotai/kimi-k2.6`
+
+Deterministic filters still go first: secrets, private scenes, contradicted cards, superseded cards, and code-mutation proof gates cannot be talked around by a high similarity score.
+
+## MCP Tools
+
+Add Dhee to any MCP client:
 
 ```json
 {
@@ -64,73 +124,63 @@ MCP clients can use:
 }
 ```
 
-## How It Helps A Coding Agent
+Scene intelligence tools:
 
-Without Dhee, every turn is a loose pile of files, logs, stale memory, and guesses.
+```text
+dhee_scene_start
+dhee_scene_event
+dhee_scene_end
+dhee_scene_context
+dhee_narrative_prior
+```
 
-With Dhee, the agent gets a compact working packet:
+Core context tools:
 
-1. **Recall:** relevant user/project memory, current handoff, and repo facts.
-2. **Understand:** repo brain localizes likely files, symbols, routes, tests, and owners.
-3. **Act:** task contract controls allowed writes and risky paths.
-4. **Verify:** tests, diffs, proof bundles, and contamination checks.
-5. **Learn:** only durable lessons are promoted; junk stays suppressed.
+```text
+dhee_context_bootstrap
+dhee_read
+dhee_grep
+dhee_bash
+dhee_context_pack
+dhee_scene_search
+```
 
-## Deep Repo Cognition
+A good agent loop is simple:
 
-Ask: **"If I touch this file, what breaks?"**
+```text
+bootstrap -> start scene -> gather evidence -> retrieve context -> act -> verify -> end scene -> save digest
+```
 
-Dhee's repo brain answers with grounded graph evidence:
+## Repo Brain
+
+Ask: "If I touch this file, what breaks?"
+
+Dhee's repo brain answers with graph-backed evidence:
 
 - impacted files and symbols
 - impacted routes and React components
 - likely tests to run
 - owners from git history
 - related failure signatures
-- source windows with line numbers, not raw file dumps
+- source windows with line numbers
 
-The repo brain is git-SHA scoped and persisted under `.dhee/context/repo_brain/`, so agents do not rebuild understanding from scratch every session.
+The repo brain is git-SHA scoped and persisted under `.dhee/context/repo_brain/`, so the agent does not rebuild the same understanding every session.
 
-## Memory Quality
+## Why It Feels Different
 
-Dhee separates memory into classes instead of letting everything compete:
+Normal memory says: "Here are some old notes."
 
-| Memory kind | What happens |
-| --- | --- |
-| Canonical personal/project facts | Durable, high-confidence, slow decay |
-| Passive screen/context observations | Raw evidence, not personal truth |
-| Test fixtures and probes | Suppressed from normal recall |
-| Operational events | Useful for diagnostics, not identity |
-| Repo handoff/session state | Scoped to repo and current work |
+Dhee says:
 
-This is what keeps a Chotu/Codex/Claude-style agent from sounding clever one minute and strangely blind the next.
+- this is the user's bigger goal
+- this is the current season of work
+- this is today's episode
+- this scene has these constraints
+- these cards are safe to use
+- these cards were rejected and why
+- this action needs proof before mutation
 
-## Useful Commands
-
-```bash
-dhee handoff --repo . --json
-dhee context task create "fix flaky auth tests" --repo .
-dhee context repo-brain index --repo .
-dhee context repo-brain impact dhee/auth.py --repo .
-dhee shell "cat /handoff/latest.md"
-dhee memory-quality audit --user-id default --json
-dhee release check --repo .
-```
-
-## Provider Defaults
-
-Dhee can run model-free for repo tooling and handoff. For high-quality semantic memory, the default provider map points to the NVIDIA-compatible OpenAI API stack used in our LongMemEval runs:
-
-```bash
-dhee key set nvidia
-pip install "dhee[nvidia,zvec,mcp]"
-```
-
-Current high-quality stack:
-
-- Embedder: `nvidia/llama-nemotron-embed-vl-1b-v2`
-- Reranker: `nvidia/llama-3.2-nv-rerankqa-1b-v2`
-- Vector backend: `zvec` through `dhee-accel`
+The result is an agent that feels less random because it can see the arc.
 
 ## Benchmarks
 
@@ -142,17 +192,25 @@ On LongMemEval full 500-question recall:
 
 Reproduction notes and outputs live in [`benchmarks/longmemeval/`](benchmarks/longmemeval/).
 
-## What Is In The Open Source Package
+## What Ships
 
-You get the local developer brain: memory OS, repo brain, DheeFS, MCP server, CLI, UI, runtime daemon, handoff bus, update capsules, and release/proof tooling.
+The open source package includes the local memory OS, context compiler, DheeFS, MCP servers, CLI, UI, runtime daemon, handoff bus, repo brain, update capsules, narrative scene intelligence, release checks, and proof tooling.
 
-Enterprise/team governance, hosted dashboards, org policy, and managed source connectors can build on top of these local primitives. The OSS package is useful by itself and does not require a hosted account.
+Team governance, hosted dashboards, org policy, and managed source connectors can build on top of these local primitives. Dhee itself is useful without a hosted account.
 
 ## Develop
 
 ```bash
 pip install -e ".[dev,nvidia,zvec,mcp]"
 pytest
+```
+
+Focused release checks:
+
+```bash
+python -m pytest tests/test_narrative_scene_intelligence.py tests/test_mcp_tools_slim.py tests/test_scene.py tests/test_temporal_scenes.py tests/test_reranker_defaults.py tests/test_nvidia_embedder.py -q
+python -m build
+python -m twine check dist/*
 ```
 
 ## License

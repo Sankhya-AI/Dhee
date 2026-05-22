@@ -132,6 +132,27 @@ def _get_db():
     return _get_plugin().memory.db
 
 
+def _get_scene_service():
+    from dhee.memory.narrative_scene import NarrativeSceneService
+
+    db = _get_db()
+    memory = getattr(_plugin, "memory", None) if _plugin is not None else None
+    embedder = getattr(memory, "embedder", None) if memory is not None else None
+    reranker = None
+    if memory is not None:
+        try:
+            reranker = getattr(memory, "reranker", None)
+        except Exception as exc:
+            logger.debug("Scene service memory reranker unavailable: %s", exc)
+    return NarrativeSceneService(
+        db,
+        embedder=embedder,
+        reranker=reranker,
+        create_default_reranker=memory is not None,
+        create_default_rollup_llm=memory is not None,
+    )
+
+
 def _default_user_id(args: Dict[str, Any]) -> str:
     return str(args.get("user_id") or os.environ.get("DHEE_USER_ID") or "default")
 
@@ -245,6 +266,125 @@ TOOLS = [
                 "harness": {"type": "string", "description": "Harness/runtime id"},
                 "top_k": {"type": "integer", "description": "Number of ranked actions to return"},
                 "record": {"type": "boolean", "description": "Record the route trace when route logging is configured"},
+            },
+        },
+    ),
+    Tool(
+        name="dhee_scene_start",
+        description="Start a SQLite-backed Dhee scene, creating the active Series, Season, Episode, hero, categories, and markers as needed.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "user_id": {"type": "string"},
+                "agent_id": {"type": "string"},
+                "agent_category": {"type": "string"},
+                "source_app": {"type": "string"},
+                "namespace": {"type": "string"},
+                "series_id": {"type": "string"},
+                "season_id": {"type": "string"},
+                "hero_character_id": {"type": "string"},
+                "timezone": {"type": "string"},
+                "title": {"type": "string"},
+                "summary": {"type": "string"},
+                "query": {"type": "string"},
+                "task": {"type": "string"},
+                "intent_type": {"type": "string"},
+                "action_lane": {"type": "string"},
+                "categories": {"type": "array", "items": {"type": "string"}},
+                "markers": {"type": "object"},
+            },
+        },
+    ),
+    Tool(
+        name="dhee_scene_event",
+        description="Append a lightweight event/evidence reference to a Dhee scene without returning raw transcripts by default.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "scene_id": {"type": "string"},
+                "event_type": {"type": "string"},
+                "summary": {"type": "string"},
+                "evidence_ref": {"type": "string"},
+                "payload": {"type": "object"},
+                "metadata": {"type": "object"},
+            },
+            "required": ["scene_id"],
+        },
+    ),
+    Tool(
+        name="dhee_scene_end",
+        description="End a Dhee scene and produce one prompt-safe SceneCard, or record an explicit skip reason.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "scene_id": {"type": "string"},
+                "outcome": {"type": "string"},
+                "outcome_status": {"type": "string"},
+                "story_progress_delta": {"type": "string"},
+                "skip_reason": {"type": "string"},
+                "durable_facts": {"type": "array", "items": {"type": "string"}},
+                "decisions": {"type": "array", "items": {"type": "string"}},
+                "procedures": {"type": "array", "items": {"type": "string"}},
+                "success_patterns": {"type": "array", "items": {"type": "string"}},
+                "failure_patterns": {"type": "array", "items": {"type": "string"}},
+                "open_loops": {"type": "array", "items": {"type": "string"}},
+                "entities": {"type": "array", "items": {"type": "object"}},
+                "artifacts": {"type": "array", "items": {"type": "object"}},
+                "evidence": {"type": "array", "items": {"type": "object"}},
+                "importance": {"type": "number"},
+                "confidence": {"type": "number"},
+                "reuse_policy": {"type": "string"},
+                "visibility_scope": {"type": "string"},
+                "privacy_class": {"type": "string"},
+                "promote_durable_facts": {"type": "boolean"},
+            },
+            "required": ["scene_id"],
+        },
+    ),
+    Tool(
+        name="dhee_scene_context",
+        description="Retrieve prompt-safe SceneCards for the next action with included and rejected-context reasons.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "task": {"type": "string"},
+                "user_id": {"type": "string"},
+                "agent_id": {"type": "string"},
+                "agent_category": {"type": "string"},
+                "namespace": {"type": "string"},
+                "series_id": {"type": "string"},
+                "season_id": {"type": "string"},
+                "categories": {"type": "array", "items": {"type": "string"}},
+                "markers": {"type": "object"},
+                "action_lane": {"type": "string"},
+                "limit": {"type": "integer"},
+                "has_task_contract": {"type": "boolean"},
+                "has_proof_bundle": {"type": "boolean"},
+            },
+            "required": ["query"],
+        },
+    ),
+    Tool(
+        name="dhee_narrative_prior",
+        description="Return the active Series/Season/Episode story-state anticipation as a soft prior for the next action.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "task": {"type": "string"},
+                "user_id": {"type": "string"},
+                "agent_id": {"type": "string"},
+                "agent_category": {"type": "string"},
+                "namespace": {"type": "string"},
+                "series_id": {"type": "string"},
+                "season_id": {"type": "string"},
+                "categories": {"type": "array", "items": {"type": "string"}},
+                "markers": {"type": "object"},
+                "action_lane": {"type": "string"},
+                "limit": {"type": "integer"},
+                "has_task_contract": {"type": "boolean"},
+                "has_proof_bundle": {"type": "boolean"},
             },
         },
     ),
@@ -754,6 +894,8 @@ _READ_ONLY_TOOL_HINTS = {
     "dhee_context_status",
     "dhee_context_state",
     "dhee_scene_search",
+    "dhee_scene_context",
+    "dhee_narrative_prior",
     "dhee_context_pack",
     "dhee_repo_brain_get",
     "dhee_repo_brain_localize",
@@ -1207,6 +1349,102 @@ def _handle_dhee_scene_world_route(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"enabled": False, "status": "error", "reason": f"{type(exc).__name__}: {exc}"}
 
 
+def _handle_dhee_scene_start(args: Dict[str, Any]) -> Dict[str, Any]:
+    return _get_scene_service().scene_start(
+        user_id=_default_user_id(args),
+        agent_id=_default_agent_id(args),
+        agent_category=str(args.get("agent_category") or "agent"),
+        source_app=str(args.get("source_app") or _default_agent_id(args)),
+        namespace=str(args.get("namespace") or args.get("repo") or "default"),
+        series_id=args.get("series_id"),
+        season_id=args.get("season_id"),
+        hero_character_id=args.get("hero_character_id"),
+        timezone_name=args.get("timezone"),
+        title=args.get("title"),
+        summary=args.get("summary"),
+        query=str(args.get("query") or args.get("task") or ""),
+        intent_type=str(args.get("intent_type") or "question_answer"),
+        action_lane=str(args.get("action_lane") or "answer"),
+        categories=args.get("categories") if isinstance(args.get("categories"), list) else None,
+        markers=args.get("markers") if isinstance(args.get("markers"), dict) else None,
+    )
+
+
+def _handle_dhee_scene_event(args: Dict[str, Any]) -> Dict[str, Any]:
+    return _get_scene_service().scene_event(
+        scene_id=str(args.get("scene_id") or ""),
+        event_type=str(args.get("event_type") or "observation"),
+        summary=str(args.get("summary") or ""),
+        evidence_ref=args.get("evidence_ref"),
+        payload=args.get("payload") if isinstance(args.get("payload"), dict) else None,
+        metadata=args.get("metadata") if isinstance(args.get("metadata"), dict) else None,
+    )
+
+
+def _handle_dhee_scene_end(args: Dict[str, Any]) -> Dict[str, Any]:
+    return _get_scene_service().scene_end(
+        scene_id=str(args.get("scene_id") or ""),
+        outcome=str(args.get("outcome") or ""),
+        outcome_status=str(args.get("outcome_status") or "success"),
+        story_progress_delta=str(args.get("story_progress_delta") or ""),
+        skip_reason=args.get("skip_reason"),
+        durable_facts=args.get("durable_facts") if isinstance(args.get("durable_facts"), list) else None,
+        decisions=args.get("decisions") if isinstance(args.get("decisions"), list) else None,
+        procedures=args.get("procedures") if isinstance(args.get("procedures"), list) else None,
+        success_patterns=args.get("success_patterns") if isinstance(args.get("success_patterns"), list) else None,
+        failure_patterns=args.get("failure_patterns") if isinstance(args.get("failure_patterns"), list) else None,
+        open_loops=args.get("open_loops") if isinstance(args.get("open_loops"), list) else None,
+        entities=args.get("entities") if isinstance(args.get("entities"), list) else None,
+        artifacts=args.get("artifacts") if isinstance(args.get("artifacts"), list) else None,
+        evidence=args.get("evidence") if isinstance(args.get("evidence"), list) else None,
+        importance=args.get("importance"),
+        confidence=args.get("confidence"),
+        reuse_policy=args.get("reuse_policy"),
+        visibility_scope=args.get("visibility_scope"),
+        privacy_class=args.get("privacy_class"),
+        promote_durable_facts=bool(args.get("promote_durable_facts")),
+    )
+
+
+def _handle_dhee_scene_context(args: Dict[str, Any]) -> Dict[str, Any]:
+    query = str(args.get("query") or args.get("task") or "").strip()
+    if not query:
+        return {"error": "query is required"}
+    return _get_scene_service().scene_context(
+        query=query,
+        user_id=_default_user_id(args),
+        agent_id=_default_agent_id(args),
+        agent_category=str(args.get("agent_category") or "agent"),
+        namespace=str(args.get("namespace") or args.get("repo") or "") or None,
+        series_id=args.get("series_id"),
+        season_id=args.get("season_id"),
+        categories=args.get("categories") if isinstance(args.get("categories"), list) else None,
+        markers=args.get("markers") if isinstance(args.get("markers"), dict) else None,
+        action_lane=str(args.get("action_lane") or "answer"),
+        limit=_bounded_limit(args, "limit", 8, 30),
+        has_task_contract=bool(args.get("has_task_contract") or args.get("task_contract")),
+        has_proof_bundle=bool(args.get("has_proof_bundle") or args.get("proof_bundle")),
+    )
+
+
+def _handle_dhee_narrative_prior(args: Dict[str, Any]) -> Dict[str, Any]:
+    return _get_scene_service().narrative_prior(
+        query=str(args.get("query") or args.get("task") or ""),
+        user_id=_default_user_id(args),
+        agent_id=_default_agent_id(args),
+        agent_category=str(args.get("agent_category") or "agent"),
+        namespace=str(args.get("namespace") or args.get("repo") or "default"),
+        series_id=args.get("series_id"),
+        season_id=args.get("season_id"),
+        categories=args.get("categories") if isinstance(args.get("categories"), list) else None,
+        markers=args.get("markers") if isinstance(args.get("markers"), dict) else None,
+        action_lane=str(args.get("action_lane") or "answer"),
+        limit=_bounded_limit(args, "limit", 5, 20),
+        has_task_contract=bool(args.get("has_task_contract") or args.get("task_contract")),
+        has_proof_bundle=bool(args.get("has_proof_bundle") or args.get("proof_bundle")),
+    )
+
+
 def _scene_evidence_from_args(args: Dict[str, Any]) -> List[Dict[str, Any]]:
     from dhee.temporal_scenes import collect_live_scene_sources, collect_scene_evidence
 
@@ -1294,6 +1532,26 @@ def _handle_dhee_scene_search(args: Dict[str, Any]) -> Dict[str, Any]:
     query = str(args.get("query") or "").strip()
     if not query:
         return {"error": "query is required"}
+    if not args.get("store_dir"):
+        try:
+            context = _get_scene_service().scene_context(
+                query=query,
+                user_id=_default_user_id(args),
+                agent_id=_default_agent_id(args),
+                agent_category=str(args.get("agent_category") or "agent"),
+                namespace=str(args.get("namespace") or args.get("repo") or "") or None,
+                categories=args.get("categories") if isinstance(args.get("categories"), list) else None,
+                limit=_bounded_limit(args, "limit", 5, 30),
+            )
+            if context.get("included_cards"):
+                return {
+                    "format": "dhee_scene_search.v1",
+                    "source": "sqlite_scene_cards",
+                    "results": context["included_cards"],
+                    "rejected": context.get("rejected", []),
+                }
+        except Exception:
+            pass
     scenes = search_scenes(
         query,
         user_id=_default_user_id(args),
@@ -1318,6 +1576,44 @@ def _handle_dhee_context_pack(args: Dict[str, Any]) -> Dict[str, Any]:
         budget = int(args.get("token_budget") or 1200)
     except (TypeError, ValueError):
         budget = 1200
+    if not args.get("store_dir"):
+        try:
+            context = _get_scene_service().scene_context(
+                query=query,
+                user_id=_default_user_id(args),
+                agent_id=_default_agent_id(args),
+                agent_category=str(args.get("agent_category") or "agent"),
+                namespace=str(args.get("namespace") or args.get("repo") or "") or None,
+                categories=args.get("categories") if isinstance(args.get("categories"), list) else None,
+                limit=_bounded_limit(args, "limit", 5, 30),
+            )
+            cards = []
+            used = 0
+            for card in context.get("included_cards", []):
+                card_tokens = max(1, (len(json.dumps(card, sort_keys=True, default=str)) + 3) // 4)
+                if cards and used + card_tokens > budget:
+                    continue
+                if card_tokens > budget:
+                    continue
+                cards.append(card)
+                used += card_tokens
+            if cards:
+                return {
+                    "format": "dhee_context_pack.v1",
+                    "source": "sqlite_scene_cards",
+                    "query": query,
+                    "user_id": _default_user_id(args),
+                    "repo": args.get("repo"),
+                    "token_budget": max(128, min(20_000, budget)),
+                    "estimated_tokens": used,
+                    "scene_cards": cards,
+                    "rejected": context.get("rejected", []),
+                    "evidence_policy": "summaries_only_raw_evidence_by_pointer",
+                    "raw_media_included": False,
+                    "full_diffs_included": False,
+                }
+        except Exception:
+            pass
     return build_context_pack(
         query,
         user_id=_default_user_id(args),
@@ -2165,6 +2461,11 @@ HANDLERS = {
     "dhee_context_rollover": _handle_dhee_context_rollover,
     "dhee_context_provision": _handle_dhee_context_provision,
     "dhee_scene_world_route": _handle_dhee_scene_world_route,
+    "dhee_scene_start": _handle_dhee_scene_start,
+    "dhee_scene_event": _handle_dhee_scene_event,
+    "dhee_scene_end": _handle_dhee_scene_end,
+    "dhee_scene_context": _handle_dhee_scene_context,
+    "dhee_narrative_prior": _handle_dhee_narrative_prior,
     "dhee_scene_compile": _handle_dhee_scene_compile,
     "dhee_scene_search": _handle_dhee_scene_search,
     "dhee_context_pack": _handle_dhee_context_pack,

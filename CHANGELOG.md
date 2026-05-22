@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [7.1.0] - 2026-05-22 - World memory layer and context compiler
+
+- Reframed Dhee as the world memory layer and context compiler for AI agents,
+  with a polished README that explains the agent workflow, MCP setup,
+  retrieval stack, and production boundaries.
+- Added SQLite-first Narrative Scene Intelligence v1:
+  `Series -> Season -> Episode -> Scene -> SceneCard -> MemoryItem`.
+- Added canonical scene intelligence MCP tools in slim and full servers:
+  `dhee_scene_start`, `dhee_scene_event`, `dhee_scene_end`,
+  `dhee_scene_context`, and `dhee_narrative_prior`.
+- Made SceneCards the canonical prompt-safe retrieval object while keeping
+  existing temporal scene tools compatible.
+- Wired semantic SceneCard retrieval to the NVIDIA/Nemotron embedder and
+  reranker path by default when available, with deterministic filters for
+  privacy, secrets, proof gates, categories, markers, recency, and outcome.
+- Added auditable Episode, Season, and Series rollups with Gemma 4 31B as the
+  routine distillation model and Kimi k2.6 as the Series-level strategic model.
+
 ## [7.0.2] - 2026-05-21 — Chotu dependency compatibility
 
 - Relaxed Dhee's tree-sitter dependency family from `<0.24` to `<0.26` so

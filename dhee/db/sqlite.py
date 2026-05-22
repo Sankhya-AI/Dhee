@@ -799,6 +799,7 @@ class FullSQLiteManager(
             self._ensure_workspace_hierarchy_tables(conn)
             self._ensure_thread_state_table(conn)
             self._ensure_route_decision_tables(conn)
+            self._ensure_narrative_scene_tables(conn)
             return
 
         # v2 columns on existing canonical tables.
@@ -919,6 +920,332 @@ class FullSQLiteManager(
         self._ensure_workspace_hierarchy_tables(conn)
         self._ensure_thread_state_table(conn)
         self._ensure_route_decision_tables(conn)
+        self._ensure_narrative_scene_tables(conn)
+
+    def _ensure_narrative_scene_tables(self, conn: sqlite3.Connection) -> None:
+        """Dhee v1 narrative scene intelligence schema.
+
+        The legacy ``scenes`` table remains the canonical scene table. This
+        migration only adds v1 columns and normalized retrieval tables around it.
+        """
+        scene_columns = {
+            "episode_id": "TEXT",
+            "agent_id": "TEXT",
+            "agent_category": "TEXT",
+            "source_app": "TEXT",
+            "hero_character_id": "TEXT",
+            "hero_focus": "TEXT",
+            "setting": "TEXT",
+            "intent_type": "TEXT",
+            "action_lane": "TEXT DEFAULT 'answer'",
+            "action": "TEXT",
+            "obstacle": "TEXT",
+            "result": "TEXT",
+            "emotional_weight": "REAL DEFAULT 0.0",
+            "next_possible_moves_json": "TEXT DEFAULT '[]'",
+            "outcome": "TEXT",
+            "outcome_status": "TEXT DEFAULT 'partial'",
+            "story_progress_delta": "TEXT",
+            "importance": "REAL DEFAULT 0.5",
+            "confidence": "REAL DEFAULT 0.5",
+            "visibility_scope": "TEXT DEFAULT 'private'",
+            "privacy_class": "TEXT DEFAULT 'user_private'",
+            "consolidated_card_id": "TEXT",
+            "consolidated_card_json": "TEXT DEFAULT '{}'",
+            "created_at": "TEXT",
+            "updated_at": "TEXT",
+        }
+        for column, col_type in scene_columns.items():
+            self._migrate_add_column_conn(conn, "scenes", column, col_type)
+
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS series (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                namespace TEXT NOT NULL,
+                title TEXT NOT NULL,
+                theme TEXT NOT NULL,
+                ultimate_goal TEXT,
+                hero_identity TEXT,
+                purpose TEXT NOT NULL,
+                desired_identity TEXT,
+                core_values_json TEXT NOT NULL DEFAULT '[]',
+                long_term_conflicts_json TEXT NOT NULL DEFAULT '[]',
+                current_active_season TEXT,
+                arc_summary TEXT NOT NULL DEFAULT '',
+                active_tensions_json TEXT NOT NULL DEFAULT '[]',
+                latest_season_signal TEXT,
+                deterministic_rollup_json TEXT NOT NULL DEFAULT '{}',
+                llm_rollup_json TEXT NOT NULL DEFAULT '{}',
+                rollup_model TEXT,
+                rollup_prompt_version TEXT,
+                rollup_source_scene_card_ids_json TEXT NOT NULL DEFAULT '[]',
+                rollup_input_hash TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                confidence REAL NOT NULL DEFAULT 0.5,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_series_user_status
+                ON series(user_id, status, namespace);
+
+            CREATE TABLE IF NOT EXISTS seasons (
+                id TEXT PRIMARY KEY,
+                series_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                namespace TEXT NOT NULL,
+                title TEXT NOT NULL,
+                theme TEXT NOT NULL,
+                major_goal TEXT,
+                dominant_struggle TEXT,
+                transformation_expected TEXT,
+                open_threads_json TEXT NOT NULL DEFAULT '[]',
+                arc_summary TEXT NOT NULL,
+                deterministic_rollup_json TEXT NOT NULL DEFAULT '{}',
+                llm_rollup_json TEXT NOT NULL DEFAULT '{}',
+                rollup_model TEXT,
+                rollup_prompt_version TEXT,
+                rollup_source_scene_card_ids_json TEXT NOT NULL DEFAULT '[]',
+                rollup_input_hash TEXT,
+                period_start TEXT,
+                period_end TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                confidence REAL NOT NULL DEFAULT 0.5,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (series_id) REFERENCES series(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_seasons_active
+                ON seasons(user_id, namespace, series_id, status);
+
+            CREATE TABLE IF NOT EXISTS story_characters (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                namespace TEXT NOT NULL,
+                name TEXT NOT NULL,
+                character_type TEXT NOT NULL,
+                stable_identity_ref TEXT,
+                description TEXT NOT NULL,
+                skills_json TEXT NOT NULL DEFAULT '[]',
+                influence REAL NOT NULL DEFAULT 0.5,
+                trust_level REAL NOT NULL DEFAULT 0.5,
+                lessons_learned_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_story_char_unique
+                ON story_characters(user_id, namespace, lower(name), character_type);
+
+            CREATE TABLE IF NOT EXISTS episodes (
+                id TEXT PRIMARY KEY,
+                series_id TEXT,
+                season_id TEXT,
+                user_id TEXT NOT NULL,
+                local_date TEXT NOT NULL,
+                timezone TEXT NOT NULL,
+                namespace TEXT NOT NULL,
+                title TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                primary_hero_id TEXT,
+                goal TEXT,
+                conflict TEXT,
+                key_decisions_json TEXT NOT NULL DEFAULT '[]',
+                outcome TEXT,
+                lesson TEXT,
+                unresolved_threads_json TEXT NOT NULL DEFAULT '[]',
+                story_progress TEXT,
+                category_summaries_json TEXT NOT NULL DEFAULT '{}',
+                deterministic_rollup_json TEXT NOT NULL DEFAULT '{}',
+                llm_rollup_json TEXT NOT NULL DEFAULT '{}',
+                rollup_model TEXT,
+                rollup_prompt_version TEXT,
+                rollup_source_scene_card_ids_json TEXT NOT NULL DEFAULT '[]',
+                rollup_input_hash TEXT,
+                agent_ids_json TEXT NOT NULL DEFAULT '[]',
+                scene_ids_json TEXT NOT NULL DEFAULT '[]',
+                open_loops_json TEXT NOT NULL DEFAULT '[]',
+                status TEXT NOT NULL DEFAULT 'open',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(user_id, namespace, local_date, timezone),
+                FOREIGN KEY (series_id) REFERENCES series(id),
+                FOREIGN KEY (season_id) REFERENCES seasons(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_episodes_lookup
+                ON episodes(user_id, namespace, local_date, timezone);
+
+            CREATE TABLE IF NOT EXISTS episode_characters (
+                episode_id TEXT NOT NULL,
+                character_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                relationship_to_hero TEXT,
+                salience REAL NOT NULL DEFAULT 0.5,
+                evidence_refs_json TEXT NOT NULL DEFAULT '[]',
+                PRIMARY KEY (episode_id, character_id, role),
+                FOREIGN KEY (episode_id) REFERENCES episodes(id),
+                FOREIGN KEY (character_id) REFERENCES story_characters(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS scene_characters (
+                scene_id TEXT NOT NULL,
+                character_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                contribution TEXT NOT NULL,
+                salience REAL NOT NULL DEFAULT 0.5,
+                evidence_refs_json TEXT NOT NULL DEFAULT '[]',
+                PRIMARY KEY (scene_id, character_id, role),
+                FOREIGN KEY (scene_id) REFERENCES scenes(id),
+                FOREIGN KEY (character_id) REFERENCES story_characters(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS scene_events (
+                id TEXT PRIMARY KEY,
+                scene_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                evidence_ref TEXT,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (scene_id) REFERENCES scenes(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_scene_events_scene
+                ON scene_events(scene_id, created_at);
+
+            CREATE TABLE IF NOT EXISTS scene_cards (
+                id TEXT PRIMARY KEY,
+                scene_id TEXT NOT NULL UNIQUE,
+                episode_id TEXT,
+                user_id TEXT NOT NULL,
+                agent_id TEXT,
+                agent_category TEXT,
+                namespace TEXT NOT NULL,
+                schema_version TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                staleness_policy TEXT NOT NULL DEFAULT 'valid_until_superseded',
+                importance REAL NOT NULL DEFAULT 0.5,
+                confidence REAL NOT NULL DEFAULT 0.5,
+                reuse_policy TEXT NOT NULL DEFAULT 'private',
+                visibility_scope TEXT NOT NULL DEFAULT 'private',
+                privacy_class TEXT NOT NULL DEFAULT 'user_private',
+                retrieval_tags_json TEXT NOT NULL DEFAULT '[]',
+                evidence_refs_json TEXT NOT NULL DEFAULT '[]',
+                do_not_use_for_json TEXT NOT NULL DEFAULT '[]',
+                durable_facts_json TEXT NOT NULL DEFAULT '[]',
+                decisions_json TEXT NOT NULL DEFAULT '[]',
+                procedures_json TEXT NOT NULL DEFAULT '[]',
+                success_patterns_json TEXT NOT NULL DEFAULT '[]',
+                failure_patterns_json TEXT NOT NULL DEFAULT '[]',
+                open_loops_json TEXT NOT NULL DEFAULT '[]',
+                entities_json TEXT NOT NULL DEFAULT '[]',
+                artifacts_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (scene_id) REFERENCES scenes(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_scene_cards_lookup
+                ON scene_cards(user_id, namespace, visibility_scope, privacy_class, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS scene_card_claims (
+                id TEXT PRIMARY KEY,
+                scene_card_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                claim TEXT NOT NULL,
+                confidence REAL NOT NULL DEFAULT 0.5,
+                valid_until TEXT,
+                supersedes_json TEXT NOT NULL DEFAULT '[]',
+                contradicted_by_json TEXT NOT NULL DEFAULT '[]',
+                evidence_refs_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (scene_card_id) REFERENCES scene_cards(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_scene_card_claims_card
+                ON scene_card_claims(scene_card_id, kind);
+
+            CREATE TABLE IF NOT EXISTS scene_categories (
+                scene_id TEXT NOT NULL,
+                category_id TEXT NOT NULL,
+                weight REAL NOT NULL DEFAULT 1.0,
+                source TEXT NOT NULL,
+                PRIMARY KEY (scene_id, category_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_scene_categories_cat
+                ON scene_categories(category_id, weight DESC);
+
+            CREATE TABLE IF NOT EXISTS scene_markers (
+                scene_id TEXT NOT NULL,
+                marker_key TEXT NOT NULL,
+                marker_value TEXT NOT NULL,
+                weight REAL NOT NULL DEFAULT 1.0,
+                source TEXT NOT NULL,
+                PRIMARY KEY (scene_id, marker_key, marker_value)
+            );
+            CREATE INDEX IF NOT EXISTS idx_scene_markers_key_value
+                ON scene_markers(marker_key, marker_value);
+
+            CREATE TABLE IF NOT EXISTS scene_edges (
+                from_scene_id TEXT NOT NULL,
+                to_scene_id TEXT NOT NULL,
+                edge_type TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (from_scene_id, to_scene_id, edge_type)
+            );
+            CREATE INDEX IF NOT EXISTS idx_scene_edges_to
+                ON scene_edges(to_scene_id, edge_type);
+            """
+        )
+        for statement in (
+            "ALTER TABLE series ADD COLUMN arc_summary TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE series ADD COLUMN active_tensions_json TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE series ADD COLUMN latest_season_signal TEXT",
+            "ALTER TABLE series ADD COLUMN deterministic_rollup_json TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE series ADD COLUMN llm_rollup_json TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE series ADD COLUMN rollup_model TEXT",
+            "ALTER TABLE series ADD COLUMN rollup_prompt_version TEXT",
+            "ALTER TABLE series ADD COLUMN rollup_source_scene_card_ids_json TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE series ADD COLUMN rollup_input_hash TEXT",
+            "ALTER TABLE seasons ADD COLUMN deterministic_rollup_json TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE seasons ADD COLUMN llm_rollup_json TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE seasons ADD COLUMN rollup_model TEXT",
+            "ALTER TABLE seasons ADD COLUMN rollup_prompt_version TEXT",
+            "ALTER TABLE seasons ADD COLUMN rollup_source_scene_card_ids_json TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE seasons ADD COLUMN rollup_input_hash TEXT",
+            "ALTER TABLE episodes ADD COLUMN deterministic_rollup_json TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE episodes ADD COLUMN llm_rollup_json TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE episodes ADD COLUMN rollup_model TEXT",
+            "ALTER TABLE episodes ADD COLUMN rollup_prompt_version TEXT",
+            "ALTER TABLE episodes ADD COLUMN rollup_source_scene_card_ids_json TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE episodes ADD COLUMN rollup_input_hash TEXT",
+        ):
+            try:
+                conn.execute(statement)
+            except sqlite3.OperationalError:
+                pass
+
+        now = _utcnow_iso()
+        conn.execute(
+            """
+            UPDATE scenes
+            SET action_lane = COALESCE(NULLIF(action_lane, ''), 'answer'),
+                outcome_status = COALESCE(NULLIF(outcome_status, ''), 'partial'),
+                visibility_scope = COALESCE(NULLIF(visibility_scope, ''), 'private'),
+                privacy_class = COALESCE(NULLIF(privacy_class, ''), 'user_private'),
+                importance = COALESCE(importance, scene_strength, strength, 0.5),
+                confidence = COALESCE(confidence, 0.5),
+                created_at = COALESCE(created_at, start_time, ?),
+                updated_at = COALESCE(updated_at, end_time, start_time, ?)
+            WHERE action_lane IS NULL OR action_lane = ''
+               OR outcome_status IS NULL OR outcome_status = ''
+               OR visibility_scope IS NULL OR visibility_scope = ''
+               OR privacy_class IS NULL OR privacy_class = ''
+               OR importance IS NULL OR confidence IS NULL
+               OR created_at IS NULL OR updated_at IS NULL
+            """,
+            (now, now),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version) VALUES ('v5_narrative_scene_v1')"
+        )
 
     def _ensure_engram_verification(self, conn: sqlite3.Connection) -> None:
         """M3 Epistemic Control Loop — ``last_verified_at`` on facts + prefs.

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Dhee Developer Brain installer — one command, local memory + repo context.
+# Dhee installer - one command for local world memory + repo context.
 #
 #   curl -fsSL https://raw.githubusercontent.com/Sankhya-AI/Dhee/main/install.sh | sh
 #
@@ -25,7 +25,7 @@ DHEE_HOME="$HOME/.dhee"
 VENV_DIR="$DHEE_HOME/.venv"
 BIN_DIR="$HOME/.local/bin"
 MIN_PYTHON="3.9"
-DEFAULT_PACKAGE="dhee>=7.0.2"
+DEFAULT_PACKAGE="dhee>=7.1.0"
 PACKAGE="${DHEE_INSTALL_PACKAGE:-$DEFAULT_PACKAGE}"
 FALLBACK_PACKAGE="${DHEE_FALLBACK_PACKAGE:-git+https://github.com/Sankhya-AI/Dhee.git@main}"
 

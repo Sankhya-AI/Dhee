@@ -1,7 +1,8 @@
-"""dhee — the local developer brain for AI coding agents.
+"""dhee - the world memory layer and context compiler for AI agents.
 
-Dhee gives Codex, Claude Code, Cursor, Cline, Gemini CLI, and MCP clients a
-shared memory, repo-cognition, handoff, and proof layer that survives sessions.
+Dhee gives Codex, Claude Code, Cursor, Cline, Gemini CLI, Chotu, and MCP
+clients durable memory, repo cognition, narrative scene intelligence, handoff,
+proof, and prompt-safe context that survives sessions.
 
 Quick Start:
     from dhee import Dhee
@@ -40,7 +41,7 @@ from dhee.memory.admission import (
 # Default import remains model-free for backwards compatibility.
 Memory = CoreMemory
 
-__version__ = "7.0.2"
+__version__ = "7.1.0"
 __all__ = [
     # Memory classes
     "Engram",

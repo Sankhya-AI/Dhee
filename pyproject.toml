@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dhee"
-version = "7.0.2"
-description = "Dhee Developer Brain — local memory, repo cognition, handoff, and proof for AI coding agents"
+version = "7.1.0"
+description = "Dhee - world memory layer and context compiler for AI agents"
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
@@ -13,7 +13,7 @@ license-files = ["LICENSE"]
 authors = [
     {name = "Sankhya AI Labs"}
 ]
-keywords = ["context-firewall", "developer-brain", "coding-agents", "mcp", "claude-code", "codex", "local-first", "memory-layer", "ai", "agents"]
+keywords = ["world-memory", "context-compiler", "developer-brain", "coding-agents", "mcp", "claude-code", "codex", "chotu", "local-first", "memory-layer", "ai", "agents"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",

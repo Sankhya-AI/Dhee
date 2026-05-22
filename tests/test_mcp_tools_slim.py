@@ -40,6 +40,11 @@ EXPECTED_TOOL_NAMES = {
     "dhee_context_rollover",
     "dhee_context_provision",
     "dhee_scene_world_route",
+    "dhee_scene_start",
+    "dhee_scene_event",
+    "dhee_scene_end",
+    "dhee_scene_context",
+    "dhee_narrative_prior",
     "dhee_scene_compile",
     "dhee_scene_search",
     "dhee_context_pack",
@@ -139,3 +144,6 @@ class TestMCPToolsSlim:
         assert "dhee_grep" in names
         assert "dhee_context_bootstrap" in names
         assert "dhee_handoff" in names
+        assert "dhee_scene_start" in names
+        assert "dhee_scene_context" in names
+        assert "dhee_narrative_prior" in names
