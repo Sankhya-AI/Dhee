@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>World memory for AI agents.</b><br>
-  A context compiler, repo brain, narrative scene graph, handoff bus, and proof layer for Codex, Claude Code, Cursor, Gemini CLI, Cline, Chotu, and any MCP client.
+  A arc based context compiler for ai agents
 </p>
 
 <p align="center">
