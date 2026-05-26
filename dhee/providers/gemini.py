@@ -1,4 +1,4 @@
-"""Native Gemini API agent integration for Dhee 7.2.0.
+"""Native Gemini API agent integration for Dhee 7.2+.
 
 This provider maps Gemini API concepts to Dhee's universal runtime:
 system instructions, function tools, model events, and finish checkpoints. It

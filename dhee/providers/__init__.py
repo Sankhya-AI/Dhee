@@ -1,4 +1,4 @@
-"""Native provider integrations for Dhee 7.2.0."""
+"""Native provider integrations for Dhee 7.2+."""
 
 from __future__ import annotations
 

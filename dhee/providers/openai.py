@@ -1,4 +1,4 @@
-"""Native OpenAI Responses API agent integration for Dhee 7.2.0."""
+"""Native OpenAI Responses API agent integration for Dhee 7.2+."""
 
 from __future__ import annotations
 

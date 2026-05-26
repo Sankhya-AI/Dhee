@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [7.2.1] - 2026-05-26 - Native agent providers
+
+- Added Dhee's universal agent runtime for provider-neutral `before`, event,
+  tool, and finish flows.
+- Added native provider integrations for ElevenLabs voice agents, Gemini API
+  agents, and OpenAI Responses API agents.
+- Added the ElevenLabs HTTP sidecar, server-tool profile, post-call webhook
+  checkpointing, and voice memory policy.
+- Documented the few-line integration path for adding Dhee memory to existing
+  agents.
+
 ## [7.2.0] - 2026-05-26 - Proactive workspace memory and init polish
 
 - Made Dhee workspace behavior explicitly opt-in: Codex/Claude hooks and router

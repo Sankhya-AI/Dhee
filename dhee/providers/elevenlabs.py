@@ -1,4 +1,4 @@
-"""Native ElevenLabs agent integration for Dhee 7.2.0.
+"""Native ElevenLabs agent integration for Dhee 7.2+.
 
 This provider maps ElevenLabs agent concepts to Dhee's universal runtime:
 dynamic variables, the `dhee_memory` server tool, transcript events, and
