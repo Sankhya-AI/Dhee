@@ -45,6 +45,7 @@ dependencies = [
 # LLM / embedding providers (install what you use)
 gemini = ["google-genai>=1.0.0"]
 openai = ["openai>=1.0.0"]
+elevenlabs = ["elevenlabs>=2.49.0"]
 ollama = ["ollama>=0.4.0"]
 # Internal providers (not documented, still functional)
 nvidia = ["openai>=1.0.0"]
@@ -79,6 +80,7 @@ app = [
 all = [
     "google-genai>=1.0.0",
     "openai>=1.0.0",
+    "elevenlabs>=2.49.0",
     "ollama>=0.4.0",
     "zvec>=0.4.0; python_version >= '3.11'",
     "mcp>=1.0.0; python_version >= '3.10'",

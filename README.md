@@ -172,6 +172,170 @@ A good agent loop is simple:
 bootstrap -> start scene -> gather evidence -> retrieve context -> act -> verify -> end scene -> save digest
 ```
 
+## Agent Runtime
+
+Dhee now plugs into existing agents with a few lines of code.
+
+If you already have an agent, you keep your provider SDK, model, tools, audio interface, callbacks, and deployment. Dhee adds the missing memory loop:
+
+```text
+before run -> inject compact Dhee context
+during run -> expose a dhee_memory tool
+after run  -> checkpoint what should matter next time
+```
+
+Current native integrations:
+
+| Provider | Import | Minimal change |
+| --- | --- | --- |
+| ElevenLabs voice agents | `from dhee import ElevenLabsAgent` | Add Dhee dynamic variables, client tool, callback wrappers, and post-call checkpointing. |
+| Gemini API agents | `from dhee import GeminiAgent` | Pass `config=memory.generate_content_config()` into `client.models.generate_content(...)`. |
+| OpenAI Responses API agents | `from dhee import OpenAIAgent` | Spread `**memory.response_create_kwargs(...)` into `client.responses.create(...)`. |
+
+Dhee can also run as a small HTTP sidecar for agents that cannot use local Python or stdio MCP.
+
+```bash
+export DHEE_HTTP_TOKEN="dev-token"
+export ELEVENLABS_WEBHOOK_SECRET="..."
+dhee serve --host 0.0.0.0 --port 8765 --profile elevenlabs
+```
+
+Unsigned ElevenLabs post-call webhooks are rejected by default; use `--allow-unsigned-webhooks` only for local development.
+
+The universal runtime surface is intentionally provider-neutral:
+
+```python
+import dhee
+
+memory = dhee.Client(user_id="user_123", app_id="elevenlabs:support-agent")
+run = memory.run(task="voice support call")
+patch = run.before(channel="voice")
+run.tool("remember", content="User prefers WhatsApp follow-up.")
+run.finish(summary="User asked about refund status.")
+```
+
+For an existing ElevenLabs voice agent, the minimal native path is:
+
+```python
+from dhee import ElevenLabsAgent
+
+agent = ElevenLabsAgent(
+    public_base_url="https://memory.example.com",
+    user_id="user_123",
+    agent_id="support-agent",
+)
+
+conversation = agent.create_conversation(api_key="...")
+conversation.start_session()
+```
+
+That keeps your ElevenLabs agent, audio interface, and callbacks intact while Dhee adds:
+
+- `ConversationInitiationData(dynamic_variables={...})` with `dhee_context`
+- a native `dhee_memory` client tool
+- transcript event capture through wrapped callbacks
+- post-call checkpoint helpers
+
+If you already construct `Conversation(...)` yourself, make the smaller patch:
+
+```python
+memory = ElevenLabsAgent(
+    public_base_url="https://memory.example.com",
+    user_id="user_123",
+    agent_id=agent_id,
+)
+
+conversation = Conversation(
+    client=elevenlabs,
+    agent_id=agent_id,
+    config=memory.conversation_initiation_data(),
+    client_tools=memory.client_tools(existing_client_tools),
+    callback_user_transcript=memory.wrap_user_transcript(on_user_transcript),
+    callback_agent_response=memory.wrap_agent_response(on_agent_response),
+    audio_interface=audio_interface,
+)
+```
+
+Install the optional SDK bridge with:
+
+```bash
+pip install "dhee[elevenlabs]"
+```
+
+For hosted/server-tool deployment, use the profile helper:
+
+```bash
+dhee elevenlabs init --public-url https://memory.example.com
+```
+
+That prints the dynamic variables, `dhee_memory` server tool, and post-call webhook URL. The flow is:
+
+```text
+call start -> {{dhee_context}}
+during call -> dhee_memory server tool
+call end -> post-call webhook checkpoint
+next call -> better injected context
+```
+
+The native provider lives at [`dhee.providers.elevenlabs`](dhee/providers/elevenlabs.py) and is exported as `dhee.ElevenLabsAgent` and `dhee.ElevenAgent`.
+
+For an existing Gemini API agent, add Dhee to the existing `generate_content` call:
+
+```python
+from google import genai
+from dhee import GeminiAgent
+
+client = genai.Client(api_key="...")
+memory = GeminiAgent(user_id="user_123", model="gemini-2.5-flash")
+
+response = client.models.generate_content(
+    model=memory.model,
+    contents="What did I ask you to remember?",
+    config=memory.generate_content_config(),
+)
+```
+
+The config injects Dhee context as a system instruction and adds `memory.dhee_memory` as a Gemini Python function tool. You can also call through Dhee:
+
+```python
+response = memory.generate_content(
+    "Please remember I prefer concise summaries.",
+    client=client,
+)
+```
+
+The native Gemini provider lives at [`dhee.providers.gemini`](dhee/providers/gemini.py) and is exported as `dhee.GeminiAgent` and `dhee.GeminiAPIAgent`.
+
+For an existing OpenAI Responses API agent, add Dhee to the existing request:
+
+```python
+from openai import OpenAI
+from dhee import OpenAIAgent
+
+client = OpenAI(api_key="...")
+memory = OpenAIAgent(user_id="user_123", model="gpt-4.1")
+
+response = client.responses.create(
+    **memory.response_create_kwargs(
+        input="What should you remember about me?",
+    )
+)
+```
+
+When the model returns `function_call` items, Dhee can execute them and format Responses API tool outputs:
+
+```python
+tool_outputs = memory.function_call_outputs(response)
+followup = client.responses.create(
+    model=memory.model,
+    input=tool_outputs,
+    previous_response_id=response.id,
+    tools=memory.tools(),
+)
+```
+
+The native OpenAI provider lives at [`dhee.providers.openai`](dhee/providers/openai.py) and is exported as `dhee.OpenAIAgent` and `dhee.OpenAIResponsesAgent`.
+
 ## Repo Brain
 
 Ask: "If I touch this file, what breaks?"

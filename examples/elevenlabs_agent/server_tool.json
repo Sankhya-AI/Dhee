@@ -1,0 +1,20 @@
+{
+  "name": "dhee_memory",
+  "description": "Recall, store, correct, or checkpoint durable user memory. Use this only for previous calls, user preferences, unresolved tasks, corrections, and follow-up commitments.",
+  "method": "POST",
+  "url": "https://memory.example.com/v1/tools/dhee_memory",
+  "headers": {
+    "Authorization": "Bearer {{secret__dhee_token}}"
+  },
+  "body": {
+    "user_id": "{{dhee_user_id}}",
+    "app_id": "{{dhee_app_id}}",
+    "run_id": "{{dhee_run_id}}",
+    "conversation_id": "{{system__conversation_id}}",
+    "action": "{{action}}",
+    "query": "{{query}}",
+    "content": "{{content}}",
+    "summary": "{{summary}}",
+    "conversation_history": "{{system__conversation_history}}"
+  }
+}

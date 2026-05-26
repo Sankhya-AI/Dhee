@@ -2749,6 +2749,128 @@ def cmd_runtime(args: argparse.Namespace) -> None:
     print(runtime.format_status(result))
 
 
+def cmd_serve(args: argparse.Namespace) -> None:
+    """Run the external Dhee agent-runtime HTTP sidecar."""
+
+    from dhee.agent_runtime.server import run
+
+    run(
+        host=getattr(args, "host", "127.0.0.1"),
+        port=int(getattr(args, "port", 8765)),
+        profile=getattr(args, "profile", "generic"),
+        data_dir=getattr(args, "data_dir", None),
+        provider=getattr(args, "provider", None),
+        in_memory=bool(getattr(args, "in_memory", False)),
+        offline=bool(getattr(args, "offline", False)),
+        allow_unsigned_webhooks=bool(getattr(args, "allow_unsigned_webhooks", False)),
+    )
+
+
+def _http_check(
+    url: str,
+    method: str = "GET",
+    token: Optional[str] = None,
+    body: Optional[dict[str, Any]] = None,
+    ok_statuses: Optional[set] = None,
+) -> dict[str, Any]:
+    import urllib.error
+    import urllib.request
+
+    ok_statuses = ok_statuses or set(range(200, 300))
+    headers = {}
+    data = None
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    if method == "POST":
+        headers["Content-Type"] = "application/json"
+        data = json.dumps(body or {"type": "doctor_ping"}).encode("utf-8")
+    request = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=2.0) as response:
+            status = int(response.status)
+            return {"ok": status in ok_statuses, "status": status}
+    except urllib.error.HTTPError as exc:
+        status = int(exc.code)
+        return {"ok": status in ok_statuses, "status": status, "error": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def cmd_elevenlabs(args: argparse.Namespace) -> None:
+    """Print or inspect the ElevenLabs profile wiring."""
+
+    action = getattr(args, "elevenlabs_action", None) or "init"
+    if action == "init":
+        if not getattr(args, "public_url", None):
+            raise ValueError("elevenlabs init requires --public-url")
+        from dhee.profiles.elevenlabs import init_instructions, server_tool_schema
+
+        if getattr(args, "json", False):
+            _json_out(
+                {
+                    "dynamic_variables": [
+                        "dhee_context",
+                        "dhee_run_id",
+                        "dhee_user_id",
+                        "dhee_app_id",
+                        "secret__dhee_token",
+                    ],
+                    "server_tool": server_tool_schema(args.public_url),
+                    "post_call_webhook": f"{args.public_url.rstrip('/')}/v1/webhooks/elevenlabs/post_call",
+                }
+            )
+            return
+        print(init_instructions(args.public_url))
+        return
+
+    if action == "doctor":
+        token = os.getenv("DHEE_HTTP_TOKEN")
+        webhook_secret = os.getenv("ELEVENLABS_WEBHOOK_SECRET")
+        data_dir = os.path.abspath(
+            os.path.expanduser(
+                getattr(args, "data_dir", None)
+                or os.getenv("DHEE_DATA_DIR")
+                or "~/.dhee"
+            )
+        )
+        base_url = (getattr(args, "url", None) or "http://127.0.0.1:8765").rstrip("/")
+        webhook_endpoint = _http_check(
+            f"{base_url}/v1/webhooks/elevenlabs/post_call",
+            method="POST",
+            body={"type": "doctor_ping"},
+            ok_statuses={200, 401},
+        )
+        webhook_status = int(webhook_endpoint.get("status") or 0)
+        webhook_endpoint["protected"] = webhook_status == 401
+        checks = {
+            "dhee_http_token": bool(token),
+            "elevenlabs_webhook_secret": bool(webhook_secret),
+            "production_webhook_signing_ready": bool(webhook_secret),
+            "memory_store_writable": os.access(os.path.dirname(data_dir) or ".", os.W_OK),
+            "healthz_reachable": _http_check(f"{base_url}/healthz"),
+            "memory_tool_reachable": _http_check(
+                f"{base_url}/v1/tools/dhee_memory",
+                method="POST",
+                token=token,
+                body={"action": "recall", "query": "doctor ping"},
+            ),
+            "post_call_webhook_endpoint": webhook_endpoint,
+            "raw_audio_storage_disabled": True,
+            "voice_admission_policy_active": True,
+        }
+        if getattr(args, "json", False):
+            _json_out(checks)
+            return
+        print("Dhee ElevenLabs doctor")
+        for name, value in checks.items():
+            ok = value.get("ok") if isinstance(value, dict) else bool(value)
+            suffix = f" ({value})" if isinstance(value, dict) and not ok else ""
+            print(f"  {'ok' if ok else 'missing'}  {name}{suffix}")
+        return
+
+    raise ValueError(f"Unknown elevenlabs action: {action}")
+
+
 def cmd_uninstall(args: argparse.Namespace) -> None:
     """Cleanly stop Dhee and remove managed install artifacts."""
     from dhee.cli_config import get_config_dir
@@ -4240,6 +4362,44 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_runtime.add_argument("--json", action="store_true", help="JSON output")
 
+    # serve — external agent runtime HTTP sidecar
+    p_serve = sub.add_parser(
+        "serve",
+        help="Run the Dhee universal agent-runtime HTTP sidecar",
+    )
+    p_serve.add_argument("--host", default="127.0.0.1", help="Bind host")
+    p_serve.add_argument("--port", type=int, default=8765, help="Bind port")
+    p_serve.add_argument(
+        "--profile",
+        choices=["generic", "elevenlabs", "openai", "gemini"],
+        default="generic",
+        help="Profile hints to activate",
+    )
+    p_serve.add_argument("--data-dir", help="Dhee data directory")
+    p_serve.add_argument("--provider", help="Dhee provider override")
+    p_serve.add_argument("--in-memory", action="store_true", help="Use in-memory storage")
+    p_serve.add_argument("--offline", action="store_true", help="Use offline/mock provider")
+    p_serve.add_argument(
+        "--allow-unsigned-webhooks",
+        action="store_true",
+        help="Allow unsigned webhooks for local development only",
+    )
+
+    # elevenlabs — profile helper commands, not an SDK client
+    p_elevenlabs = sub.add_parser(
+        "elevenlabs",
+        help="Print or inspect Dhee's ElevenLabs profile wiring",
+    )
+    p_elevenlabs.add_argument(
+        "elevenlabs_action",
+        choices=["init", "doctor"],
+        help="Subcommand",
+    )
+    p_elevenlabs.add_argument("--public-url", help="Public URL for `elevenlabs init`")
+    p_elevenlabs.add_argument("--url", help="Runtime URL for `elevenlabs doctor`")
+    p_elevenlabs.add_argument("--data-dir", help="Dhee data directory for doctor checks")
+    p_elevenlabs.add_argument("--json", action="store_true", help="JSON output")
+
     # task
     p_task = sub.add_parser("task", help="Start Claude Code with Dhee cognition")
     p_task.add_argument("description", nargs="?", default="", help="Task description")
@@ -4633,6 +4793,8 @@ COMMAND_MAP = {
     "doctor": cmd_doctor,
     "release": cmd_release,
     "runtime": cmd_runtime,
+    "serve": cmd_serve,
+    "elevenlabs": cmd_elevenlabs,
     "task": cmd_task,
     "ingest": cmd_ingest,
     "docs": cmd_docs,

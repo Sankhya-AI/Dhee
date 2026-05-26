@@ -26,6 +26,15 @@ from dhee.memory.smart import SmartMemory
 from dhee.memory.main import FullMemory
 from dhee.simple import Dhee, Engram
 from dhee.plugin import DheePlugin
+from dhee.agent_runtime import Client, Run, Patch
+from dhee.providers import (
+    ElevenAgent,
+    ElevenLabsAgent,
+    GeminiAgent,
+    GeminiAPIAgent,
+    OpenAIAgent,
+    OpenAIResponsesAgent,
+)
 from dhee.fs import ContextWorkspace
 from dhee.context_kernel import DheeContextKernel, KernelScope
 from dhee.core.category import CategoryProcessor, Category, CategoryType, CategoryMatch
@@ -53,6 +62,16 @@ __all__ = [
     "Dhee",
     # Universal plugin
     "DheePlugin",
+    # Universal agent runtime
+    "Client",
+    "Run",
+    "Patch",
+    "ElevenAgent",
+    "ElevenLabsAgent",
+    "GeminiAgent",
+    "GeminiAPIAgent",
+    "OpenAIAgent",
+    "OpenAIResponsesAgent",
     # DheeFS
     "ContextWorkspace",
     "DheeContextKernel",

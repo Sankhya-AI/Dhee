@@ -512,13 +512,14 @@ class DheePlugin:
         task_type: Optional[str] = None,
         what_worked: Optional[str] = None,
         what_failed: Optional[str] = None,
+        status: str = "completed",
         **kwargs,
     ) -> Dict[str, Any]:
         """End a session. Shorthand for checkpoint with session metadata."""
         result = self.checkpoint(
             summary=summary, outcome_score=outcome_score,
             task_type=task_type, what_worked=what_worked,
-            what_failed=what_failed, status="completed", **kwargs,
+            what_failed=what_failed, status=status, **kwargs,
         )
         self._session_id = None
         self._session_start_time = None
