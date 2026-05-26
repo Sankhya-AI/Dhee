@@ -5,8 +5,7 @@ Walks the user through:
 
   1. Provider selection (NVIDIA default, then OpenAI/Gemini/Ollama)
   2. API key paste (masked echo, stored in the encrypted secret store)
-  3. Optional git repo linking for shared `.dhee/context/`
-  4. Final "run ``dhee link`` / ``dhee handoff``" handoff
+  3. Final "run ``dhee init`` in each chosen repo/folder" handoff
 
 The prompts are routed through ``/dev/tty`` so the flow works even when
 the caller is piped — the exact shape ``curl ... | sh`` takes. If the
@@ -70,7 +69,21 @@ def _ask_secret(tty_in: io.TextIOBase, tty_out: io.TextIOBase, prompt: str) -> s
     try:
         import getpass
 
-        # getpass wants fds; if tty is a real terminal this works.
+        # `curl ... | sh` leaves stdin attached to the pipe, while prompts are
+        # routed through /dev/tty. Let getpass open the controlling terminal so
+        # pasted keys still stay hidden in that install shape.
+        is_real_tty = False
+        try:
+            is_real_tty = bool(tty_in.isatty())
+        except Exception:
+            is_real_tty = False
+
+        if tty_in is not sys.stdin and is_real_tty:
+            try:
+                return getpass.getpass(prompt, stream=tty_out).strip()
+            except Exception:
+                pass
+
         if tty_in.fileno() == sys.stdin.fileno():
             try:
                 return getpass.getpass(prompt).strip()
@@ -130,7 +143,7 @@ def _save_provider_in_config(provider: str) -> None:
 
 
 def _link_repo(path: str) -> Tuple[bool, str]:
-    """Run ``repo_link.link()`` on *path*. Returns (ok, message)."""
+    """Back-compat helper for old callers that still invoke link directly."""
     from dhee import repo_link
 
     try:
@@ -162,9 +175,11 @@ def _init_repo(path: str) -> Tuple[bool, str]:
         return False, f"init error: {exc}"
     ingest = info.get("ingest") or {}
     cm = info.get("claude_md") or {}
+    am = info.get("agents_md") or {}
     cm_state = "created" if cm.get("created") else ("updated" if cm.get("updated") else "unchanged")
+    am_state = "created" if am.get("created") else ("updated" if am.get("updated") else "unchanged")
     chunks = int(ingest.get("chunks_stored", 0) or 0)
-    parts = [f"linked {info['repo_root']}", f"CLAUDE.md {cm_state}"]
+    parts = [f"linked {info['repo_root']}", f"CLAUDE.md {cm_state}", f"AGENTS.md {am_state}"]
     if ingest.get("status") == "ok":
         parts.append(f"indexed {ingest.get('files_indexed', 0)} doc(s) → {chunks} chunk(s)")
     elif ingest.get("status") == "skipped":
@@ -208,16 +223,16 @@ def _init_repos_interactive(
     cwd_is_git = _looks_like_git_repo(cwd)
 
     _print(tty_out, "")
-    _print(tty_out, "Wire up a git repo for shared developer-brain context?")
+    _print(tty_out, "Wire up a repo or folder for shared developer-brain context?")
     _print(
         tty_out,
-        "  `dhee init` creates `<repo>/.dhee/`, installs git hooks, indexes the",
+        "  `dhee init` creates `<workspace>/.dhee/`, installs git hooks for repos, indexes the",
     )
     _print(
         tty_out,
         "  repo's markdown, and adds a small `## Dhee` section to CLAUDE.md.",
     )
-    _print(tty_out, "  You can also run `dhee init` from any git repo later.")
+    _print(tty_out, "  You can also run `dhee init` from any repo or folder later.")
     _print(tty_out, "")
 
     if cwd_is_git:
@@ -233,18 +248,15 @@ def _init_repos_interactive(
     _print(tty_out, "")
     _print(
         tty_out,
-        "Wire up another repo? (paste absolute path, blank to finish):",
+        "Wire up another repo/folder? (paste path, blank to finish):",
     )
     while True:
-        raw = _ask(tty_in, tty_out, "repo path: ").strip()
+        raw = _ask(tty_in, tty_out, "workspace path: ").strip()
         if not raw:
             break
         path = os.path.abspath(os.path.expanduser(raw))
         if not os.path.isdir(path):
             _print(tty_out, f"  ✗ {path} is not a directory; skipped.")
-            continue
-        if not _looks_like_git_repo(path):
-            _print(tty_out, f"  ✗ {path} is not inside a git repo; run `git init` first.")
             continue
         ok, message = _init_repo(path)
         marker = "✓" if ok else "✗"
@@ -311,22 +323,21 @@ def run_onboard(
             else:
                 _print(tty_out, "No key provided; skipping.")
 
-        # ── Repo wire-up — the "share context across teammates" step ─
+        # ── Explicit workspace wire-up, only when requested by flags ─
         if link_paths:
             _print(tty_out, "")
             for path in link_paths:
-                resolved = os.path.abspath(os.path.expanduser(path))
-                ok, message = _init_repo(resolved)
+                ok, message = _init_repo(path)
                 marker = "✓" if ok else "✗"
                 _print(tty_out, f"  {marker} {message}")
-        elif not skip_link_prompt:
-            _init_repos_interactive(tty_in, tty_out)
 
         _print(tty_out, "")
         _print(tty_out, "Done. Dhee Developer Brain is ready.")
         _print(tty_out, "")
-        _print(tty_out, "Wire up more repos any time:")
-        _print(tty_out, "  cd <repo> && dhee init")
+        _print(tty_out, "Choose what shares context with Dhee:")
+        _print(tty_out, "  cd <repo-or-folder> && dhee init")
+        _print(tty_out, "  dhee init /path/to/folder")
+        _print(tty_out, "  dhee init https://github.com/org/repo.git")
         _print(tty_out, "Check savings + brain health:")
         _print(tty_out, "  dhee status")
         _print(tty_out, "Search your personal cross-repo brain:")
@@ -360,7 +371,7 @@ def run_onboard(
 def register(sub: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
     p = sub.add_parser(
         "onboard",
-        help="Interactive provider + API key setup plus optional repo linking",
+        help="Interactive provider + API key setup",
     )
     p.add_argument(
         "--provider",
@@ -375,16 +386,16 @@ def register(sub: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None
     p.add_argument(
         "--link",
         action="append",
-        metavar="PATH",
+        metavar="PATH_OR_URL",
         help=(
-            "Link this git repo non-interactively (repeatable). "
-            "Skips the interactive repo prompt."
+            "Run `dhee init` for this repo, folder, or git URL non-interactively "
+            "(repeatable; kept for installer compatibility)."
         ),
     )
     p.add_argument(
         "--skip-link-prompt",
         action="store_true",
-        help="Skip the 'which git repos to link?' step entirely.",
+        help="Deprecated no-op; onboarding no longer asks for repo paths.",
     )
     p.set_defaults(
         func=lambda args: sys.exit(

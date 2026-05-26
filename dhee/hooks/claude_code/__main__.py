@@ -425,9 +425,15 @@ def _discover_repo_config(start: str) -> dict[str, Any]:
         except Exception:
             return {}
         if isinstance(data, dict):
-            os.environ.setdefault("DHEE_REPO_ROOT", str(candidate))
+            os.environ["DHEE_REPO_ROOT"] = str(candidate)
             return {"repo_root": str(candidate), **data}
     return {}
+
+
+def _active_repo_config(payload: Any) -> dict[str, Any]:
+    """Return repo config only for workspaces opted in with ``dhee init``."""
+    cfg = _discover_repo_config(_hook_cwd(payload))
+    return cfg if cfg.get("repo_root") else {}
 
 
 def _repo_last_session(repo: str) -> dict[str, Any] | None:
@@ -601,8 +607,10 @@ def handle_session_start(payload: dict[str, Any]) -> dict[str, Any]:
     from dhee.hooks.claude_code.assembler import assemble
     from dhee.hooks.claude_code.ingest import auto_ingest_project
 
-    repo_cfg = _discover_repo_config(_hook_cwd(payload))
-    repo_root = str(repo_cfg.get("repo_root") or _hook_cwd(payload))
+    repo_cfg = _active_repo_config(payload)
+    if not repo_cfg:
+        return {}
+    repo_root = str(repo_cfg["repo_root"])
     state_store = _compiled_state_store(payload, repo=repo_root)
 
     dhee = _get_dhee()
@@ -721,9 +729,12 @@ def handle_user_prompt(payload: dict[str, Any]) -> dict[str, Any]:
     if not prompt.strip():
         return {}
 
+    repo_cfg = _active_repo_config(payload)
+    if not repo_cfg:
+        return {}
+
     dhee = _get_dhee()
-    _discover_repo_config(_hook_cwd(payload))
-    repo = os.environ.get("DHEE_REPO_ROOT") or os.getcwd()
+    repo = str(repo_cfg["repo_root"])
     state_store = _compiled_state_store(payload, repo=repo)
     try:
         state_store.observe_prompt(prompt)
@@ -833,6 +844,9 @@ def handle_pre_tool(payload: dict[str, Any]) -> dict[str, Any]:
     """Router enforcement gate. No-op unless DHEE_ROUTER_ENFORCE=1."""
     from dhee.router.pre_tool_gate import evaluate
 
+    if not _active_repo_config(payload):
+        return {}
+
     if isinstance(payload, dict):
         try:
             tool_name = str(payload.get("tool_name") or "")
@@ -863,6 +877,9 @@ def handle_post_tool(payload: dict[str, Any]) -> dict[str, Any]:
     from dhee.hooks.claude_code.signal import extract_signal
 
     if not isinstance(payload, dict):
+        return {}
+    repo_cfg = _active_repo_config(payload)
+    if not repo_cfg:
         return {}
 
     tool_name = payload.get("tool_name", "")
@@ -1048,6 +1065,10 @@ def handle_post_tool(payload: dict[str, Any]) -> dict[str, Any]:
 def handle_pre_compact(payload: dict[str, Any]) -> dict[str, Any]:
     from dhee.hooks.claude_code.assembler import assemble
 
+    repo_cfg = _active_repo_config(payload)
+    if not repo_cfg:
+        return {}
+
     dhee = _get_dhee()
 
     summary = "session compacted"
@@ -1095,6 +1116,10 @@ def handle_pre_compact(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def handle_stop(payload: dict[str, Any]) -> dict[str, Any]:
+    repo_cfg = _active_repo_config(payload)
+    if not repo_cfg:
+        return {}
+
     dhee = _get_dhee()
 
     _maybe_tail_ingest_gstack(dhee)

@@ -241,6 +241,44 @@ def test_canonical_recall_falls_back_to_db_when_vector_is_missing(tmp_path):
     memory.close()
 
 
+def test_db_lexical_recall_is_merged_when_vector_index_is_sparse(tmp_path):
+    memory = Engram(provider="mock", in_memory=True, data_dir=str(tmp_path))
+    memory.add(
+        "Unrelated local NVIDIA router project note.",
+        user_id="default",
+        infer=False,
+    )
+    memory.memory.db.add_memory(
+        {
+            "id": "db-only-chotu-worker-lesson",
+            "memory": (
+                "Chotu worker lesson: if Kimi omits worker-result JSON, recover "
+                "the diff and run Chotu-owned verification before trusting it."
+            ),
+            "user_id": "default",
+            "metadata": {
+                "dhee_memory_class": "ordinary",
+                "memory_type": "semantic",
+            },
+            "namespace": "default",
+            "memory_type": "semantic",
+            "layer": "sml",
+            "strength": 1.0,
+        }
+    )
+
+    results = memory.memory.search(
+        "Kimi omits worker-result JSON recover diff Chotu-owned verification",
+        user_id="default",
+        limit=3,
+    )["results"]
+
+    assert results
+    assert results[0]["id"] == "db-only-chotu-worker-lesson"
+    assert results[0]["recall_explanation"]["matched_memory_id"] == "db-only-chotu-worker-lesson"
+    memory.close()
+
+
 def test_repair_memory_quality_can_reindex_db_only_vectors(tmp_path):
     memory = Engram(provider="mock", in_memory=True, data_dir=str(tmp_path))
     memory_id = "legacy-vectorless-chotu-goal"

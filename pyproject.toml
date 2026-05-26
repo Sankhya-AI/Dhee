@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dhee"
-version = "7.1.0"
+version = "7.2.0"
 description = "Dhee - world memory layer and context compiler for AI agents"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -48,7 +48,7 @@ openai = ["openai>=1.0.0"]
 ollama = ["ollama>=0.4.0"]
 # Internal providers (not documented, still functional)
 nvidia = ["openai>=1.0.0"]
-zvec = ["zvec>=0.4.0"]
+zvec = ["zvec>=0.4.0; python_version >= '3.11'"]
 sqlite_vec = ["sqlite-vec>=0.1.1"]
 graph = ["kuzu>=0.11.3"]
 swe = [
@@ -80,6 +80,7 @@ all = [
     "google-genai>=1.0.0",
     "openai>=1.0.0",
     "ollama>=0.4.0",
+    "zvec>=0.4.0; python_version >= '3.11'",
     "mcp>=1.0.0; python_version >= '3.10'",
     "fastapi>=0.100.0",
     "uvicorn>=0.20.0",

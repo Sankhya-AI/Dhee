@@ -36,7 +36,8 @@ def test_install_codex_writes_native_config_and_instructions(tmp_path, monkeypat
     assert 'approval_mode = "never"' not in config_text
     assert agents_path.exists()
     instructions = agents_path.read_text(encoding="utf-8")
-    assert "primary memory, context-router" in instructions
+    assert "opt-in per workspace" in instructions
+    assert "<workspace>/.dhee/config.json" in instructions
     assert "Codex-native surfaces" in instructions
     assert "Dhee syncs Codex session logs opportunistically" in instructions
     assert "call `dhee_context_bootstrap`" in instructions

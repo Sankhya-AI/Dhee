@@ -71,6 +71,15 @@ class ContextConflictError(RuntimeError):
         self.entry_id = entry_id
         self.conflicts = conflicts or []
 
+
+@dataclass(frozen=True)
+class InitTarget:
+    root: Path
+    kind: str
+    requested: str
+    source_url: Optional[str] = None
+    cloned: bool = False
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -162,6 +171,113 @@ def _git_top(path: Path) -> Optional[Path]:
     except (subprocess.SubprocessError, OSError):
         return None
     return Path(out).resolve() if out else None
+
+
+def _looks_like_git_url(value: str | os.PathLike[str]) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    return (
+        text.startswith(("http://", "https://", "ssh://", "git://", "file://"))
+        or text.startswith("git@")
+        or text.endswith(".git")
+    )
+
+
+def _repo_dir_name_from_url(url: str) -> str:
+    text = str(url or "").rstrip("/").strip()
+    if not text:
+        return "repo"
+    tail = text.rsplit("/", 1)[-1]
+    if ":" in tail and text.startswith("git@"):
+        tail = tail.rsplit(":", 1)[-1]
+    if tail.endswith(".git"):
+        tail = tail[:-4]
+    cleaned = "".join(ch for ch in tail if ch.isalnum() or ch in {"-", "_", "."}).strip(".")
+    return cleaned or "repo"
+
+
+def _git_remote_url(repo_root: Path) -> Optional[str]:
+    if _git_top(repo_root) is None:
+        return None
+    try:
+        out = subprocess.check_output(
+            ["git", "-C", str(repo_root), "remote", "get-url", "origin"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=2.0,
+        ).strip()
+    except (subprocess.SubprocessError, OSError):
+        return None
+    return out or None
+
+
+def _clone_git_url(url: str, *, into: Optional[Path] = None) -> Path:
+    target = (into or Path.cwd()) / _repo_dir_name_from_url(url)
+    target = target.expanduser().resolve()
+    if target.exists():
+        if _git_top(target) is not None:
+            return target
+        raise ValueError(
+            f"{target} already exists and is not a git repository. "
+            "Move it, choose another parent directory, or run `dhee init` inside it."
+        )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.run(["git", "clone", url, str(target)], check=True)
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise ValueError(f"Could not clone {url}: {exc}") from exc
+    return target
+
+
+def _initialized_root(path: Path) -> Optional[Path]:
+    probe = path if path.is_dir() else path.parent
+    try:
+        probe = probe.resolve()
+    except Exception:
+        pass
+    home = Path.home().resolve()
+    for current in [probe, *probe.parents]:
+        if current == home:
+            break
+        if repo_config_path(current).is_file():
+            return current
+    return None
+
+
+def _resolve_init_target(path: str | os.PathLike[str] = ".") -> InitTarget:
+    requested = str(path or ".")
+    if _looks_like_git_url(requested):
+        cloned_path = _clone_git_url(requested)
+        repo_root = _git_top(cloned_path) or cloned_path
+        return InitTarget(
+            root=repo_root,
+            kind="git_repo",
+            requested=requested,
+            source_url=requested,
+            cloned=True,
+        )
+
+    target = _resolve(path)
+    repo_root = _git_top(target)
+    if repo_root is not None:
+        return InitTarget(
+            root=repo_root,
+            kind="git_repo",
+            requested=requested,
+            source_url=_git_remote_url(repo_root),
+            cloned=False,
+        )
+
+    if target.exists() and target.is_file():
+        target = target.parent
+    if not target.exists():
+        raise ValueError(
+            f"{target} does not exist. Create the folder first, or pass a git URL for Dhee to clone."
+        )
+    if not target.is_dir():
+        raise ValueError(f"{target} is not a directory.")
+    return InitTarget(root=target, kind="folder", requested=requested)
 
 
 def _path_within(child: Path, parent: Path) -> bool:
@@ -326,16 +442,40 @@ def _write_repo_config(repo_root: Path, cfg: Dict[str, Any]) -> None:
     _write_json(repo_config_path(repo_root), cfg)
 
 
-def _ensure_repo_skeleton(repo_root: Path) -> str:
+def _ensure_repo_skeleton(
+    repo_root: Path,
+    *,
+    kind: str = "git_repo",
+    source_url: Optional[str] = None,
+) -> str:
     """Create ``<repo>/.dhee/`` and return the repo_id (existing or new)."""
     repo_dhee_dir(repo_root).mkdir(parents=True, exist_ok=True)
     repo_context_dir(repo_root).mkdir(parents=True, exist_ok=True)
 
     cfg = _read_repo_config(repo_root)
+    changed = False
     if not cfg.get("repo_id"):
         cfg["repo_id"] = _new_id()
-        cfg["schema_version"] = SCHEMA_VERSION
+        changed = True
+    if not cfg.get("linked_at"):
         cfg["linked_at"] = _now_iso()
+        changed = True
+    updates = {
+        "schema_version": SCHEMA_VERSION,
+        "kind": kind,
+        "folder_path": str(repo_root),
+        "workspace_root": str(repo_root),
+    }
+    if source_url:
+        updates["source_url"] = source_url
+    git_remote = _git_remote_url(repo_root) if kind == "git_repo" else None
+    if git_remote:
+        updates["git_remote_url"] = git_remote
+    for key, value in updates.items():
+        if cfg.get(key) != value:
+            cfg[key] = value
+            changed = True
+    if changed:
         _write_repo_config(repo_root, cfg)
 
     entries = repo_entries_path(repo_root)
@@ -774,41 +914,51 @@ def uninstall_hooks(repo_root: Path) -> List[str]:
 
 
 def link(path: str | os.PathLike[str] = ".") -> Dict[str, Any]:
-    """Link a git repository to this machine.
+    """Link a repo or folder to this machine.
 
     Side-effects (all idempotent):
 
-    * Resolves *path* to its git root.
-    * Creates ``<repo>/.dhee/`` skeleton with ``config.json``,
+    * Resolves *path* to its git root when inside git, otherwise to the folder.
+    * Creates ``<root>/.dhee/`` skeleton with ``config.json``,
       ``context/manifest.json``, ``context/entries.jsonl``,
       ``.gitattributes``.
-    * Registers the repo in ``~/.dhee/links.json``.
-    * Mirrors the repo into ``~/.dhee/local_context_folders.json``
+    * Registers the root in ``~/.dhee/links.json``.
+    * Mirrors the root into ``~/.dhee/local_context_folders.json``
       (the existing UI workspace store) so the canvas finds it.
-    * Installs refresh hooks plus a ``pre-push`` conflict check.
+    * Installs refresh hooks plus a ``pre-push`` conflict check for git repos.
     """
-    target = _resolve(path)
-    repo_root = _git_top(target)
-    if repo_root is None:
-        raise ValueError(
-            f"{target} is not inside a git repository. "
-            "Run `git init` first or pass a path inside a checked-out repo."
-        )
+    target = _resolve_init_target(path)
+    repo_root = target.root
 
-    repo_id = _ensure_repo_skeleton(repo_root)
-    hooks = install_hooks(repo_root)
+    repo_id = _ensure_repo_skeleton(
+        repo_root,
+        kind=target.kind,
+        source_url=target.source_url,
+    )
+    hooks = install_hooks(repo_root) if target.kind == "git_repo" else []
     _mirror_workspace(repo_root, shared=True)
 
     repos = list_links()
     repos[str(repo_root)] = {
         "repo_id": repo_id,
         "linked_at": repos.get(str(repo_root), {}).get("linked_at") or _now_iso(),
+        "kind": target.kind,
+        "folder_path": str(repo_root),
+        "workspace_root": str(repo_root),
+        "source_url": target.source_url,
+        "git_remote_url": _git_remote_url(repo_root) if target.kind == "git_repo" else None,
         "hooks_installed": bool(hooks),
     }
     _save_links(repos)
 
     return {
         "repo_root": str(repo_root),
+        "folder_path": str(repo_root),
+        "kind": target.kind,
+        "requested": target.requested,
+        "source_url": target.source_url,
+        "git_remote_url": _git_remote_url(repo_root) if target.kind == "git_repo" else None,
+        "cloned": target.cloned,
         "repo_id": repo_id,
         "hooks": hooks,
         "manifest": _read_json(repo_manifest_path(repo_root), {}),
@@ -872,17 +1022,44 @@ Before reconstructing context from raw reads or shell output, prefer:
      rules, gotchas, and architectural decisions outside the markers. -->
 """
 
+_AGENTS_MD_BODY = """\
+# Dhee Native Integration
+
+This workspace has opted into Dhee with `dhee init`.
+
+Required behavior:
+- Start substantive repo/workspace tasks with `dhee_context_bootstrap` using this workspace path before local reconstruction.
+- Prefer `dhee_read`, `dhee_grep`, and `dhee_bash` for large file reads, searches, and commands so raw output stays behind pointers.
+- Use `dhee_scene_context` and `dhee_narrative_prior` as advisory memory/context priors; explicit user intent, facts, privacy, and proof gates win.
+- Keep Dhee scoped to this initialized workspace. Repos/folders without `.dhee/config.json` are vanilla unless the user explicitly opts them in with `dhee init`.
+"""
+
 
 def _claude_md_path(repo_root: Path) -> Path:
     return repo_root / "CLAUDE.md"
+
+
+def _agents_md_path(repo_root: Path) -> Path:
+    return repo_root / "AGENTS.md"
 
 
 def _build_dhee_section() -> str:
     return f"{DHEE_CLAUDE_MD_START}\n{_CLAUDE_MD_BODY.rstrip()}\n{DHEE_CLAUDE_MD_END}\n"
 
 
-def write_claude_md(repo_root: Path) -> Tuple[bool, bool]:
-    """Idempotently write the Dhee section into ``<repo>/CLAUDE.md``.
+def _build_agents_section() -> str:
+    return f"{DHEE_CLAUDE_MD_START}\n{_AGENTS_MD_BODY.rstrip()}\n{DHEE_CLAUDE_MD_END}\n"
+
+
+def _write_managed_markdown(
+    repo_root: Path,
+    path: Path,
+    *,
+    section: str,
+    label: str,
+    include_header: bool = True,
+) -> Tuple[bool, bool]:
+    """Idempotently write a marker-bracketed Dhee section.
 
     Returns ``(created, updated)``:
 
@@ -895,30 +1072,26 @@ def write_claude_md(repo_root: Path) -> Tuple[bool, bool]:
     The dev's content above and below the marker block is preserved
     verbatim; we only rewrite what's between the markers.
 
-    SECURITY: refuse to write through a symlink whose target escapes
-    the repo. ``<repo>/CLAUDE.md`` being a symlink to e.g.
+    SECURITY: refuse to write through a symlink whose target escapes the
+    workspace. ``<repo>/CLAUDE.md`` being a symlink to e.g.
     ``/etc/cron.d/something`` would otherwise let a malicious repo
     redirect Dhee's write to a path outside the dev's control.
     """
-    path = _claude_md_path(repo_root)
-
     if path.exists() or path.is_symlink():
         try:
             real = path.resolve()
             repo_real = repo_root.resolve()
-            # The resolved CLAUDE.md must live inside the repo root.
+            # The resolved managed file must live inside the workspace root.
             real.relative_to(repo_real)
         except (ValueError, OSError):
             raise ValueError(
-                f"refusing to write CLAUDE.md: {path} resolves outside "
+                f"refusing to write {label}: {path} resolves outside "
                 f"the repo root ({repo_root}). Investigate the symlink "
                 "before re-running `dhee init`."
             )
 
-    section = _build_dhee_section()
-
     if not path.exists():
-        header = f"# {repo_root.name}\n\n"
+        header = f"# {repo_root.name}\n\n" if include_header else ""
         path.write_text(header + section, encoding="utf-8")
         return True, False
 
@@ -945,6 +1118,28 @@ def write_claude_md(repo_root: Path) -> Tuple[bool, bool]:
     rebuilt = existing + suffix + "\n" + section
     path.write_text(rebuilt, encoding="utf-8")
     return False, True
+
+
+def write_claude_md(repo_root: Path) -> Tuple[bool, bool]:
+    """Idempotently write the Dhee section into ``<repo>/CLAUDE.md``."""
+    return _write_managed_markdown(
+        repo_root,
+        _claude_md_path(repo_root),
+        section=_build_dhee_section(),
+        label="CLAUDE.md",
+        include_header=True,
+    )
+
+
+def write_agents_md(repo_root: Path) -> Tuple[bool, bool]:
+    """Idempotently write the Dhee section into ``<repo>/AGENTS.md``."""
+    return _write_managed_markdown(
+        repo_root,
+        _agents_md_path(repo_root),
+        section=_build_agents_section(),
+        label="AGENTS.md",
+        include_header=True,
+    )
 
 
 def _ingest_repo_markdown(repo_root: Path, *, max_chunks: int) -> Dict[str, Any]:
@@ -1090,7 +1285,7 @@ def init(
     skip_ingest: bool = False,
     skip_first_light: bool = False,
 ) -> Dict[str, Any]:
-    """One-command on-ramp: link + index + write CLAUDE.md + first-light.
+    """One-command on-ramp: link + index + write harness instructions + first-light.
 
     Idempotent. Re-runs are cheap (SHA-skip on unchanged files,
     marker-bracketed CLAUDE.md edit, no duplicate hook entries).
@@ -1099,21 +1294,15 @@ def init(
     each section honestly — empty stages render as "no change", not
     fake reassurance.
     """
-    target = _resolve(path)
-    repo_root = _git_top(target)
-    if repo_root is None:
-        raise ValueError(
-            f"{target} is not inside a git repository. "
-            "Run `git init` first, then `dhee init`."
-        )
-
-    link_info = link(repo_root)
+    link_info = link(path)
+    repo_root = Path(str(link_info["repo_root"])).resolve()
     repo_id = str(link_info.get("repo_id") or "")
 
-    # Write CLAUDE.md first so it's part of the very first ingest pass.
-    # Otherwise the second run would chunk the freshly-written CLAUDE.md
+    # Write harness instructions first so they're part of the very first
+    # ingest pass. Otherwise the second run would chunk freshly-written files
     # and re-runs wouldn't be true no-ops.
     claude_created, claude_updated = write_claude_md(repo_root)
+    agents_created, agents_updated = write_agents_md(repo_root)
 
     ingest_summary: Dict[str, Any]
     if skip_ingest:
@@ -1130,6 +1319,11 @@ def init(
 
     return {
         "repo_root": str(repo_root),
+        "folder_path": link_info.get("folder_path") or str(repo_root),
+        "kind": link_info.get("kind") or "git_repo",
+        "source_url": link_info.get("source_url"),
+        "git_remote_url": link_info.get("git_remote_url"),
+        "cloned": bool(link_info.get("cloned")),
         "repo_id": repo_id,
         "linked_repos": linked_count,
         "hooks": link_info.get("hooks") or [],
@@ -1138,6 +1332,12 @@ def init(
             "created": claude_created,
             "updated": claude_updated,
             "unchanged": not claude_created and not claude_updated,
+        },
+        "agents_md": {
+            "path": str(_agents_md_path(repo_root)),
+            "created": agents_created,
+            "updated": agents_updated,
+            "unchanged": not agents_created and not agents_updated,
         },
         "ingest": ingest_summary,
         "first_light": first_light,
@@ -1152,7 +1352,7 @@ def unlink(path: str | os.PathLike[str] = ".", *, remove_hooks: bool = True) -> 
     the git hooks come off.
     """
     target = _resolve(path)
-    repo_root = _git_top(target) or target
+    repo_root = _git_top(target) or _initialized_root(target) or (target if target.is_dir() else target.parent)
 
     repos = list_links()
     removed = repos.pop(str(repo_root), None)
@@ -1195,7 +1395,7 @@ def refresh(repo: str | os.PathLike[str] | None = None) -> List[Dict[str, Any]]:
     targets: List[Path] = []
     if repo is not None:
         target = _resolve(repo)
-        root = _git_top(target) or target
+        root = _git_top(target) or _initialized_root(target) or (target if target.is_dir() else target.parent)
         targets.append(root)
     else:
         targets = [Path(p) for p in list_links().keys()]
@@ -1465,7 +1665,7 @@ def demote(
 def _resolve_repo(repo: str | os.PathLike[str] | None) -> Optional[Path]:
     if repo is not None:
         target = _resolve(repo)
-        root = _git_top(target) or target
+        root = _git_top(target) or _initialized_root(target) or (target if target.is_dir() else target.parent)
         return root
     return repo_for_path(Path.cwd())
 

@@ -233,15 +233,22 @@ class SearchPipeline:
 
         vector_results = collapse_vector_results(vector_results)
 
-        if not vector_results:
-            vector_results = self._db_lexical_fallback(
-                query_terms=query_terms,
-                effective_filters=effective_filters,
-                user_id=user_id,
-                agent_id=agent_id,
-                limit=limit * 2,
-                min_strength=min_strength,
-            )
+        lexical_results = self._db_lexical_fallback(
+            query_terms=query_terms,
+            effective_filters=effective_filters,
+            user_id=user_id,
+            agent_id=agent_id,
+            limit=limit * 2,
+            min_strength=min_strength,
+        )
+        if lexical_results:
+            merged = {resolve_memory_id(result): result for result in vector_results}
+            for result in lexical_results:
+                memory_id = resolve_memory_id(result)
+                existing = merged.get(memory_id)
+                if not existing or result.score > existing.score:
+                    merged[memory_id] = result
+            vector_results = list(merged.values())
 
         # CategoryMem: Detect relevant categories for the query
         category_processor = self._category_processor_fn()

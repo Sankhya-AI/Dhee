@@ -30,11 +30,12 @@ import os
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 
 READ_SIZE_THRESHOLD = 20 * 1024  # 20 KB
 _FLAG_ENV = "DHEE_ROUTER_ENFORCE"
+_FORCE_ENV = "DHEE_FORCE_ROUTER_ENFORCE"
 
 
 def _flag_file() -> Path:
@@ -108,6 +109,40 @@ def _candidate_repo(inp: dict[str, Any]) -> Path:
     return path
 
 
+def _initialized_workspace_root(path: Path) -> Optional[Path]:
+    """Return the nearest Dhee-initialized workspace root for *path*.
+
+    Harnesses may be installed globally, but Dhee should only steer tools in
+    workspaces the user explicitly opted into with ``dhee init``. The public
+    marker for that choice is ``<workspace>/.dhee/config.json``.
+    """
+    try:
+        probe = path if path.is_dir() else path.parent
+        probe = probe.resolve()
+    except Exception:
+        probe = Path.cwd()
+    try:
+        home = Path.home().resolve()
+    except Exception:
+        home = None
+    for current in [probe, *probe.parents]:
+        if home is not None and current == home:
+            break
+        if (current / ".dhee" / "config.json").is_file():
+            return current
+    return None
+
+
+def _force_global_enforcement() -> bool:
+    return _truthy(os.environ.get(_FORCE_ENV))
+
+
+def _input_is_initialized(inp: dict[str, Any]) -> bool:
+    if _force_global_enforcement():
+        return True
+    return _initialized_workspace_root(_candidate_repo(inp)) is not None
+
+
 def _fallback_enforcement_mode(inp: dict[str, Any]) -> str:
     if _truthy(os.environ.get("DHEE_REQUIRE_ACTIVE_CONTRACT")):
         return "deny"
@@ -147,6 +182,9 @@ def evaluate(payload: dict[str, Any]) -> dict[str, Any]:
     tool_input = payload.get("tool_input") or payload.get("input") or {}
     if not isinstance(tool_input, dict):
         tool_input = {}
+
+    if not _input_is_initialized(tool_input):
+        return {}
 
     contract_denial = _evaluate_contract_supervisor(str(tool), tool_input)
     if contract_denial:

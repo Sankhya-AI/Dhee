@@ -1,9 +1,5 @@
 prune dhee/ui/web/node_modules
-prune enterprise
-prune engram-bridge
-prune engram-enterprise
-prune engram-failure
-prune engram-heartbeat
-prune engram-identity
-prune engram-metamemory
-prune engram-policy
+
+# Source distributions are driven by pyproject package discovery and explicit
+# package-data globs. Keep this file quiet unless we intentionally add broad
+# graft rules that need pruning.

@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [7.2.0] - 2026-05-26 - Proactive workspace memory and init polish
+
+- Made Dhee workspace behavior explicitly opt-in: Codex/Claude hooks and router
+  enforcement now stay quiet outside folders initialized with `dhee init`.
+- Expanded `dhee init` and `dhee link` to support plain folders and git URLs,
+  while preserving git hooks for real repositories.
+- Added calmer `dhee init` terminal output, typo suggestions for unknown
+  commands, and built-in shell completion for bash, zsh, and fish.
+- Improved Chotu/Dhee memory retrieval quality: sparse vector results now merge
+  DB lexical recall instead of hiding exact durable memories.
+- Hardened Narrative Scene Intelligence by rejecting orphan `scene_event`
+  writes and making SceneCard summaries lead with story progress and durable
+  facts instead of evidence labels.
+- Updated installer docs/demo assets and kept PyPI metadata at
+  `Development Status :: 5 - Production/Stable`.
+
 ## [7.1.0] - 2026-05-22 - World memory layer and context compiler
 
 - Reframed Dhee as the world memory layer and context compiler for AI agents,

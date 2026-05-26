@@ -62,7 +62,7 @@ def test_curl_installer_verifies_handoff_bus():
     assert "Cross-agent handoff bus ready" in installer
     assert "from dhee.core.kernel import _get_bus" in installer
     assert "for bin_name in dhee dhee-mcp engram-bus" in installer
-    assert 'DEFAULT_PACKAGE="dhee>=7.1.0"' in installer
+    assert 'DEFAULT_PACKAGE="dhee>=7.2.0"' in installer
     assert "DHEE_INSTALL_PACKAGE" in installer
     assert "FALLBACK_PACKAGE" in installer
     assert "DHEE_INIT_REPO" in installer

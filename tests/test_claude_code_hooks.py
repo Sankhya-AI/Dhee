@@ -708,6 +708,27 @@ class TestDispatchHandlers:
         assert handle_user_prompt({"prompt": ""}) == {}
         assert handle_user_prompt({}) == {}
 
+    def test_user_prompt_noops_outside_dhee_init(self, tmp_path, monkeypatch):
+        from dhee.hooks.claude_code.__main__ import handle_user_prompt
+
+        monkeypatch.chdir(tmp_path)
+        with patch("dhee.hooks.claude_code.__main__._get_dhee") as mock_dhee:
+            assert handle_user_prompt({"prompt": "continue"}) == {}
+            mock_dhee.assert_not_called()
+
+    def test_post_tool_noops_outside_dhee_init(self, tmp_path, monkeypatch):
+        from dhee.hooks.claude_code.__main__ import handle_post_tool
+
+        monkeypatch.chdir(tmp_path)
+        with patch("dhee.hooks.claude_code.__main__._get_dhee") as mock_dhee:
+            result = handle_post_tool({
+                "tool_name": "Edit",
+                "tool_input": {"file_path": str(tmp_path / "x.py")},
+                "success": True,
+            })
+            assert result == {}
+            mock_dhee.assert_not_called()
+
     def test_user_prompt_searches_doc_chunks(self):
         """v3.3.1: UserPromptSubmit does doc-chunk retrieval, not raw memory recall."""
         from dhee.hooks.claude_code.__main__ import handle_user_prompt
