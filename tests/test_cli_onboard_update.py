@@ -40,6 +40,8 @@ def test_onboard_provider_default_and_key_paste(tmp_path, monkeypatch):
     # Onboard now points devs at `dhee init` (link + index + CLAUDE.md +
     # first-light digest) rather than the lower-level `dhee link`.
     assert "dhee init" in out
+    assert "workspace path:" not in out
+    assert "repo path:" not in out
 
 
 def test_onboard_gemini_choice(tmp_path, monkeypatch):

@@ -115,19 +115,27 @@ class TestInitBasics:
         assert "<!-- dhee:end -->" in text
         assert "Dhee — shared developer brain" in text
 
+        agents = git_repo / "AGENTS.md"
+        assert agents.is_file()
+        assert "This workspace has opted into Dhee" in agents.read_text(encoding="utf-8")
+
         # ingest summary present
         ingest = info["ingest"]
         assert ingest["status"] == "ok"
         assert ingest["files_pruned"] == 0
 
-    def test_init_non_git_errors_friendly(self, isolated_home, stub_memory, tmp_path):
+    def test_init_plain_folder_is_supported(self, isolated_home, stub_memory, tmp_path):
         from dhee import repo_link
 
         plain_dir = tmp_path / "plain"
         plain_dir.mkdir()
 
-        with pytest.raises(ValueError, match="git"):
-            repo_link.init(plain_dir)
+        info = repo_link.init(plain_dir, skip_first_light=True)
+
+        assert info["kind"] == "folder"
+        assert info["hooks"] == []
+        assert (plain_dir / ".dhee" / "config.json").is_file()
+        assert (plain_dir / "AGENTS.md").is_file()
 
     def test_init_idempotent(self, isolated_home, stub_memory, git_repo):
         """Running init twice on the same repo is a clean no-op."""

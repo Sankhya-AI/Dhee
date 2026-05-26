@@ -21,11 +21,12 @@ Usage:
 """
 
 import argparse
+import difflib
 import json
 import os
 import shutil
 import sys
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 
 def _json_out(data: Any) -> None:
@@ -191,8 +192,6 @@ def _get_model_free_memory(*, persistent_vectors: bool = False):
         )
 
         if vector_provider == "zvec":
-            import zvec  # noqa: F401
-
             collection_name = str(vector_provider_config.get("collection_name") or DEFAULT_COLLECTION)
             vector_config = VectorStoreConfig(
                 provider="zvec",
@@ -203,8 +202,6 @@ def _get_model_free_memory(*, persistent_vectors: bool = False):
                 },
             )
         elif vector_provider == "sqlite_vec":
-            import sqlite_vec  # noqa: F401
-
             collection_name = str(vector_provider_config.get("collection_name") or DEFAULT_COLLECTION)
             existing_dims = _existing_sqlite_vec_dims(sqlite_path, collection_name)
             if existing_dims is None and collection_name != "dhee_memories":
@@ -353,7 +350,7 @@ def cmd_shell(args: argparse.Namespace) -> None:
 
 
 def cmd_link(args: argparse.Namespace) -> None:
-    """Link a git repo: create <repo>/.dhee/, install hooks, register."""
+    """Link a repo or folder: create <workspace>/.dhee/ and register."""
     from dhee import repo_link
 
     info = repo_link.link(args.path or ".")
@@ -362,15 +359,76 @@ def cmd_link(args: argparse.Namespace) -> None:
         return
     print(f"Linked {info['repo_root']}")
     print(f"  repo_id      {info['repo_id']}")
-    print(f"  hooks        {', '.join(info['hooks']) or 'none'}")
+    print(f"  kind         {info.get('kind', 'git_repo')}")
+    if info.get("source_url"):
+        print(f"  source       {info.get('source_url')}")
+    print(f"  git hooks    {', '.join(info['hooks']) or 'none'}")
     manifest = info.get("manifest") or {}
     print(f"  entries      {manifest.get('entry_count', 0)}")
 
 
-def cmd_init(args: argparse.Namespace) -> None:
-    """One-command on-ramp: link + index markdown + write CLAUDE.md + first-light.
+def _shell_from_env() -> str:
+    shell = os.path.basename(os.environ.get("SHELL") or "").lower()
+    return shell if shell in {"bash", "zsh", "fish"} else "bash"
 
-    Run from inside any git checkout. Idempotent — safe to re-run.
+
+def _completion_commands() -> list[str]:
+    commands = sorted(set(COMMAND_MAP) | {"onboard", "update", "completion"})
+    return [cmd for cmd in commands if cmd]
+
+
+def _bash_completion(commands: Iterable[str]) -> str:
+    words = " ".join(commands)
+    return f"""# Dhee bash completion
+_dhee_complete() {{
+  local cur="${{COMP_WORDS[COMP_CWORD]}}"
+  if [ "$COMP_CWORD" -eq 1 ]; then
+    COMPREPLY=( $(compgen -W "{words}" -- "$cur") )
+  fi
+}}
+complete -F _dhee_complete dhee
+"""
+
+
+def _zsh_completion(commands: Iterable[str]) -> str:
+    items = " ".join(f"{cmd}" for cmd in commands)
+    return f"""#compdef dhee
+# Dhee zsh completion
+_dhee() {{
+  local -a commands
+  commands=({items})
+  if [[ $CURRENT -eq 2 ]]; then
+    compadd -- $commands
+  fi
+}}
+_dhee "$@"
+"""
+
+
+def _fish_completion(commands: Iterable[str]) -> str:
+    lines = ["# Dhee fish completion"]
+    for cmd in commands:
+        lines.append(f"complete -c dhee -f -n '__fish_is_first_arg' -a {cmd}")
+    return "\n".join(lines) + "\n"
+
+
+def cmd_completion(args: argparse.Namespace) -> None:
+    """Print a small shell-completion script for top-level commands."""
+    shell = str(getattr(args, "shell", None) or _shell_from_env()).lower()
+    commands = _completion_commands()
+    if shell == "zsh":
+        print(_zsh_completion(commands), end="")
+    elif shell == "fish":
+        print(_fish_completion(commands), end="")
+    else:
+        print(_bash_completion(commands), end="")
+
+
+def cmd_init(args: argparse.Namespace) -> None:
+    """One-command on-ramp: link + index markdown + write harness files + first-light.
+
+    Run from inside any repo/folder, pass a folder path, or pass a git URL.
+    Idempotent — safe to re-run.
     """
     from dhee import repo_link
 
@@ -389,86 +447,9 @@ def cmd_init(args: argparse.Namespace) -> None:
         _json_out(info)
         return
 
-    repo_root = info["repo_root"]
-    print(f"Dhee initialised in {repo_root}")
-    print(f"  repo_id          {info.get('repo_id', '')}")
+    from dhee.cli_pretty import render_init
 
-    hooks = info.get("hooks") or []
-    print(f"  git hooks        {', '.join(hooks) if hooks else 'none'}")
-
-    cm = info.get("claude_md") or {}
-    if cm.get("created"):
-        cm_label = "created"
-    elif cm.get("updated"):
-        cm_label = "updated"
-    else:
-        cm_label = "unchanged"
-    print(f"  CLAUDE.md        {cm_label}  ({cm.get('path', '')})")
-
-    ingest = info.get("ingest") or {}
-    status = ingest.get("status", "skipped")
-    if status == "ok":
-        bits = [
-            f"indexed {ingest.get('files_indexed', 0)}",
-            f"unchanged {ingest.get('files_unchanged', 0)}",
-            f"chunks +{ingest.get('chunks_stored', 0)}",
-        ]
-        chunks_replaced = int(ingest.get("chunks_replaced", 0) or 0)
-        files_pruned = int(ingest.get("files_pruned", 0) or 0)
-        chunks_pruned = int(ingest.get("chunks_pruned", 0) or 0)
-        if chunks_replaced:
-            bits.append(f"replaced {chunks_replaced}")
-        if files_pruned or chunks_pruned:
-            bits.append(f"pruned {files_pruned} file(s) / {chunks_pruned} chunk(s)")
-        print(f"  markdown         {', '.join(bits)}")
-    elif status == "skipped":
-        reason = ingest.get("reason", "")
-        if reason == "memory_unavailable":
-            print("  markdown         skipped — provider/API key not configured (run `dhee onboard`)")
-        elif reason == "skip_ingest":
-            print("  markdown         skipped (--skip-ingest)")
-        else:
-            print(f"  markdown         skipped ({reason})")
-    elif status == "error":
-        print(f"  markdown         error — {ingest.get('reason', 'unknown')}: {ingest.get('detail', '')}")
-    else:
-        print(f"  markdown         {status}")
-
-    print(f"  linked repos     {info.get('linked_repos', 0)} on this machine")
-
-    fl = info.get("first_light") or {}
-    hits = fl.get("hits") or []
-    print()
-    if hits:
-        print("First light — what your brain already knows about this work:")
-        for hit in hits:
-            text = (hit.get("text") or "").strip().splitlines()
-            head = text[0] if text else ""
-            head = (head[:140] + "…") if len(head) > 140 else head
-            src = hit.get("source_path") or ""
-            tag = f"  [{hit.get('score', 0):.2f}]"
-            if src:
-                # Show just the basename + parent so the line stays short.
-                from pathlib import Path as _Path
-                src_short = "/".join(_Path(src).parts[-2:])
-                print(f"{tag} {head}")
-                print(f"        ↳ {src_short}")
-            else:
-                print(f"{tag} {head}")
-    else:
-        if fl.get("status") == "skipped":
-            print("First light — skipped.")
-        else:
-            print(
-                "First light — no cross-repo learnings yet. They'll appear as you "
-                "work and `dhee promote` adds shared entries."
-            )
-
-    print()
-    print("Next:")
-    print("  dhee status            see savings + brain health")
-    print("  dhee recall \"<query>\"  search your personal brain")
-    print("  dhee inbox             live broadcasts from your other agents")
+    render_init(info)
 
 
 def cmd_inbox(args: argparse.Namespace) -> None:
@@ -3994,9 +3975,9 @@ def build_parser() -> argparse.ArgumentParser:
     # init — one-command on-ramp: link + index markdown + CLAUDE.md + first-light
     p_init = sub.add_parser(
         "init",
-        help="One-command on-ramp: wire this git repo into your developer brain",
+        help="One-command on-ramp: wire the current repo, a folder, or a git URL into Dhee",
     )
-    p_init.add_argument("path", nargs="?", default=".", help="Repo path (default: cwd)")
+    p_init.add_argument("path", nargs="?", default=".", help="Repo/folder path or git URL (default: cwd)")
     p_init.add_argument(
         "--max-chunks",
         type=int,
@@ -4048,20 +4029,31 @@ def build_parser() -> argparse.ArgumentParser:
     # link / unlink / links — personal vs repo context
     p_link = sub.add_parser(
         "link",
-        help="Link a git repo: create <repo>/.dhee/, install hooks, share context via git",
+        help="Link a repo or folder: create <workspace>/.dhee/ and register it",
     )
-    p_link.add_argument("path", nargs="?", default=".", help="Repo path (default: cwd)")
+    p_link.add_argument("path", nargs="?", default=".", help="Repo/folder path or git URL (default: cwd)")
     p_link.add_argument("--json", action="store_true", help="JSON output")
 
     p_unlink = sub.add_parser(
         "unlink", help="Remove this repo from the local link registry"
     )
-    p_unlink.add_argument("path", nargs="?", default=".", help="Repo path (default: cwd)")
+    p_unlink.add_argument("path", nargs="?", default=".", help="Repo/folder path (default: cwd)")
     p_unlink.add_argument("--keep-hooks", action="store_true", help="Leave the git hooks in place")
     p_unlink.add_argument("--json", action="store_true", help="JSON output")
 
     p_links = sub.add_parser("links", help="List repos linked on this machine")
     p_links.add_argument("--json", action="store_true", help="JSON output")
+
+    p_completion = sub.add_parser(
+        "completion",
+        help="Print shell completion for top-level Dhee commands",
+    )
+    p_completion.add_argument(
+        "--shell",
+        choices=["bash", "zsh", "fish"],
+        default=None,
+        help="Shell to generate for (default: infer from $SHELL)",
+    )
 
     # promote / demote — move things between personal and repo context
     p_promote = sub.add_parser(
@@ -4627,6 +4619,7 @@ COMMAND_MAP = {
     "why": cmd_why,
     "handoff": cmd_handoff,
     "init": cmd_init,
+    "completion": cmd_completion,
     "inbox": cmd_inbox,
     "link": cmd_link,
     "unlink": cmd_unlink,
@@ -4674,9 +4667,42 @@ COMMAND_MAP = {
 }
 
 
+def _subcommand_names(parser: argparse.ArgumentParser) -> list[str]:
+    for action in getattr(parser, "_actions", []):
+        if isinstance(action, argparse._SubParsersAction):
+            return sorted(str(name) for name in action.choices.keys())
+    return []
+
+
+def _maybe_print_command_suggestion(parser: argparse.ArgumentParser, argv: list[str]) -> bool:
+    if not argv:
+        return False
+    command = argv[0]
+    if not command or command.startswith("-"):
+        return False
+    commands = _subcommand_names(parser)
+    if command in commands:
+        return False
+    from dhee.cli_pretty import CalmPrinter
+
+    ui = CalmPrinter(file=sys.stderr)
+    matches = difflib.get_close_matches(command, commands, n=3, cutoff=0.45)
+    ui.write(f"Unknown command: {command}")
+    if matches:
+        ui.write()
+        ui.write("Did you mean:")
+        for match in matches:
+            ui.write(f"  dhee {match}")
+    ui.write()
+    ui.write("Run `dhee --help` for all commands.")
+    return True
+
+
 def main() -> None:
     """CLI entry point."""
     parser = build_parser()
+    if _maybe_print_command_suggestion(parser, sys.argv[1:]):
+        sys.exit(2)
     args = parser.parse_args()
 
     if not args.command:

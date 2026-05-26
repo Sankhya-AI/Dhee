@@ -37,13 +37,34 @@ Or use the one-command installer:
 curl -fsSL https://raw.githubusercontent.com/Sankhya-AI/Dhee/main/install.sh | sh
 ```
 
+<p align="center">
+  <img src="docs/demo/install-demo.gif" alt="Dhee curl install, provider setup, dhee init, status, and shell completion demo" width="100%">
+</p>
+
 Wire a repo:
 
 ```bash
-cd /path/to/repo
+cd /path/to/repo-or-folder
 dhee init
 dhee status
 dhee ui
+```
+
+`dhee init` is the opt-in switch. Run it in the current directory, pass a folder, or pass a git URL:
+
+```bash
+dhee init /path/to/folder
+dhee init https://github.com/org/repo.git
+```
+
+Folders that have not run `dhee init` stay vanilla in Codex and Claude Code.
+
+Shell autocomplete is built in:
+
+```bash
+dhee completion --shell zsh
+dhee completion --shell bash
+dhee completion --shell fish
 ```
 
 ## What Is Dhee?
@@ -98,7 +119,7 @@ That story gives the model anticipation. The prior is advisory, never bossy: exp
 Dhee can run model-free, but the production retrieval path is built for serious agent work:
 
 ```bash
-pip install "dhee[nvidia,zvec,mcp]"
+python3.11 -m pip install "dhee[nvidia,zvec,mcp]"
 dhee key set nvidia
 ```
 
@@ -201,7 +222,7 @@ Team governance, hosted dashboards, org policy, and managed source connectors ca
 ## Develop
 
 ```bash
-pip install -e ".[dev,nvidia,zvec,mcp]"
+python3.11 -m pip install -e ".[dev,nvidia,zvec,mcp]"
 pytest
 ```
 

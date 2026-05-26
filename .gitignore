@@ -214,6 +214,15 @@ skills-lock.json
 /paper/
 /memory/
 docs/demo/
+!docs/demo/
+docs/demo/*
+!docs/demo/demo.gif
+!docs/demo/demo.sh
+!docs/demo/demo.tape
+!docs/demo/install-demo.gif
+!docs/demo/install-demo.mp4
+!docs/demo/install-demo.tape
+!docs/demo/install-stage-*.png
 apps/memory-os-chrome-extension/
 apps/memory-os-macos/
 

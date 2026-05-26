@@ -228,6 +228,9 @@ class TestEnforcementGate:
 
     def _turn_on(self, router_tmp):
         (router_tmp / "enforce").write_text("1\n")
+        cfg = router_tmp / ".dhee" / "config.json"
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(json.dumps({"repo_id": "test", "schema_version": 1}))
 
     def test_on_allows_small_read(self, router_tmp, tmp_path):
         self._turn_on(router_tmp)
@@ -245,6 +248,23 @@ class TestEnforcementGate:
         r = evaluate({"tool_name": "Read", "tool_input": {"file_path": str(big)}})
         assert r.get("permissionDecision") == "deny"
         assert "mcp__dhee__dhee_read" in r.get("additionalContext", "")
+
+    def test_on_noops_outside_initialized_workspace(self, router_tmp, tmp_path):
+        self._turn_on(router_tmp)
+        outside = tmp_path.parent / f"vanilla-{tmp_path.name}"
+        outside.mkdir()
+        big = outside / "big.py"
+        big.write_text("x" * (30 * 1024))
+
+        from dhee.router.pre_tool_gate import evaluate
+
+        r = evaluate({"tool_name": "Read", "tool_input": {"file_path": str(big)}})
+        assert r == {}
+        r = evaluate({
+            "tool_name": "Bash",
+            "tool_input": {"cwd": str(outside), "command": "git log --oneline"},
+        })
+        assert r == {}
 
     def test_on_allows_ranged_read(self, router_tmp, tmp_path):
         self._turn_on(router_tmp)

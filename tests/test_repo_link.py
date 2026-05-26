@@ -86,13 +86,19 @@ class TestLink:
         # Skeleton and hooks should still be present
         assert (git_repo / ".dhee" / "config.json").is_file()
 
-    def test_link_outside_git_repo_raises(self, isolated_home, tmp_path):
+    def test_link_plain_folder_creates_skeleton_without_hooks(self, isolated_home, tmp_path):
         from dhee import repo_link
 
-        non_repo = tmp_path / "loose"
-        non_repo.mkdir()
-        with pytest.raises(ValueError):
-            repo_link.link(non_repo)
+        folder = tmp_path / "loose"
+        folder.mkdir()
+        info = repo_link.link(folder)
+
+        assert info["kind"] == "folder"
+        assert info["hooks"] == []
+        assert (folder / ".dhee" / "config.json").is_file()
+        cfg = json.loads((folder / ".dhee" / "config.json").read_text())
+        assert cfg["kind"] == "folder"
+        assert cfg["folder_path"] == str(folder.resolve())
 
     def test_link_registers_in_links_json(self, isolated_home, git_repo):
         from dhee import repo_link
@@ -112,6 +118,29 @@ class TestLink:
         assert str(git_repo.resolve()) in folders
         assert folders[str(git_repo.resolve())]["shared"] is True
         assert folders[str(git_repo.resolve())]["linked"] is True
+
+    def test_link_git_url_clones_then_links(self, isolated_home, tmp_path, monkeypatch):
+        from dhee import repo_link
+
+        source = tmp_path / "source"
+        source.mkdir()
+        subprocess.run(["git", "init", "-q", str(source)], check=True)
+        subprocess.run(["git", "-C", str(source), "config", "user.email", "test@test"], check=True)
+        subprocess.run(["git", "-C", str(source), "config", "user.name", "test"], check=True)
+        (source / "README.md").write_text("hello\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(source), "add", "README.md"], check=True)
+        subprocess.run(["git", "-C", str(source), "commit", "-qm", "init"], check=True)
+
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        monkeypatch.chdir(dest)
+        info = repo_link.link(f"file://{source}")
+
+        cloned = dest / "source"
+        assert info["cloned"] is True
+        assert info["kind"] == "git_repo"
+        assert Path(info["repo_root"]) == cloned.resolve()
+        assert (cloned / ".dhee" / "config.json").is_file()
 
     def test_link_preserves_existing_user_hook(self, isolated_home, git_repo):
         from dhee import repo_link

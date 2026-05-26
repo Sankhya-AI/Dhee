@@ -59,3 +59,15 @@ Target agent profile: `Codex/agent-runner`.
 
 
 
+
+<!-- dhee:start -->
+# Dhee Native Integration
+
+This workspace has opted into Dhee with `dhee init`.
+
+Required behavior:
+- Start substantive repo/workspace tasks with `dhee_context_bootstrap` using this workspace path before local reconstruction.
+- Prefer `dhee_read`, `dhee_grep`, and `dhee_bash` for large file reads, searches, and commands so raw output stays behind pointers.
+- Use `dhee_scene_context` and `dhee_narrative_prior` as advisory memory/context priors; explicit user intent, facts, privacy, and proof gates win.
+- Keep Dhee scoped to this initialized workspace. Repos/folders without `.dhee/config.json` are vanilla unless the user explicitly opts them in with `dhee init`.
+<!-- dhee:end -->

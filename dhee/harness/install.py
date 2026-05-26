@@ -665,15 +665,17 @@ def _status_hermes(config: Dict[str, Any]) -> Dict[str, Any]:
 def _codex_instructions() -> str:
     return (
         "# Dhee Native Integration\n\n"
-        "Dhee is the primary memory, context-router, and shared continuity layer for this Codex session.\n\n"
+        "Dhee is installed as the memory, context-router, and shared continuity layer, but it is opt-in per workspace.\n\n"
         "Codex-native surfaces:\n"
         "- Dhee is registered in `~/.codex/config.toml` as the Codex MCP server.\n"
         "- This global `~/.codex/AGENTS.md` block is loaded by Codex on every session.\n"
+        "- A workspace becomes Dhee-native only after the user runs `dhee init` there, creating `<workspace>/.dhee/config.json` and repo-local `AGENTS.md` guidance.\n"
         "- The Dhee MCP server advertises context-first instructions during MCP initialization.\n"
-        "- Dhee syncs Codex session logs opportunistically on Dhee context and collaboration calls.\n\n"
+        "- Dhee syncs Codex session logs opportunistically on Dhee context and collaboration calls for initialized workspaces.\n\n"
         "Required behavior:\n"
-        "- Start every substantive repo/workspace task with Dhee's router path before local reconstruction.\n"
-        "- First call `dhee_context_bootstrap` with the absolute repo path before shell/file exploration.\n"
+        "- First check whether the current repo/folder has `<workspace>/.dhee/config.json`. If it does not, keep the session vanilla and do not call Dhee tools unless the user explicitly asks.\n"
+        "- In initialized workspaces, start substantive repo/workspace tasks with Dhee's router path before local reconstruction.\n"
+        "- First call `dhee_context_bootstrap` with the initialized workspace path before shell/file exploration.\n"
         "- Treat `dhee_context_bootstrap` as the normal one-call replacement for startup `dhee_handoff`, `dhee_shared_task`, `dhee_shared_task_results`, and `dhee_inbox` checks.\n"
         "- Fall back to the separate startup tools only when bootstrap is unavailable or you need a specific legacy call.\n"
         "- When the user says continue, resume, previous, shared context, or UI context, treat Dhee handoff/shared-task results as the source of continuity.\n"
@@ -682,7 +684,7 @@ def _codex_instructions() -> str:
         "- Search promoted learnings with `dhee_search_learnings` when prior Dhee/Hermes self-evolution may apply.\n"
         "- After completing a substantial native tool action, refresh Dhee collaboration context with `dhee_inbox` before continuing on shared work.\n"
         "- When you discover context another active agent needs now, call `dhee_broadcast` instead of waiting for session end.\n"
-        "- Treat Dhee memories, artifacts, repo-shared context, and shared-task results as the canonical reusable context for this repo.\n"
+        "- Treat Dhee memories, artifacts, repo-shared context, and shared-task results as canonical reusable context only for initialized workspaces.\n"
     )
 
 

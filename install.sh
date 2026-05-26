@@ -8,15 +8,14 @@
 #   2. Installs the dhee package
 #   3. Symlinks `dhee` and `dhee-mcp` into ~/.local/bin
 #   4. Wires Claude Code (hooks + MCP + router) if available
-#   5. Runs `dhee onboard` — provider picker, API key paste,
-#      and optional git repo linking
+#   5. Runs `dhee onboard` — provider picker + API key paste
 #   6. Shows `dhee ui` so the developer can inspect the local brain
 #
 # Non-interactive: pass DHEE_PROVIDER=openai DHEE_API_KEY=sk-... to skip
-# the prompts entirely (CI-friendly). Set DHEE_INIT_REPO=/path/to/repo to
-# wire a git repo non-interactively after install. Set
-# DHEE_INIT_SKIP_INGEST=1 for CI smoke tests that should link the repo without
-# calling an embedding provider.
+# the prompts entirely (CI-friendly). Set DHEE_INIT_REPO to a repo path,
+# folder path, or git URL to run `dhee init` non-interactively after install.
+# Set DHEE_INIT_SKIP_INGEST=1 for CI smoke tests that should link the
+# workspace without calling an embedding provider.
 #
 # Requires: Python 3.9+  (Claude Code CLI optional)
 set -e
@@ -25,21 +24,21 @@ DHEE_HOME="$HOME/.dhee"
 VENV_DIR="$DHEE_HOME/.venv"
 BIN_DIR="$HOME/.local/bin"
 MIN_PYTHON="3.9"
-DEFAULT_PACKAGE="dhee>=7.1.0"
+DEFAULT_PACKAGE="dhee>=7.2.0"
 PACKAGE="${DHEE_INSTALL_PACKAGE:-$DEFAULT_PACKAGE}"
 FALLBACK_PACKAGE="${DHEE_FALLBACK_PACKAGE:-git+https://github.com/Sankhya-AI/Dhee.git@main}"
 
 # --- Colors ---
 if [ -t 1 ]; then
-    BOLD="\033[1m" GREEN="\033[32m" YELLOW="\033[33m" RED="\033[31m" DIM="\033[2m" RESET="\033[0m"
+    BOLD="\033[1m" AMBER="\033[38;5;208m" RED="\033[31m" DIM="\033[2m" RESET="\033[0m"
 else
-    BOLD="" GREEN="" YELLOW="" RED="" DIM="" RESET=""
+    BOLD="" AMBER="" RED="" DIM="" RESET=""
 fi
 
-info()  { printf "${GREEN}>${RESET} %s\n" "$1"; }
-warn()  { printf "${YELLOW}!${RESET} %s\n" "$1"; }
+info()  { printf "> %s\n" "$1"; }
+warn()  { printf "${AMBER}!${RESET} %s\n" "$1"; }
 error() { printf "${RED}x${RESET} %s\n" "$1" >&2; exit 1; }
-done_() { printf "${GREEN}✓${RESET} %s\n" "$1"; }
+done_() { printf "${BOLD}✓${RESET} %s\n" "$1"; }
 
 pip_install_package() {
     "$VENV_DIR/bin/pip" install --upgrade --force-reinstall --no-cache-dir "$1" -q
@@ -189,18 +188,17 @@ ONBOARD_STATUS=0
 if [ "$NONINTERACTIVE_DONE" = "1" ]; then
     info "Skipping interactive onboarding"
 else
-    # Interactive: onboard reads from /dev/tty so this works under curl | sh.
-    if [ -r /dev/tty ]; then
-        "$VENV_DIR/bin/dhee" onboard < /dev/tty || ONBOARD_STATUS=$?
-    else
-        warn "No TTY detected — skipping interactive onboarding."
-        warn "Run 'dhee onboard' manually to pick a provider and paste your API key."
+    # Interactive: `dhee onboard` opens /dev/tty itself when available and
+    # returns a friendly nonzero status when no terminal is attached.
+    "$VENV_DIR/bin/dhee" onboard || ONBOARD_STATUS=$?
+    if [ "$ONBOARD_STATUS" -ne 0 ]; then
+        warn "Interactive onboarding skipped — run 'dhee onboard' from a terminal to pick a provider and paste your API key."
         ONBOARD_STATUS=0
     fi
 fi
 
 if [ -n "${DHEE_INIT_REPO:-}" ]; then
-    info "Wiring git repo: ${DHEE_INIT_REPO}"
+    info "Wiring repo/folder: ${DHEE_INIT_REPO}"
     INIT_FLAGS=""
     [ "${DHEE_INIT_SKIP_INGEST:-}" = "1" ] && INIT_FLAGS="$INIT_FLAGS --skip-ingest"
     [ "${DHEE_INIT_SKIP_FIRST_LIGHT:-}" = "1" ] && INIT_FLAGS="$INIT_FLAGS --skip-first-light"
@@ -208,13 +206,14 @@ if [ -n "${DHEE_INIT_REPO:-}" ]; then
     if "$VENV_DIR/bin/dhee" init "$DHEE_INIT_REPO" $INIT_FLAGS >/dev/null 2>&1; then
         done_ "Repo wired into Dhee"
     else
-        warn "Repo wire-up failed — run 'cd ${DHEE_INIT_REPO} && dhee init' manually for details"
+        warn "Repo/folder wire-up failed — run 'dhee init ${DHEE_INIT_REPO}' manually for details"
     fi
 fi
 
 # --- Done ---
-printf "\n${BOLD}${GREEN}Dhee is ready.${RESET}\n"
-printf "  Wire up a repo:  ${BOLD}cd /path/to/repo && dhee init${RESET}\n"
+printf "\n${BOLD}Dhee is ready.${RESET}\n"
+printf "  Wire up context: ${BOLD}cd /path/to/repo-or-folder && dhee init${RESET}\n"
+printf "                   ${BOLD}dhee init /path/to/folder${RESET} or ${BOLD}dhee init <git-url>${RESET}\n"
 printf "  Open the UI:     ${BOLD}dhee ui${RESET}   ${DIM}(local command center, folders canvas, firewall)${RESET}\n"
 printf "  Update later:    ${BOLD}dhee update${RESET}\n\n"
 printf "${DIM}  Status:    dhee status            (savings + brain health)${RESET}\n"

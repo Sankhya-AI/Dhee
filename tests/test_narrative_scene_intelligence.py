@@ -243,6 +243,52 @@ def test_scene_lifecycle_creates_cto_series_episode_events_and_card(tmp_path):
     assert "raw_transcript" not in str(end["card"])
 
 
+def test_scene_event_rejects_unknown_scene_ids(tmp_path):
+    db = SQLiteManager(str(tmp_path / "event-guard.db"))
+    service = NarrativeSceneService(db)
+
+    result = service.scene_event(
+        scene_id="scene_budget_missing",
+        event_type="worker_result",
+        summary="This event should not be orphaned.",
+    )
+
+    assert result == {"error": "scene not found"}
+    with db._get_connection() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM scene_events").fetchone()[0]
+    assert count == 0
+
+
+def test_scene_card_summary_prefers_story_over_evidence_labels(tmp_path):
+    db = SQLiteManager(str(tmp_path / "summary-quality.db"))
+    service = NarrativeSceneService(db)
+
+    start = service.scene_start(
+        user_id="default",
+        agent_id="codex",
+        agent_category="coding_agent",
+        source_app="codex",
+        namespace="repo:dhee",
+        query="Store proactive Chotu memory philosophy",
+        intent_type="memory_consolidation",
+        action_lane="planning",
+        categories=["chotu", "dhee", "memory_quality"],
+    )
+
+    end = service.scene_end(
+        scene_id=start["scene"]["id"],
+        outcome="Stored proactive memory philosophy.",
+        outcome_status="success",
+        story_progress_delta="Dhee now preserves Chotu's proactive-agent purpose.",
+        durable_facts=["Chotu uses Dhee memory to anticipate user needs."],
+        evidence=[{"type": "memory_id", "id": "mem-1"}],
+    )
+
+    assert end["card"]["summary"].startswith("Dhee now preserves Chotu's proactive-agent purpose.")
+    assert "Chotu uses Dhee memory to anticipate user needs." in end["card"]["summary"]
+    assert "scene evidence:" not in end["card"]["summary"][:80]
+
+
 def test_scene_end_distills_episode_season_and_series_rollups_with_llm(tmp_path):
     db = SQLiteManager(str(tmp_path / "llm-rollups.db"))
     rollup_llm = FakeRollupLLM()

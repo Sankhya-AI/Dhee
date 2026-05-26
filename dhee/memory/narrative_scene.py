@@ -561,6 +561,8 @@ class NarrativeSceneService:
     ) -> Dict[str, Any]:
         if not scene_id:
             return {"error": "scene_id is required"}
+        if not self.db.get_scene(scene_id):
+            return {"error": "scene not found"}
         event_payload = payload if isinstance(payload, dict) else {}
         if not summary and event_payload:
             summary = _payload_event_summary(event_payload, event_type)
@@ -631,17 +633,32 @@ class NarrativeSceneService:
         consolidation_payloads = _consolidation_payloads(extra_evidence)
         event_summaries = [event["summary"] for event in events if event.get("summary")]
         evidence_summaries = [_evidence_summary(item) for item in extra_evidence if _evidence_summary(item)]
+        explicit_durable_facts = _as_text_list(durable_facts, limit=10, item_limit=500)
+        summary_parts = [
+            story_progress_delta,
+            outcome,
+            *explicit_durable_facts[:3],
+            scene.get("summary"),
+            scene.get("title"),
+            scene.get("action"),
+            *event_summaries,
+            *evidence_summaries,
+        ]
+        deduped_summary_parts = []
+        seen_summary_parts = set()
+        for part in summary_parts:
+            text = _clip(str(part or "").strip(), 320)
+            if not text or text in seen_summary_parts:
+                continue
+            seen_summary_parts.add(text)
+            deduped_summary_parts.append(text)
         summary = _clip(
-            " ".join(event_summaries + evidence_summaries)
-            or scene.get("summary")
-            or scene.get("title")
-            or "Scene completed.",
+            " ".join(deduped_summary_parts) or "Scene completed.",
             1200,
         )
         retrieval_tags = _normalize_categories(
             categories + _tokens(" ".join([summary, scene.get("title") or "", scene.get("action") or ""]))[:12]
         )
-        explicit_durable_facts = _as_text_list(durable_facts, limit=10, item_limit=500)
         evidence_refs = [
             {
                 "kind": event.get("event_type", "event"),
