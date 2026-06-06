@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [7.2.2] - 2026-06-06 - Split provider memory profiles
+
+- Added provider runtime profiles that let agent LLMs use OpenAI, Anthropic,
+  Gemini, Ollama, or NVIDIA while Dhee memory defaults to NVIDIA embeddings and
+  reranking.
+- Added explicit split-key routing so Chotu/agent API keys do not leak into
+  Dhee embedder or reranker configs when the providers differ.
+- Added fact-checked provider defaults for NVIDIA Nemotron embedding/reranking,
+  OpenAI GPT and embeddings, Anthropic Claude, Gemini models and embeddings,
+  and Ollama local defaults.
+- Added Anthropic LLM support and provider-profile tests for split memory
+  configurations.
+
 ## [7.2.1] - 2026-05-26 - Native agent providers
 
 - Added Dhee's universal agent runtime for provider-neutral `before`, event,

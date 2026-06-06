@@ -109,6 +109,10 @@ class EmbedderFactory:
 class LLMFactory:
     @classmethod
     def create(cls, provider: str, config: Dict[str, Any]):
+        if provider == "anthropic":
+            from dhee.llms.anthropic import AnthropicLLM
+
+            return AnthropicLLM(config)
         if provider == "gemini":
             from dhee.llms.gemini import GeminiLLM
 

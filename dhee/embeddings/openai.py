@@ -14,12 +14,21 @@ class OpenAIEmbedder(BaseEmbedder):
         except Exception as exc:
             raise ImportError("openai package is required for OpenAIEmbedder") from exc
         timeout = self.config.get("timeout", 60)
-        self.client = OpenAI(timeout=timeout)
-        self.model = self.config.get("model", "text-embedding-3-small")
+        client_kwargs = {"timeout": timeout}
+        if self.config.get("api_key"):
+            client_kwargs["api_key"] = self.config["api_key"]
+        if self.config.get("base_url"):
+            client_kwargs["base_url"] = self.config["base_url"]
+        self.client = OpenAI(**client_kwargs)
+        self.model = self.config.get("model", "text-embedding-3-large")
+        self.embedding_dims = self.config.get("embedding_dims")
 
     def embed(self, text: str, memory_action: Optional[str] = None) -> List[float]:
         try:
-            response = self.client.embeddings.create(model=self.model, input=text)
+            kwargs = {"model": self.model, "input": text}
+            if self.embedding_dims:
+                kwargs["dimensions"] = int(self.embedding_dims)
+            response = self.client.embeddings.create(**kwargs)
             return response.data[0].embedding
         except Exception as exc:
             logger.error("OpenAI embedding failed (model=%s): %s", self.model, exc)
@@ -36,7 +45,10 @@ class OpenAIEmbedder(BaseEmbedder):
         if len(texts) == 1:
             return [self.embed(texts[0], memory_action=memory_action)]
         try:
-            response = self.client.embeddings.create(model=self.model, input=texts)
+            kwargs = {"model": self.model, "input": texts}
+            if self.embedding_dims:
+                kwargs["dimensions"] = int(self.embedding_dims)
+            response = self.client.embeddings.create(**kwargs)
             # Response data is sorted by index
             sorted_data = sorted(response.data, key=lambda d: d.index)
             return [d.embedding for d in sorted_data]

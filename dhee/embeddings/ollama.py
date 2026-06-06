@@ -16,7 +16,7 @@ class OllamaEmbedder(BaseEmbedder):
     def __init__(self, config: Optional[dict] = None):
         super().__init__(config)
         self.host = self.config.get("host") or os.getenv("OLLAMA_HOST", "http://localhost:11434")
-        self.model = self.config.get("model", "nomic-embed-text")
+        self.model = self.config.get("model", "qwen3-embedding")
 
         self._client = None
         self._init_client()
