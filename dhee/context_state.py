@@ -53,6 +53,13 @@ _MAX_ADMISSION_RECEIPTS = 64
 _MAX_ASSERTIONS = 48
 _MAX_ROLLOVER_RECEIPTS = 12
 _MAX_LEDGER_WARNINGS = 32
+_HARNESS_MARKUP_TAGS = (
+    "<task-notification>",
+    "<local-command-caveat>",
+    "<system-reminder>",
+    "<command-name>",
+    "<command-message>",
+)
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_./:-]{4,}")
 _FILE_REF_RE = re.compile(r"\b([A-Za-z0-9_./-]+\.(?:py|js|jsx|ts|tsx|go|rs|java|rb|php|md|toml|yaml|yml|json))(?::(\d+))?")
 _STOPWORDS = {
@@ -179,6 +186,14 @@ def _short(text: Any, limit: int = 240) -> str:
     if len(value) <= limit:
         return value
     return value[: max(0, limit - 1)].rstrip() + "..."
+
+
+def _is_harness_markup(text: Any) -> bool:
+    """True when the text is harness-injected protocol markup (task
+    notifications, command caveats, system reminders) rather than something
+    the user said. Such blocks must never become the goal or a fact."""
+    head = str(text or "").lstrip().lower()
+    return head.startswith(_HARNESS_MARKUP_TAGS)
 
 
 def _append_unique(items: List[Any], value: Any, *, limit: int) -> List[Any]:
@@ -482,6 +497,9 @@ class ContextStateStore:
     def observe_prompt(self, prompt: str) -> Dict[str, Any]:
         with self._locked():
             state = self.load()
+            if _is_harness_markup(prompt):
+                self._append_audit({"event": "prompt_skipped_harness_markup", "task_epoch": state.get("task_epoch")})
+                return state
             text = _short(prompt, 360)
             if text and not state.get("goal"):
                 state["goal"] = text
@@ -501,6 +519,8 @@ class ContextStateStore:
             if not isinstance(session, dict):
                 return state
             summary = _short(session.get("summary") or session.get("task_summary"), 320)
+            if _is_harness_markup(summary):
+                summary = ""
             if summary and not state.get("goal"):
                 state["goal"] = summary
             elif summary:
@@ -1530,14 +1550,9 @@ class ContextStateStore:
                     evidence=[ptr] if ptr else [],
                     receipt_id=receipt_id,
                 )
-            elif command:
-                self._add_fact_to_state(
-                    state,
-                    f"Ran {command} ({result.decision})",
-                    source="routed_bash",
-                    evidence=[ptr] if ptr else [],
-                    receipt_id=receipt_id,
-                )
+            # Non-test commands stay out of facts: the evidence pointer above
+            # already records them, and "Ran <command>" lines crowd out the
+            # _MAX_FACTS budget with noise.
 
         if kind in {"routed_grep", "grep"}:
             pattern = str(metadata.get("pattern") or "").strip()

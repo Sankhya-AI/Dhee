@@ -1024,7 +1024,7 @@ class Buddhi:
 
         # 3. Belief creation for factual statements (via kernel)
         try:
-            self._maybe_create_belief(content, user_id, memory_id)
+            self._maybe_create_belief(content, user_id, memory_id, metadata=metadata)
         except Exception as exc:
             logger.warning(
                 "Buddhi on_memory_stored belief creation failed: %s",
@@ -1034,13 +1034,45 @@ class Buddhi:
 
         return intention
 
+    # Memories that record something happening (a run, a dispatch, a tool
+    # result) are provenance, not claims about the world. Turning them into
+    # beliefs produces contradiction noise between unrelated run reports.
+    _EVENT_MEMORY_TYPES = {
+        "event",
+        "notification",
+        "checkpoint",
+        "run",
+        "task_update",
+        "tool_result",
+        "worker_dispatch",
+        "worker_result",
+        "owner_feedback",
+    }
+
+    def _is_event_record(self, metadata: Optional[Dict[str, Any]]) -> bool:
+        if not isinstance(metadata, dict):
+            return False
+        mtype = str(metadata.get("type") or "").lower()
+        if mtype in self._EVENT_MEMORY_TYPES:
+            return True
+        evidence = metadata.get("evidence")
+        if isinstance(evidence, dict) and (evidence.get("run_id") or evidence.get("brief_id")):
+            return True
+        return False
+
     def _maybe_create_belief(
-        self, content: str, user_id: str, memory_id: Optional[str] = None,
+        self,
+        content: str,
+        user_id: str,
+        memory_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Detect factual claims and create/update beliefs.
 
         Simple heuristic: statements with assertion patterns are factual claims.
         """
+        if self._is_event_record(metadata):
+            return
         assertion_patterns = [
             r"\b(?:is|are|was|were|has|have|does|do)\b",
             r"\b(?:always|never|every|all|none)\b",
