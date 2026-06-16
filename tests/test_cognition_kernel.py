@@ -395,6 +395,163 @@ class TestBuddhiKernelIntegration:
         )
 
 
+# ── Belief noise prevention + cleanup ──────────────────────────────
+
+
+class TestBeliefNoiseGuard:
+    """Event/log/markup records must never become beliefs.
+
+    Such records are immutable per-occurrence, so when promoted to beliefs
+    two unrelated entries (e.g. worker-run reports) collide in the
+    contradiction detector and surface as false "contradicting beliefs".
+    """
+
+    @pytest.fixture
+    def buddhi_with_kernel(self, tmp_path):
+        from dhee.core.cognition_kernel import CognitionKernel
+        from dhee.core.buddhi import Buddhi
+        data_dir = str(tmp_path / "buddhi")
+        kernel = CognitionKernel(data_dir=data_dir)
+        return Buddhi(data_dir=data_dir, kernel=kernel), kernel
+
+    def _claims(self, kernel, user_id="u"):
+        return [
+            b.claim
+            for b in kernel.beliefs._beliefs.values()
+            if b.user_id == user_id
+        ]
+
+    def test_is_non_belief_text_classification(self):
+        from dhee.core.belief import is_non_belief_text
+
+        # Event/log/observation/markup records → not beliefs.
+        assert is_non_belief_text(
+            "Chotu received a worker result.\nRun: arun_" + "a" * 32
+        )
+        assert is_non_belief_text("ran: ls data/ && echo done")
+        assert is_non_belief_text("Task started: Run tests")
+        assert is_non_belief_text("Repository Guidelines › Project Structure")
+        assert is_non_belief_text("native setup heartbeat: OMI uses Dhee 6.1.0")
+        assert is_non_belief_text("Chotu observed useful visible screen activity")
+        # Genuine durable claims → eligible to become beliefs.
+        assert not is_non_belief_text("Auth uses JWT with 15-min expiry")
+        assert not is_non_belief_text("User prefers dark mode")
+        assert not is_non_belief_text("Production deploy uses GitHub Actions")
+        assert not is_non_belief_text(None)
+        assert not is_non_belief_text("")
+
+    def test_worker_result_event_does_not_create_belief(
+        self, buddhi_with_kernel
+    ):
+        buddhi, kernel = buddhi_with_kernel
+        buddhi.on_memory_stored(
+            "Chotu received a worker result.\nRun: arun_" + "a" * 32
+            + "\nResult: failed",
+            "u", memory_id="m1",
+        )
+        buddhi.on_memory_stored(
+            "Chotu received a worker result.\nRun: arun_" + "b" * 32
+            + "\nResult: completed",
+            "u", memory_id="m2",
+        )
+        assert self._claims(kernel) == []
+        # Two unrelated run reports → no contradictions surfaced.
+        assert kernel.beliefs.get_contradictions("u") == []
+
+    def test_event_metadata_also_skips_belief(self, buddhi_with_kernel):
+        buddhi, kernel = buddhi_with_kernel
+        # Metadata-typed event (no structural content signature) still skips.
+        buddhi.on_memory_stored(
+            "The deploy finished and everything works as expected",
+            "u", memory_id="m1",
+            metadata={"type": "worker_result", "evidence": {"run_id": "r1"}},
+        )
+        assert self._claims(kernel) == []
+
+    def test_real_fact_still_becomes_belief(self, buddhi_with_kernel):
+        buddhi, kernel = buddhi_with_kernel
+        buddhi.on_memory_stored(
+            "Auth uses JWT with 15-min expiry and refresh tokens",
+            "u", memory_id="m1",
+        )
+        assert any("Auth uses JWT" in c for c in self._claims(kernel))
+
+    def test_purge_noise_beliefs_retracts_only_noise(self, tmp_path):
+        from dhee.core.belief import (
+            BeliefStore, BeliefLifecycleStatus, BeliefStatus,
+        )
+
+        store = BeliefStore(data_dir=str(tmp_path / "beliefs"))
+        store.add_belief(
+            "u", "Chotu received a worker result.\nRun: arun_" + "a" * 32,
+            "general", 0.9,
+        )
+        store.add_belief(
+            "u", "Repository Guidelines › Project Structure › dhee/",
+            "general", 0.5,
+        )
+        store.add_belief(
+            "u", "Auth uses JWT with 15-min expiry", "programming", 0.8,
+        )
+
+        purged = store.purge_noise_beliefs()
+        assert len(purged) == 2
+
+        active = [
+            b for b in store._beliefs.values()
+            if b.lifecycle_status == BeliefLifecycleStatus.ACTIVE
+        ]
+        assert len(active) == 1
+        assert "Auth uses JWT" in active[0].claim
+        # Tombstoned, not deleted — audit trail preserved.
+        tombstoned = [
+            b for b in store._beliefs.values()
+            if b.lifecycle_status == BeliefLifecycleStatus.TOMBSTONED
+        ]
+        assert len(tombstoned) == 2
+        assert all(
+            b.truth_status == BeliefStatus.RETRACTED for b in tombstoned
+        )
+
+    def test_purge_is_idempotent_one_time_migration(self, tmp_path):
+        from dhee.core.belief import BeliefStore, BeliefLifecycleStatus
+
+        data_dir = str(tmp_path / "beliefs")
+        store = BeliefStore(data_dir=data_dir)
+        store.add_belief(
+            "u", "Chotu received a worker result.\nRun: arun_" + "c" * 32,
+            "general", 0.9,
+        )
+        # Migration runs once on init; run it explicitly here too.
+        store.purge_noise_beliefs()
+        store.close()
+
+        # New belief added after the marker is set, with a noise shape.
+        store2 = BeliefStore(data_dir=data_dir)
+        active = [
+            b for b in store2._beliefs.values()
+            if b.lifecycle_status == BeliefLifecycleStatus.ACTIVE
+        ]
+        # The pre-existing noise belief stays tombstoned across reopen.
+        assert not any("worker result" in b.claim.lower() for b in active)
+        store2.close()
+
+    def test_purge_dry_run_changes_nothing(self, tmp_path):
+        from dhee.core.belief import BeliefStore, BeliefLifecycleStatus
+
+        store = BeliefStore(data_dir=str(tmp_path / "beliefs"))
+        store.add_belief(
+            "u", "ran: pytest -q && echo done", "general", 0.5,
+        )
+        preview = store.purge_noise_beliefs(dry_run=True)
+        assert len(preview) == 1
+        active = [
+            b for b in store._beliefs.values()
+            if b.lifecycle_status == BeliefLifecycleStatus.ACTIVE
+        ]
+        assert len(active) == 1
+
+
 # ── Dhee + Kernel integration ──────────────────────────────────────
 
 

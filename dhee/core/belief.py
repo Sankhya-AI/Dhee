@@ -39,6 +39,42 @@ logger = logging.getLogger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
+import re as _re
+
+# Structural signatures of memory content that is an event/log/observation or
+# injected markup rather than a durable factual claim. Such content must never
+# become a belief: it is immutable per-occurrence, so two unrelated records
+# (e.g. two worker-run reports) collide in the contradiction detector and
+# surface as false "contradicting beliefs". Each pattern is deliberately
+# specific so genuine claims ("Auth uses JWT...", "User prefers dark mode")
+# are never matched.
+_NON_BELIEF_CONTENT_PATTERNS = (
+    _re.compile(r"\barun_[0-9a-f]{12,}\b", _re.IGNORECASE),   # run-scoped id
+    _re.compile(r"^\s*(?:ran|run)\s*:\s", _re.IGNORECASE),    # command echo
+    _re.compile(r"^\s*task started\s*:", _re.IGNORECASE),     # task-status event
+    _re.compile(r"\bheartbeat\s*:", _re.IGNORECASE),          # heartbeat ping
+    _re.compile(r"›"),                                   # › doc/markup breadcrumb
+    _re.compile(
+        r"observed useful visible screen activity", _re.IGNORECASE
+    ),                                                        # passive screen obs
+    _re.compile(
+        r"chotu (?:received a worker result|dispatched a bounded worker"
+        r"|owner feedback for runtime|browser observation)",
+        _re.IGNORECASE,
+    ),                                                        # runtime-loop events
+)
+
+
+def is_non_belief_text(text: Optional[str]) -> bool:
+    """True when ``text`` is an event/log/observation/markup record.
+
+    Shared by the belief-creation guard (prevention) and the noise-purge
+    maintenance pass (cleanup) so both agree on exactly what is not a belief.
+    """
+    if not text:
+        return False
+    return any(pattern.search(text) for pattern in _NON_BELIEF_CONTENT_PATTERNS)
+
 
 def _now() -> float:
     return time.time()
@@ -520,6 +556,7 @@ class BeliefStore:
         self._ensure_schema()
         self._migrate_legacy_json()
         self._load()
+        self._purge_noise_beliefs_once()
 
     def close(self) -> None:
         """Close the persistent connection for clean shutdown."""
@@ -841,6 +878,86 @@ class BeliefStore:
             )
 
         self._upsert_node_conn(conn, belief)
+
+    # ------------------------------------------------------------------
+    # Noise purge (one-time cleanup of pre-guard pollution)
+    # ------------------------------------------------------------------
+
+    _NOISE_PURGE_VERSION = "v5_noise_belief_purge"
+
+    def _purge_noise_beliefs_once(self) -> None:
+        """Retract event/log/markup beliefs created before the buddhi guard.
+
+        Older stores were polluted before belief creation learned to skip
+        event records (worker-run reports, command echoes, screen
+        observations, injected markup). Those entries surface as false
+        "contradicting beliefs". Run a single idempotent cleanup, gated by a
+        ``schema_migrations`` marker so it executes exactly once per store.
+        """
+        try:
+            with self._get_connection() as conn:
+                already = conn.execute(
+                    "SELECT 1 FROM schema_migrations WHERE version = ?",
+                    (self._NOISE_PURGE_VERSION,),
+                ).fetchone()
+                if already:
+                    return
+            purged = self.purge_noise_beliefs()
+            with self._get_connection() as conn:
+                conn.execute(
+                    "INSERT OR IGNORE INTO schema_migrations (version)"
+                    " VALUES (?)",
+                    (self._NOISE_PURGE_VERSION,),
+                )
+            if purged:
+                logger.info(
+                    "Retracted %d non-belief noise entries from %s",
+                    len(purged), self._db_path,
+                )
+        except Exception:
+            # Cleanup is best-effort; never block store init on it.
+            logger.debug("Noise-belief purge skipped", exc_info=True)
+
+    def purge_noise_beliefs(
+        self, user_id: Optional[str] = None, dry_run: bool = False,
+    ) -> List[Tuple[str, str]]:
+        """Tombstone active beliefs whose claim is an event/log/markup record.
+
+        Returns ``(belief_id, claim_excerpt)`` for each entry retracted (or
+        that would be, when ``dry_run``). Tombstoning is reversible via the
+        event log; nothing is hard-deleted.
+        """
+        targets: List[Tuple[str, str]] = []
+        for belief in list(self._beliefs.values()):
+            if user_id is not None and belief.user_id != user_id:
+                continue
+            if belief.lifecycle_status != BeliefLifecycleStatus.ACTIVE:
+                continue
+            if belief.protection_level == BeliefProtectionLevel.PINNED:
+                continue
+            if not is_non_belief_text(belief.claim):
+                continue
+            targets.append((belief.id, belief.claim[:80]))
+
+        if dry_run or not targets:
+            return targets
+
+        with self._get_connection() as conn:
+            for belief_id, _ in targets:
+                belief = self._beliefs.get(belief_id)
+                if belief is None:
+                    continue
+                before_state = self._snapshot(belief)
+                belief.lifecycle_status = BeliefLifecycleStatus.TOMBSTONED
+                belief.truth_status = BeliefStatus.RETRACTED
+                belief.updated_at = _now()
+                self._append_event_conn(
+                    conn, belief, "tombstoned", before_state,
+                    actor="system",
+                    reason="Retracted: event/log/markup record, not a belief",
+                )
+                self._beliefs[belief.id] = belief
+        return targets
 
     # ------------------------------------------------------------------
     # Internal write helpers

@@ -42,6 +42,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from dhee.core.belief import is_non_belief_text
 from dhee.core.intention import Intention  # re-export for backward compat
 
 logger = logging.getLogger(__name__)
@@ -1071,7 +1072,11 @@ class Buddhi:
 
         Simple heuristic: statements with assertion patterns are factual claims.
         """
-        if self._is_event_record(metadata):
+        # Event/log/observation/markup records are not beliefs: by metadata
+        # (run-scoped) or by structural content signature (command echoes,
+        # screen observations, doc breadcrumbs, heartbeats). Promoting them
+        # pollutes the belief graph and surfaces as false contradictions.
+        if self._is_event_record(metadata) or is_non_belief_text(content):
             return
         assertion_patterns = [
             r"\b(?:is|are|was|were|has|have|does|do)\b",
