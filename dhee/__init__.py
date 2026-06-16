@@ -50,7 +50,7 @@ from dhee.memory.admission import (
 # Default import remains model-free for backwards compatibility.
 Memory = CoreMemory
 
-__version__ = "7.2.1"
+__version__ = "7.2.3"
 __all__ = [
     # Memory classes
     "Engram",

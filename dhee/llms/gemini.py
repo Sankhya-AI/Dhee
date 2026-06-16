@@ -16,7 +16,7 @@ class GeminiLLM(BaseLLM):
         if not self.api_key:
             raise ValueError("Gemini API key not provided. Set GEMINI_API_KEY or pass api_key in config.")
 
-        self.model = self.config.get("model", "gemini-2.0-flash")
+        self.model = self.config.get("model", "gemini-2.5-pro")
         self.temperature = self.config.get("temperature", 0.1)
         self.max_tokens = self.config.get("max_tokens", 1024)
         self._client = genai.Client(api_key=self.api_key)

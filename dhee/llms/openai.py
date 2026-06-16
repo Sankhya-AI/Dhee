@@ -14,8 +14,13 @@ class OpenAILLM(BaseLLM):
         except Exception as exc:
             raise ImportError("openai package is required for OpenAILLM") from exc
         timeout = self.config.get("timeout", 60)
-        self.client = OpenAI(timeout=timeout)
-        self.model = self.config.get("model", "gpt-4o-mini")
+        client_kwargs = {"timeout": timeout}
+        if self.config.get("api_key"):
+            client_kwargs["api_key"] = self.config["api_key"]
+        if self.config.get("base_url"):
+            client_kwargs["base_url"] = self.config["base_url"]
+        self.client = OpenAI(**client_kwargs)
+        self.model = self.config.get("model", "gpt-5.2")
         self.temperature = self.config.get("temperature", 0.1)
         self.max_tokens = self.config.get("max_tokens", 1000)
 

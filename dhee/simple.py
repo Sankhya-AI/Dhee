@@ -43,6 +43,7 @@ from dhee.provider_defaults import (
     DEFAULT_NVIDIA_LLM_MODEL,
     DEFAULT_PROVIDER,
     embedding_dims_for,
+    provider_runtime_profile,
 )
 
 logger = logging.getLogger(__name__)
@@ -275,7 +276,7 @@ class Engram:
                 and existing_embedding_dims != provider_embedding_dims
                 and not preserve_existing_dims
             ):
-                vector_collection_name = f"{collection_name}_nvidia_{provider_embedding_dims}"
+                vector_collection_name = f"{collection_name}_{collection_provider}_{provider_embedding_dims}"
 
         if in_memory:
             vector_config = VectorStoreConfig(
@@ -295,8 +296,9 @@ class Engram:
                 },
             )
 
+        provider_profile = provider_runtime_profile(self._provider)
         llm_provider = "mock" if self._provider == "mock" else self._provider
-        embedder_provider = "simple" if self._provider == "mock" else self._provider
+        embedder_provider = "simple" if self._provider in {"mock", "anthropic"} else self._provider
         if (
             preserve_existing_dims
             and existing_embedding_dims
@@ -312,19 +314,14 @@ class Engram:
             )
         llm_kwargs: Dict[str, Any] = {}
         embedder_kwargs: Dict[str, Any] = {}
-        if llm_provider == "nvidia":
-            llm_kwargs["config"] = {
-                "model": DEFAULT_NVIDIA_LLM_MODEL,
-                "temperature": 0.2,
-                "max_tokens": 4096,
-            }
+        if llm_provider != "mock":
+            llm_kwargs["config"] = dict(provider_profile.get("llm_config") or {})
         if embedder_provider == "simple":
             embedder_kwargs["config"] = {"embedding_dims": embedding_dims}
-        elif embedder_provider == "nvidia":
-            embedder_kwargs["config"] = {
-                "model": DEFAULT_NVIDIA_EMBEDDER_MODEL,
-                "embedding_dims": embedding_dims,
-            }
+        else:
+            embedder_config = dict(provider_profile.get("embedder_config") or {})
+            embedder_config["embedding_dims"] = embedding_dims
+            embedder_kwargs["config"] = embedder_config
 
         config = MemoryConfig(
             llm=LLMConfig(provider=llm_provider, **llm_kwargs),

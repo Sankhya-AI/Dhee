@@ -16,7 +16,7 @@ class OllamaLLM(BaseLLM):
     def __init__(self, config: Optional[dict] = None):
         super().__init__(config)
         self.host = self.config.get("host") or os.getenv("OLLAMA_HOST", "http://localhost:11434")
-        self.model = self.config.get("model", "llama3.2")
+        self.model = self.config.get("model", "qwen3.6")
         self.temperature = self.config.get("temperature", 0.1)
         self.max_tokens = self.config.get("max_tokens", 1024)
 

@@ -16,7 +16,7 @@ class GeminiEmbedder(BaseEmbedder):
         if not self.api_key:
             raise ValueError("Gemini API key not provided. Set GEMINI_API_KEY or pass api_key in config.")
 
-        self.model = self.config.get("model", "gemini-embedding-001")
+        self.model = self.config.get("model", "gemini-embedding-2")
         self._client = genai.Client(api_key=self.api_key)
 
     def embed(self, text: str, memory_action: Optional[str] = None) -> List[float]:

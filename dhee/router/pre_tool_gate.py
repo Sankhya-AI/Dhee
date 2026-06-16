@@ -82,12 +82,20 @@ _ESCAPE_HINT = (
     "unset DHEE_ROUTER_ENFORCE)."
 )
 
+# Contract denials are governed by the repo's task-contract runtime, not the
+# router_enforce flag — point at the commands that actually change that state.
+_CONTRACT_HINT = (
+    " Recover with `dhee context task activate <task_id>` (bind a contract), "
+    "`dhee context task deactivate` (drop a stale one), or `dhee context task "
+    "enforce warn` (downgrade enforcement for this repo)."
+)
 
-def _deny(reason: str, steer: str) -> dict[str, Any]:
+
+def _deny(reason: str, steer: str, hint: str = _ESCAPE_HINT) -> dict[str, Any]:
     return {
         "permissionDecision": "deny",
         "reason": reason,
-        "additionalContext": steer + _ESCAPE_HINT,
+        "additionalContext": steer + hint,
     }
 
 
@@ -214,13 +222,18 @@ def _evaluate_contract_supervisor(tool: str, inp: dict[str, Any]) -> dict[str, A
         refusal = router_refusal(guard)
         codes = ", ".join(refusal.get("violation_codes") or [])
         reason = f"Contract supervisor denied {tool}: {codes or refusal.get('message')}"
+        compact = {
+            "message": refusal.get("message"),
+            "task_id": refusal.get("task_id"),
+            "repo": refusal.get("repo"),
+            "violations": refusal.get("violation_codes"),
+        }
         steer = (
-            "Activate a task contract with `dhee context task activate <task_id>` "
-            "or satisfy the compiled proof obligations before retrying. "
+            f"{refusal.get('message') or 'Active contract refused this tool call.'} "
             f"Violation codes: {codes or 'none'}. "
-            f"Decision: {json.dumps(refusal, sort_keys=True, default=str)[:1200]}"
+            f"Decision: {json.dumps(compact, sort_keys=True, default=str)[:400]}"
         )
-        return _deny(reason, steer)
+        return _deny(reason, steer, hint=_CONTRACT_HINT)
     except Exception as exc:
         if _enforcement_mode_for_input(inp) == "deny":
             reason = f"Contract supervisor unavailable for {tool}: {type(exc).__name__}"
@@ -229,7 +242,7 @@ def _evaluate_contract_supervisor(tool: str, inp: dict[str, Any]) -> dict[str, A
                 "cannot run while the supervisor is unavailable. "
                 f"Violation codes: CONTRACT_SUPERVISOR_UNAVAILABLE. Error: {exc}"
             )
-            return _deny(reason, steer)
+            return _deny(reason, steer, hint=_CONTRACT_HINT)
         return {}
 
 

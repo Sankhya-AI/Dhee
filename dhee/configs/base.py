@@ -21,7 +21,7 @@ def _dhee_data_dir() -> str:
 
 
 _VALID_VECTOR_PROVIDERS = {"memory", "sqlite_vec", "zvec"}
-_VALID_LLM_PROVIDERS = {"gemini", "openai", "nvidia", "ollama", "mock", "dhee"}
+_VALID_LLM_PROVIDERS = {"anthropic", "gemini", "openai", "nvidia", "ollama", "mock", "dhee"}
 _VALID_EMBEDDER_PROVIDERS = {"gemini", "openai", "nvidia", "ollama", "simple", "qwen"}
 
 
