@@ -331,7 +331,15 @@ def activate_contract_runtime(
     contract = compiled.get("contract") or {}
     task_id = str(contract.get("task_id") or "unknown")
     if isinstance(task_contract, dict):
-        contract_ref = task_id
+        # An inline contract has no on-disk source; persist it so later
+        # supervision calls can re-resolve contract_ref. Without this, the
+        # ref dangles and (in deny mode) every native tool call on the repo
+        # is refused with CONTRACT_SUPERVISOR_UNAVAILABLE — including the
+        # remediation commands themselves.
+        from dhee.task_contracts import _task_contract_root, _write_task_contract
+
+        persisted = _write_task_contract(compiled, _task_contract_root(repo_root) / task_id)
+        contract_ref = persisted["json"]
     else:
         source = Path(str(task_contract)).expanduser()
         contract_ref = str(source.resolve()) if source.exists() else str(task_contract)
@@ -684,6 +692,46 @@ def guard_router_call(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, An
             repo=repo_root,
             strict=bool(runtime.get("strict")),
         )
+    except FileNotFoundError as exc:
+        # The contract body referenced by the active runtime is gone. That is
+        # a permanent state, not an outage: enforcement against a missing
+        # contract can never succeed, and holding deny mode here deadlocks
+        # the repo (the recovery commands are themselves tool calls). Drop
+        # the stale runtime and let the call through with a recorded warning.
+        message = f"{type(exc).__name__}: {exc}"
+        diagnostics.append({
+            "code": "CONTRACT_REF_MISSING",
+            "message": message,
+            "tool_name": tool_name,
+            "repo": str(repo_root),
+        })
+        try:
+            deactivate_contract_runtime(repo=repo_root, reason=f"contract_ref_missing:{task_ref}")
+        except Exception:
+            pass
+        warning = (
+            f"Active contract {task_ref!r} no longer exists on disk; the stale "
+            "runtime was auto-deactivated and the tool call allowed."
+        )
+        _record_enforcement_warning(
+            repo_root,
+            tool_name=tool_name,
+            code="CONTRACT_REF_MISSING",
+            message=warning,
+            diagnostics=diagnostics,
+        )
+        return {
+            "format": CONTRACT_TOOL_GUARD_SCHEMA,
+            "active": False,
+            "allowed": True,
+            "repo": str(repo_root),
+            "task_id": str(runtime.get("task_id") or task_ref),
+            "tool_name": tool_name,
+            "proposed_action": action,
+            "warning": warning,
+            "diagnostics": diagnostics,
+            "enforcement": enforcement,
+        }
     except Exception as exc:
         message = f"{type(exc).__name__}: {exc}"
         diagnostics.append({
@@ -693,6 +741,37 @@ def guard_router_call(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, An
             "repo": str(repo_root),
         })
         if mode == "deny":
+            # Even in deny mode a supervisor outage must leave a recovery
+            # path open: read-only tools cannot violate a contract, and the
+            # dhee CLI is how the agent repairs the runtime state.
+            command = str(arguments.get("command") or "").strip()
+            recoverable = tool_name in _READ_TOOL_NAMES or tool_name in _GREP_TOOL_NAMES or (
+                tool_name in _BASH_TOOL_NAMES and command.startswith("dhee ")
+            )
+            if recoverable:
+                warning = (
+                    "Contract supervisor unavailable; deny mode allowed this "
+                    "read-only/remediation call."
+                )
+                _record_enforcement_warning(
+                    repo_root,
+                    tool_name=tool_name,
+                    code=CONTRACT_SUPERVISOR_UNAVAILABLE,
+                    message=warning,
+                    diagnostics=diagnostics,
+                )
+                return {
+                    "format": CONTRACT_TOOL_GUARD_SCHEMA,
+                    "active": True,
+                    "allowed": True,
+                    "repo": str(repo_root),
+                    "task_id": str(runtime.get("task_id") or task_ref),
+                    "tool_name": tool_name,
+                    "proposed_action": action,
+                    "warning": warning,
+                    "diagnostics": diagnostics,
+                    "enforcement": enforcement,
+                }
             return {
                 "format": CONTRACT_TOOL_GUARD_SCHEMA,
                 "active": True,
@@ -702,7 +781,11 @@ def guard_router_call(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, An
                 "tool_name": tool_name,
                 "proposed_action": action,
                 "error": CONTRACT_SUPERVISOR_UNAVAILABLE,
-                "message": "Contract supervisor could not load or execute; deny mode blocks the tool call.",
+                "message": (
+                    "Contract supervisor could not load or execute; deny mode "
+                    "blocks mutating tool calls. Recover with `dhee context task "
+                    "deactivate` or `dhee context task enforce warn`."
+                ),
                 "diagnostics": diagnostics,
                 "enforcement": enforcement,
                 "runtime": {
