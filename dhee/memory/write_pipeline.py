@@ -8,6 +8,7 @@ classify_memory_type, select_primary_text).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -45,6 +46,8 @@ from dhee.memory.vectors import build_index_vectors
 from dhee.utils.prompts import AGENT_MEMORY_EXTRACTION_PROMPT, MEMORY_EXTRACTION_PROMPT
 
 logger = logging.getLogger(__name__)
+
+_MAX_ENRICHMENT_ATTEMPTS = 3
 
 
 class MemoryWritePipeline:
@@ -316,6 +319,163 @@ class MemoryWritePipeline:
         except Exception as exc:
             logger.warning("%s for %s: %s", warning_prefix, memory_id, exc)
 
+    @staticmethod
+    def _context_messages_from_memory(memory: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+        raw = memory.get("conversation_context")
+        if isinstance(raw, list):
+            return [item for item in raw if isinstance(item, dict)]
+        if not isinstance(raw, str) or not raw.strip():
+            return None
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(parsed, list):
+            return None
+        return [item for item in parsed if isinstance(item, dict)]
+
+    @staticmethod
+    def _enrichment_attempts(metadata: Dict[str, Any]) -> int:
+        try:
+            return max(0, int(metadata.get("enrichment_attempts") or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _run_engram_extraction(
+        self,
+        *,
+        memory_id: str,
+        content: str,
+        mem_metadata: Dict[str, Any],
+        user_id: Optional[str],
+        context_messages: Optional[List[Dict[str, Any]]] = None,
+        strict_llm_failure: bool = False,
+    ) -> Tuple[bool, bool, Optional[Any]]:
+        """Run structured engram extraction and store resolver rows.
+
+        Returns ``(attempted, succeeded, engram)`` so callers can distinguish a
+        disabled extractor from an extractor that failed.
+        """
+        engram_extractor = self._engram_extractor
+        if not engram_extractor:
+            return False, False, None
+
+        try:
+            session_ctx = None
+            if context_messages:
+                session_ctx = {"recent_messages": context_messages[-5:]}
+            engram = engram_extractor.extract(
+                content=content,
+                session_context=session_ctx,
+                existing_metadata=mem_metadata,
+                user_id=user_id or "default",
+                strict_llm_failure=strict_llm_failure,
+            )
+            context_resolver = self._context_resolver
+            if context_resolver and engram:
+                context_resolver.store_engram(engram, memory_id)
+            if (
+                engram.prospective_scenes
+                and self._config.prospective_scene.enable_prospective_scenes
+                and self._store_prospective_scenes_fn
+            ):
+                self._store_prospective_scenes_fn(
+                    engram.prospective_scenes,
+                    memory_id,
+                    user_id or "default",
+                )
+            return True, True, engram
+        except Exception as exc:
+            logger.warning("Engram extraction failed for %s: %s", memory_id, exc)
+            return True, False, None
+
+    def _store_operational_event(
+        self,
+        *,
+        content: str,
+        mem_metadata: Dict[str, Any],
+        user_id: Optional[str],
+        agent_id: Optional[str],
+        source_app: Optional[str],
+        memory_id: Optional[str],
+    ) -> Dict[str, Any]:
+        """Store transport/tool signal as an episodic event without a memory row."""
+        owner_user_id = user_id or str(mem_metadata.get("user_id") or "default")
+        event_time = str(mem_metadata.get("event_time") or datetime.now(timezone.utc).isoformat())
+        event_seed = "|".join(
+            [
+                owner_user_id,
+                str(mem_metadata.get("source_event_id") or ""),
+                str(mem_metadata.get("kind") or ""),
+                content,
+            ]
+        )
+        digest = hashlib.sha256(event_seed.encode("utf-8")).hexdigest()
+        event_memory_id = memory_id or f"operational:{digest[:32]}"
+        tool_name = str(mem_metadata.get("tool") or mem_metadata.get("tool_name") or "").strip()
+        path = str(mem_metadata.get("path") or mem_metadata.get("source_path") or "").strip()
+        actor_id = str(
+            mem_metadata.get("actor_id")
+            or agent_id
+            or tool_name
+            or source_app
+            or mem_metadata.get("source_app")
+            or "agent"
+        ).strip()
+        actor_role = str(mem_metadata.get("actor_role") or ("tool" if tool_name else "agent")).strip()
+        event_kind = str(mem_metadata.get("kind") or mem_metadata.get("type") or "operational_event").strip()
+        entity_key = path or tool_name or actor_id
+        canonical_key = f"operational:{actor_id}:{event_kind}:{entity_key or digest[:12]}"
+        value_norm = " ".join(content.lower().split())[:500]
+
+        self._db.add_episodic_events(
+            [
+                {
+                    "id": f"{event_memory_id}:event",
+                    "memory_id": event_memory_id,
+                    "user_id": owner_user_id,
+                    "conversation_id": mem_metadata.get("conversation_id"),
+                    "session_id": mem_metadata.get("session_id"),
+                    "turn_id": mem_metadata.get("turn_id", 0),
+                    "actor_id": actor_id,
+                    "actor_role": actor_role,
+                    "event_time": event_time,
+                    "event_type": "operational_event",
+                    "canonical_key": canonical_key,
+                    "value_text": content,
+                    "value_num": None,
+                    "value_unit": None,
+                    "currency": None,
+                    "normalized_time_start": event_time,
+                    "normalized_time_end": event_time,
+                    "time_granularity": "instant",
+                    "entity_key": entity_key,
+                    "value_norm": value_norm,
+                    "confidence": mem_metadata.get("confidence", 0.8),
+                    "superseded_by": None,
+                }
+            ]
+        )
+        self._record_cost(
+            phase="write",
+            user_id=owner_user_id,
+            llm_calls=0.0,
+            input_tokens=0.0,
+            output_tokens=0.0,
+            embed_calls=0.0,
+        )
+        return {
+            "id": event_memory_id,
+            "memory": content,
+            "event": "EVENT",
+            "layer": "episodic",
+            "strength": 0.0,
+            "namespace": "operational",
+            "memory_type": "operational_event",
+            "episodic": True,
+            "stored_as": "episodic_event",
+        }
+
     # ------------------------------------------------------------------
     # Extracted public methods
     # ------------------------------------------------------------------
@@ -491,6 +651,16 @@ class MemoryWritePipeline:
         if quality.is_canonical:
             expiration_date = None
 
+        if quality.is_operational:
+            return self._store_operational_event(
+                content=content,
+                mem_metadata=mem_metadata,
+                user_id=user_id,
+                agent_id=agent_id,
+                source_app=source_app,
+                memory_id=memory_id,
+            )
+
         admission = evaluate_memory_candidate(
             content,
             mem_metadata,
@@ -526,6 +696,15 @@ class MemoryWritePipeline:
             initial_strength = enforce_quality_strength(initial_strength, quality)
             if quality.is_canonical:
                 expiration_date = None
+            if quality.is_operational:
+                return self._store_operational_event(
+                    content=content,
+                    mem_metadata=mem_metadata,
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    source_app=source_app,
+                    memory_id=memory_id,
+                )
 
         blocked = detect_sensitive_categories(content)
         # allow_sensitive: explicit caller opt-in, or caller explicitly provided
@@ -1051,29 +1230,14 @@ class MemoryWritePipeline:
         )
 
         # Dhee: Universal Engram extraction
-        engram_extractor = self._engram_extractor
-        if engram_extractor:
-            try:
-                session_ctx = None
-                if context_messages:
-                    session_ctx = {"recent_messages": context_messages[-5:]}
-                engram = engram_extractor.extract(
-                    content=content,
-                    session_context=session_ctx,
-                    existing_metadata=mem_metadata,
-                    user_id=user_id or "default",
-                )
-                context_resolver = self._context_resolver
-                if context_resolver:
-                    context_resolver.store_engram(engram, effective_memory_id)
-                if engram.prospective_scenes and self._config.prospective_scene.enable_prospective_scenes:
-                    self._store_prospective_scenes_fn(
-                        engram.prospective_scenes,
-                        effective_memory_id,
-                        user_id or "default",
-                    )
-            except Exception as e:
-                logger.warning("Engram extraction failed for %s: %s", effective_memory_id, e)
+        _engram_attempted, _engram_succeeded, engram = self._run_engram_extraction(
+            memory_id=effective_memory_id,
+            content=content,
+            mem_metadata=mem_metadata,
+            user_id=user_id,
+            context_messages=context_messages,
+            strict_llm_failure=False,
+        )
 
         # Dhee: Self-evolution — record extraction quality signal
         evolution_layer = self._evolution_layer
@@ -1081,7 +1245,7 @@ class MemoryWritePipeline:
             try:
                 engram_facts = None
                 engram_context = None
-                if engram_extractor and 'engram' in dir() and engram:  # noqa: F821
+                if _engram_succeeded and engram:
                     engram_facts = [f.to_dict() if hasattr(f, 'to_dict') else f for f in getattr(engram, 'facts', [])]
                     engram_context = getattr(engram, 'context', None)
                     if engram_context and hasattr(engram_context, '__dict__'):
@@ -1867,8 +2031,6 @@ class MemoryWritePipeline:
             warning_prefix="Batch fact embedding/insert failed",
         )
 
-        engram_extractor = self._engram_extractor
-        context_resolver = self._context_resolver
         for entry in record_entries:
             idx = entry["source_index"]
             record = entry["record"]
@@ -1886,22 +2048,14 @@ class MemoryWritePipeline:
                     warning_prefix="Profile update failed",
                 )
 
-            if engram_extractor:
-                try:
-                    engram = engram_extractor.extract(
-                        content=record.get("memory", ""),
-                        session_context=None,
-                        existing_metadata=record.get("metadata"),
-                        user_id=record.get("user_id") or user_id or "default",
-                    )
-                    if context_resolver and engram:
-                        context_resolver.store_engram(engram, record["id"])
-                except Exception as exc:
-                    logger.warning(
-                        "Engram extraction failed for %s: %s",
-                        record["id"],
-                        exc,
-                    )
+            self._run_engram_extraction(
+                memory_id=record["id"],
+                content=record.get("memory", ""),
+                mem_metadata=record.get("metadata") or {},
+                user_id=record.get("user_id") or user_id,
+                context_messages=None,
+                strict_llm_failure=False,
+            )
 
         if episodic_rows:
             sample_count = float(len(episodic_rows))
@@ -1932,9 +2086,17 @@ class MemoryWritePipeline:
         limit = batch_size * max_batches
         pending = self._db.get_pending_enrichment(user_id=user_id, limit=limit)
         if not pending:
-            return {"enriched_count": 0, "batches": 0, "remaining": 0}
+            return {
+                "enriched_count": 0,
+                "failed_count": 0,
+                "degraded_count": 0,
+                "batches": 0,
+                "remaining": 0,
+            }
 
         enriched_count = 0
+        failed_count = 0
+        degraded_count = 0
         batches_processed = 0
         unified = self._unified_enrichment
 
@@ -1983,6 +2145,9 @@ class MemoryWritePipeline:
                 mem_id = memory["id"]
                 mem_meta = memory.get("metadata", {}) or {}
                 mem_cats = memory.get("categories", []) or []
+                attempts = self._enrichment_attempts(mem_meta) + 1
+                mem_meta["enrichment_attempts"] = attempts
+                mem_meta["last_enrichment_attempt_at"] = datetime.now(timezone.utc).isoformat()
 
                 if enrichment:
                     if enrichment.echo_result:
@@ -2026,16 +2191,42 @@ class MemoryWritePipeline:
                                     }
                                 )
 
-                mem_meta["enrichment_status"] = "complete"
+                extraction_attempted, extraction_succeeded, _engram = self._run_engram_extraction(
+                    memory_id=mem_id,
+                    content=memory.get("memory", ""),
+                    mem_metadata=mem_meta,
+                    user_id=memory.get("user_id") or user_id,
+                    context_messages=self._context_messages_from_memory(memory),
+                    strict_llm_failure=True,
+                )
+                if extraction_attempted:
+                    status_ready = extraction_succeeded
+                else:
+                    status_ready = enrichment is not None
+
+                if status_ready:
+                    mem_meta["enrichment_status"] = "complete"
+                    mem_meta.pop("last_enrichment_error", None)
+                    next_status = "complete"
+                    enriched_count += 1
+                else:
+                    if attempts >= _MAX_ENRICHMENT_ATTEMPTS:
+                        next_status = "degraded"
+                        degraded_count += 1
+                    else:
+                        next_status = "failed"
+                        failed_count += 1
+                    mem_meta["enrichment_status"] = next_status
+                    mem_meta["last_enrichment_error"] = "deferred_enrichment_produced_no_structured_result"
+
                 db_updates.append(
                     {
                         "id": mem_id,
                         "metadata": mem_meta,
                         "categories": mem_cats,
-                        "enrichment_status": "complete",
+                        "enrichment_status": next_status,
                     }
                 )
-                enriched_count += 1
 
             self._insert_fact_vectors(
                 fact_entries=fact_entries,
@@ -2050,6 +2241,8 @@ class MemoryWritePipeline:
 
         return {
             "enriched_count": enriched_count,
+            "failed_count": failed_count,
+            "degraded_count": degraded_count,
             "batches": batches_processed,
             "remaining": remaining_count,
         }
@@ -2126,6 +2319,7 @@ class MemoryWritePipeline:
                        "project", "project_status", "project_tag",
                        "warroom", "warroom_message", "test_fixture",
                        "operational_event",
+                       "tool_observation", "trajectory", "utterance",
                        "screen_observation", "profile", "goal", "constraint",
                        "preference", "decision", "style", "product",
                        "product_philosophy"):

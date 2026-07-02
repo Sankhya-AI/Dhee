@@ -141,7 +141,8 @@ _SHELL_COMMAND_RE = re.compile(
     r"(?:/[\w .@%+=:,~/-]+|~/?[\w .@%+=:,~/-]*|\./[\w .@%+=:,~/-]+)\s+"
     r"(?:-m\s+)?(?:python[0-9.]*|pip[0-9.]*|pytest|uv|npm|pnpm|yarn|git|gh|sqlite3|curl|claude|codex|dhee|ruff|mypy|sed|rg|grep|ls|cat|echo|export)\b|"
     r"[A-Z_][A-Z0-9_]*=.*\b(?:python[0-9.]*|pytest|sqlite3|curl|git|echo)\b|"
-    r"(?:python[0-9.]*|pip[0-9.]*|pytest|ruff|mypy|sqlite3|curl|echo|export)\b|"
+    r"(?:pytest|ruff|mypy|sqlite3|curl|echo|export)\b|"
+    r"(?:python[0-9.]*|pip[0-9.]*)\s+(?:-|/|~|\.|[A-Za-z0-9_./-]*\.py\b|install\b|uninstall\b|freeze\b|list\b|show\b|check\b)|"
     r"time\s+\(|"
     r"uv\s+(?:run|sync|pip|tool|python)\b|"
     r"(?:npm|pnpm|yarn)\s+(?:run|test|install|build|lint|exec)\b|"
@@ -382,11 +383,14 @@ def _is_artifact_like_metadata(metadata: Mapping[str, Any]) -> bool:
 def _is_operational_event(content: str, metadata: Mapping[str, Any]) -> bool:
     """True for transport-level agent/tool events that are evidence, not belief."""
     kind = str(metadata.get("kind") or metadata.get("type") or "").strip().lower()
+    memory_type = str(metadata.get("memory_type") or "").strip().lower()
     tool = str(metadata.get("tool") or metadata.get("tool_name") or metadata.get("native_tool") or "").strip().lower()
     source = str(metadata.get("source") or metadata.get("source_type") or metadata.get("source_app") or "").strip().lower()
     success = metadata.get("success")
     text = " ".join(str(content or "").strip().split())
 
+    if memory_type in {"operational_event", "trajectory", "tool_observation"}:
+        return True
     if kind in {"file_touched", "tool_event", "tool_failure", "failure", "session_log", "codex_event", "claude_code_event"}:
         return True
     if source in {"claude_code_hook", "codex_hook", "session_log"}:

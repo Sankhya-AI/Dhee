@@ -1165,6 +1165,19 @@ class FullMemory(SmartMemory, SceneProfileMixin):
             max_batches=max_batches,
         )
 
+    def reextract(
+        self,
+        user_id: str = "default",
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        """Requeue complete memories that have no linked engram facts."""
+        if not hasattr(self.db, "requeue_complete_without_engram_facts"):
+            return {"requeued_count": 0, "reason": "db_requeue_unavailable"}
+        return self.db.requeue_complete_without_engram_facts(
+            user_id=user_id,
+            limit=limit,
+        )
+
     _normalize_bitemporal_value = staticmethod(normalize_bitemporal_value)
     _parse_bitemporal_datetime = classmethod(lambda cls, v: parse_bitemporal_datetime(v))
     _attach_bitemporal_metadata = classmethod(

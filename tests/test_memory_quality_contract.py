@@ -108,11 +108,10 @@ def test_operational_file_touch_is_evidence_not_personal_recall(tmp_path):
         infer=False,
     )["results"][0]
 
-    loaded = memory.get(operational["id"])
-    assert loaded["namespace"] == "operational"
-    assert loaded["memory_type"] == "operational_event"
-    assert loaded["strength"] <= 0.05
-    assert loaded["metadata"]["suppress_from_default_recall"] is True
+    assert operational["event"] == "EVENT"
+    assert operational["stored_as"] == "episodic_event"
+    assert operational["memory_type"] == "operational_event"
+    assert memory.get(operational["id"]) is None
 
     personal_results = memory.memory.search(
         "What do you remember about Chotu assistant goals preferences decisions?",
@@ -127,7 +126,15 @@ def test_operational_file_touch_is_evidence_not_personal_recall(tmp_path):
         limit=5,
         min_strength=0.0,
     )["results"]
-    assert operational["id"] in [row["id"] for row in operational_results]
+    assert operational["id"] not in [row["id"] for row in operational_results]
+
+    events = memory.memory.db.get_episodic_events(user_id="default", limit=20)
+    assert any(
+        row["memory_id"] == operational["id"]
+        and row["event_type"] == "operational_event"
+        and "/Users/example/project/src/app.py" in row["value_text"]
+        for row in events
+    )
     memory.close()
 
 
@@ -749,12 +756,15 @@ def test_weirdly_phrased_command_failure_is_quarantined(tmp_path):
     )
     memory_id = result["results"][0]["id"]
 
-    loaded = memory.get(memory_id)
-
-    assert loaded["namespace"] == "operational"
-    assert loaded["memory_type"] == "operational_event"
-    assert loaded["metadata"]["dhee_memory_class"] == "operational_event"
-    assert loaded["metadata"]["suppress_from_default_recall"] is True
+    assert result["results"][0]["event"] == "EVENT"
+    assert memory.get(memory_id) is None
+    events = memory.memory.db.get_episodic_events(user_id="default", limit=20)
+    assert any(
+        row["memory_id"] == memory_id
+        and row["event_type"] == "operational_event"
+        and "pytest tests/test_login.py" in row["value_text"]
+        for row in events
+    )
     memory.close()
 
 

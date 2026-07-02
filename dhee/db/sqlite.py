@@ -2192,21 +2192,97 @@ class FullSQLiteManager(
             )
 
     def get_pending_enrichment(self, user_id: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
-        """Return memories with enrichment_status='pending', ordered oldest first."""
+        """Return pending and retryable failed enrichment rows, oldest first."""
+        fetch_limit = max(1, int(limit)) * 4
         with self._get_connection() as conn:
             if user_id:
                 rows = conn.execute(
-                    "SELECT * FROM memories WHERE enrichment_status = 'pending' AND user_id = ? "
+                    "SELECT * FROM memories WHERE enrichment_status IN ('pending', 'failed') AND user_id = ? "
                     "AND tombstone = 0 ORDER BY created_at ASC LIMIT ?",
-                    (user_id, limit),
+                    (user_id, fetch_limit),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT * FROM memories WHERE enrichment_status = 'pending' "
+                    "SELECT * FROM memories WHERE enrichment_status IN ('pending', 'failed') "
                     "AND tombstone = 0 ORDER BY created_at ASC LIMIT ?",
-                    (limit,),
+                    (fetch_limit,),
                 ).fetchall()
-            return [self._row_to_dict(row) for row in rows]
+            retryable: List[Dict[str, Any]] = []
+            for row in rows:
+                memory = self._row_to_dict(row)
+                status = str(memory.get("enrichment_status") or "").lower()
+                metadata = memory.get("metadata") if isinstance(memory.get("metadata"), dict) else {}
+                attempts_raw = metadata.get("enrichment_attempts", 0)
+                try:
+                    attempts = int(attempts_raw or 0)
+                except (TypeError, ValueError):
+                    attempts = 0
+                if status == "pending" or attempts < 3:
+                    retryable.append(memory)
+                if len(retryable) >= max(1, int(limit)):
+                    break
+            return retryable
+
+    def requeue_complete_without_engram_facts(
+        self,
+        user_id: Optional[str] = None,
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        """Reopen complete semantic memories that have no linked engram facts."""
+        try:
+            with self._get_connection() as conn:
+                conn.execute("SELECT 1 FROM engram_facts LIMIT 0")
+        except Exception:
+            return {"requeued_count": 0, "reason": "engram_facts_unavailable"}
+
+        params: List[Any] = []
+        query = (
+            "SELECT m.* FROM memories m "
+            "LEFT JOIN engram_facts f ON f.memory_id = m.id "
+            "WHERE m.tombstone = 0 "
+            "AND m.enrichment_status = 'complete' "
+            "AND COALESCE(m.memory_type, 'semantic') != 'operational_event' "
+            "GROUP BY m.id HAVING COUNT(f.id) = 0 "
+            "ORDER BY m.created_at ASC LIMIT ?"
+        )
+        if user_id:
+            query = (
+                "SELECT m.* FROM memories m "
+                "LEFT JOIN engram_facts f ON f.memory_id = m.id "
+                "WHERE m.tombstone = 0 "
+                "AND m.enrichment_status = 'complete' "
+                "AND COALESCE(m.memory_type, 'semantic') != 'operational_event' "
+                "AND m.user_id = ? "
+                "GROUP BY m.id HAVING COUNT(f.id) = 0 "
+                "ORDER BY m.created_at ASC LIMIT ?"
+            )
+            params.append(user_id)
+        params.append(max(1, int(limit)))
+
+        rows: List[Dict[str, Any]] = []
+        with self._get_connection() as conn:
+            for row in conn.execute(query, params).fetchall():
+                rows.append(self._row_to_dict(row))
+
+        updates: List[Dict[str, Any]] = []
+        for memory in rows:
+            metadata = memory.get("metadata") if isinstance(memory.get("metadata"), dict) else {}
+            metadata = dict(metadata)
+            metadata["enrichment_attempts"] = 0
+            metadata.pop("last_enrichment_error", None)
+            metadata["reextract_queued_at"] = _utcnow_iso()
+            updates.append(
+                {
+                    "id": memory["id"],
+                    "metadata": metadata,
+                    "enrichment_status": "pending",
+                }
+            )
+        self.update_enrichment_bulk(updates)
+        return {
+            "requeued_count": len(updates),
+            "memory_ids": [item["id"] for item in updates],
+        }
 
     def update_enrichment_status(self, memory_id: str, status: str) -> None:
         """Mark a memory's enrichment_status (e.g. 'complete')."""

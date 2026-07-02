@@ -113,6 +113,7 @@ class EngramExtractor:
         user_profile: Optional[Dict[str, Any]] = None,
         existing_metadata: Optional[Dict[str, Any]] = None,
         user_id: str = "default",
+        strict_llm_failure: bool = False,
     ) -> UniversalEngram:
         """Extract structured engram with contextual anchoring.
 
@@ -129,6 +130,8 @@ class EngramExtractor:
             )
             if engram:
                 return engram
+            if strict_llm_failure:
+                raise RuntimeError("Engram LLM extraction produced no structured result")
 
         # Rule-based extraction
         return self._extract_rule_based(
@@ -330,13 +333,17 @@ class EngramExtractor:
             (r"(?:I|user)\s+(?:prefer|like|love|enjoy|use)\s+(.+?)(?:\.|$|,)", "prefers"),
             (r"(?:I|user)\s+(?:switched to|moved to|changed to)\s+(.+?)(?:\.|$|,)", "switched_to"),
             (r"(?:I|user)\s+(?:work at|work for|employed at)\s+(.+?)(?:\.|$|,)", "works_at"),
+            (r"(?:I|user|owner)\s+(?:live|lives|reside|resides)\s+in\s+(.+?)(?:\.|$|,)", "lives_in"),
+            (r"(?:my|user's|owner's)\s+(?:home|city|location)\s+is\s+(.+?)(?:\.|$|,)", "lives_in"),
+            (r"(?:my|user's|owner's)\s+(?:plan|goal)\s+is\s+to\s+(.+?)(?:\.|$|,)", "plans_to"),
+            (r"(?:I|user|owner)\s+(?:plan|plans|intend|intends)\s+to\s+(.+?)(?:\.|$|,)", "plans_to"),
             (r"(?:I|user)\s+(?:visited|went to|traveled to)\s+(.+?)(?:\.|$|,)", "visited"),
             (r"(?:I|user)\s+(?:bought|purchased)\s+(.+?)(?:\s+for\s+)?([\d,.]+)?\s*(\w+)?", "bought"),
         ]
         for pattern, predicate in preference_patterns:
             matches = re.finditer(pattern, content, re.IGNORECASE)
             for match in matches:
-                value = match.group(1).strip().rstrip(".")
+                value = self._clean_rule_value(match.group(1))
                 if len(value) > 100:
                     continue
                 fact = Fact(
@@ -359,6 +366,17 @@ class EngramExtractor:
                 facts.append(fact)
 
         return facts
+
+    @staticmethod
+    def _clean_rule_value(value: str) -> str:
+        text = str(value or "").strip().rstrip(".")
+        text = re.split(
+            r"\s+(?:and|but|while)\s+(?=(?:I|user|owner|my|user's|owner's)\b)",
+            text,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0]
+        return text.strip().rstrip(".")
 
     def _extract_entities_rules(self, content: str) -> List[EntityRef]:
         """Rule-based entity extraction."""

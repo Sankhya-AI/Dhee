@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [7.2.4] - 2026-07-02 - Clear-water memory enrichment
+
+- Deferred enrichment now runs structured engram extraction and marks honest
+  `failed` and `degraded` states instead of silently completing factless rows.
+- Operational tool, screen, and trajectory noise is stored as episodic events
+  instead of polluting semantic memory recall.
+- Added re-extraction support for complete memories that missed structured
+  facts, plus deterministic preference and plan extraction paths.
+
 ## [7.2.2] - 2026-06-06 - Split provider memory profiles
 
 - Added provider runtime profiles that let agent LLMs use OpenAI, Anthropic,

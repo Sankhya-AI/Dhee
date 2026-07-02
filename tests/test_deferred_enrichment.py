@@ -26,6 +26,7 @@ from dhee.configs.base import (
     CategoryMemConfig,
     EchoMemConfig,
     EmbedderConfig,
+    EngramExtractionConfig,
     EnrichmentConfig,
     KnowledgeGraphConfig,
     LLMConfig,
@@ -58,6 +59,7 @@ def _make_deferred_memory(tmpdir, defer=True, echo=False, categories=False):
             defer_enrichment=defer,
             context_window_turns=5,
         ),
+        engram_extraction=EngramExtractionConfig(use_llm_extraction=False),
         batch=BatchConfig(enable_batch=False),
     )
     return Memory(config)
@@ -419,6 +421,156 @@ class TestEnrichPending:
             # Verify they're now complete
             pending_after = m.db.get_pending_enrichment(user_id="test_user")
             assert len(pending_after) == 0
+            m.close()
+
+    def test_enrich_pending_writes_structured_facts(self):
+        """Deferred enrichment runs the same engram fact writer as inline adds."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            m = _make_deferred_memory(tmpdir)
+            result = m.add(
+                messages="I prefer Python for backend development",
+                user_id="test_user",
+                infer=False,
+            )
+            memory_id = result["results"][0]["id"]
+
+            enrich_result = m.enrich_pending(user_id="test_user", batch_size=10)
+            assert enrich_result["enriched_count"] == 1
+
+            with m.db._get_connection() as conn:
+                facts = [
+                    dict(row)
+                    for row in conn.execute(
+                        "SELECT subject, predicate, value FROM engram_facts WHERE memory_id = ?",
+                        (memory_id,),
+                    ).fetchall()
+                ]
+                preferences = [
+                    dict(row)
+                    for row in conn.execute(
+                        "SELECT subject, topic, value FROM engram_preferences WHERE memory_id = ?",
+                        (memory_id,),
+                    ).fetchall()
+                ]
+            assert {"subject": "user", "predicate": "prefers", "value": "Python for backend development"} in facts
+            assert {"subject": "user", "topic": "prefers", "value": "Python for backend development"} in preferences
+            m.close()
+
+    def test_enrich_pending_splits_multiple_personal_facts(self):
+        """Rule extraction keeps adjacent facts atomic instead of swallowing clauses."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            m = _make_deferred_memory(tmpdir)
+            result = m.add(
+                messages="I live in Pune and I prefer Python for backend development.",
+                user_id="test_user",
+                infer=False,
+            )
+            memory_id = result["results"][0]["id"]
+
+            enrich_result = m.enrich_pending(user_id="test_user", batch_size=10)
+            assert enrich_result["enriched_count"] == 1
+
+            with m.db._get_connection() as conn:
+                facts = [
+                    dict(row)
+                    for row in conn.execute(
+                        "SELECT subject, predicate, value FROM engram_facts WHERE memory_id = ?",
+                        (memory_id,),
+                    ).fetchall()
+                ]
+            assert {"subject": "user", "predicate": "lives_in", "value": "Pune"} in facts
+            assert {"subject": "user", "predicate": "prefers", "value": "Python for backend development"} in facts
+            m.close()
+
+    def test_enrich_pending_marks_failed_then_retries(self):
+        """A failed extraction is not recorded as complete and retries later."""
+        from dhee.core.engram import Fact, UniversalEngram
+
+        class FailingExtractor:
+            def extract(self, **_kwargs):
+                raise RuntimeError("provider down")
+
+        class WorkingExtractor:
+            def extract(self, **_kwargs):
+                fact = Fact(subject="user", predicate="lives_in", value="Bangalore")
+                fact.canonical_key = fact.make_canonical_key()
+                return UniversalEngram(raw_content="Owner lives in Bangalore", user_id="test_user", facts=[fact])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            m = _make_deferred_memory(tmpdir)
+            result = m.add(
+                messages="Owner lives in Bangalore",
+                user_id="test_user",
+                infer=False,
+            )
+            memory_id = result["results"][0]["id"]
+            m._engram_extractor = FailingExtractor()
+
+            first = m.enrich_pending(user_id="test_user", batch_size=10)
+            assert first["enriched_count"] == 0
+            assert first["failed_count"] == 1
+            failed = m.db.get_memory(memory_id)
+            assert failed["enrichment_status"] == "failed"
+            assert failed["metadata"]["enrichment_attempts"] == 1
+            assert m.db.get_pending_enrichment(user_id="test_user", limit=10)[0]["id"] == memory_id
+
+            m._engram_extractor = WorkingExtractor()
+            second = m.enrich_pending(user_id="test_user", batch_size=10)
+            assert second["enriched_count"] == 1
+            complete = m.db.get_memory(memory_id)
+            assert complete["enrichment_status"] == "complete"
+
+            with m.db._get_connection() as conn:
+                fact_count = conn.execute(
+                    "SELECT COUNT(*) AS cnt FROM engram_facts WHERE memory_id = ?",
+                    (memory_id,),
+                ).fetchone()["cnt"]
+            assert fact_count == 1
+            m.close()
+
+    def test_enrich_pending_degrades_after_three_failed_attempts(self):
+        """Failed rows drain to degraded after the bounded retry budget."""
+        class FailingExtractor:
+            def extract(self, **_kwargs):
+                raise RuntimeError("provider down")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            m = _make_deferred_memory(tmpdir)
+            result = m.add(
+                messages="Owner lives in Bangalore",
+                user_id="test_user",
+                infer=False,
+            )
+            memory_id = result["results"][0]["id"]
+            m._engram_extractor = FailingExtractor()
+
+            for _ in range(3):
+                m.enrich_pending(user_id="test_user", batch_size=10)
+
+            memory = m.db.get_memory(memory_id)
+            assert memory["enrichment_status"] == "degraded"
+            assert memory["metadata"]["enrichment_attempts"] == 3
+            assert m.db.get_pending_enrichment(user_id="test_user", limit=10) == []
+            m.close()
+
+    def test_reextract_requeues_complete_memories_without_facts(self):
+        """Backlog repair reopens complete rows that have no engram_facts."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            m = _make_deferred_memory(tmpdir)
+            result = m.add(
+                messages="Owner lives in Bangalore",
+                user_id="test_user",
+                infer=False,
+            )
+            memory_id = result["results"][0]["id"]
+            m.db.update_enrichment_status(memory_id, "complete")
+
+            reextract = m.reextract(user_id="test_user", limit=10)
+            assert reextract["requeued_count"] == 1
+            assert reextract["memory_ids"] == [memory_id]
+            memory = m.db.get_memory(memory_id)
+            assert memory["enrichment_status"] == "pending"
+            assert memory["metadata"]["enrichment_attempts"] == 0
             m.close()
 
     def test_enrich_pending_respects_batch_size(self):

@@ -356,6 +356,7 @@ class Engram:
         scope: Optional[str] = None,
         source_app: Optional[str] = None,
         infer: bool = False,
+        context_messages: Optional[List[Dict[str, str]]] = None,
     ) -> Dict[str, Any]:
         """Add a memory.
 
@@ -391,6 +392,7 @@ class Engram:
             scope=scope,
             source_app=source_app,
             infer=infer,
+            context_messages=context_messages,
         )
 
     def search(
@@ -673,6 +675,14 @@ class Engram:
             max_batches=max_batches,
         )
 
+    def reextract(
+        self,
+        user_id: str = "default",
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        """Requeue complete memories that have no structured engram facts."""
+        return self.memory.reextract(user_id=user_id, limit=limit)
+
     def close(self) -> None:
         """Release runtime resources held by the underlying memory engine."""
         self._memory.close()
@@ -743,6 +753,7 @@ class Dhee:
         content: str,
         user_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        context_messages: Optional[List[Dict[str, str]]] = None,
     ) -> Dict[str, Any]:
         """Store a fact, preference, or observation.
 
@@ -766,7 +777,13 @@ class Dhee:
         if tier != "smriti":
             meta["tier"] = tier
 
-        result = self._engram.add(content, user_id=uid, infer=False, metadata=meta or None)
+        result = self._engram.add(
+            content,
+            user_id=uid,
+            infer=False,
+            metadata=meta or None,
+            context_messages=context_messages,
+        )
         response: Dict[str, Any] = {"stored": True}
         memory_id = None
         if isinstance(result, dict):
@@ -799,6 +816,14 @@ class Dhee:
         if intention:
             response["detected_intention"] = intention.to_dict()
         return response
+
+    def reextract(
+        self,
+        user_id: Optional[str] = None,
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        """Requeue complete memories that have no structured engram facts."""
+        return self._engram.reextract(user_id=user_id or self._user_id, limit=limit)
 
     def sweep_admission(
         self,

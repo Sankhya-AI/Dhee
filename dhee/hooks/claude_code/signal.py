@@ -111,6 +111,8 @@ def _write_signal(
         "tool": tool_name,
         "path": path,
         "success": success,
+        "memory_type": "operational_event",
+        "source_app": "claude_code",
     }
 
 
@@ -149,6 +151,8 @@ def _shell_signal(
         "kind": "failure",
         "tool": tool_name,
         "success": False,
+        "memory_type": "operational_event",
+        "source_app": "claude_code",
     }
 
 
